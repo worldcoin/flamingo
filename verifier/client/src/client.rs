@@ -13,12 +13,6 @@ use pontifex::{ChannelConsumer, ChannelDomain};
 use crate::config::Config;
 use crate::error::Error;
 
-/// Path of the assignment endpoint.
-const ASSIGNMENT_PATH: &str = "/v1/enclave-assignment";
-
-/// Path of the match endpoint.
-const MATCHES_PATH: &str = "/v1/matches";
-
 /// Error code the host uses for a request that did not open.
 const REASSIGN_REQUIRED: &str = "reassign_required";
 
@@ -71,11 +65,36 @@ impl FaceVerifierClient {
             .build()
             .map_err(Error::Transport)?;
 
+        Self::with_http_client(config, http)
+    }
+
+    /// Builds a client using an externally configured HTTP client.
+    ///
+    /// The supplied client controls transport settings such as default headers, proxies,
+    /// cookies, and timeouts; timeout values from `config` are not applied to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the configuration is invalid.
+    pub fn with_http_client(config: Config, http: reqwest::Client) -> Result<Self, Error> {
         Ok(Self {
             verifier: config.verifier()?,
             http,
             config,
         })
+    }
+
+    /// Creates the assignment request without sending it.
+    ///
+    /// Callers may customize the returned builder before passing it to
+    /// [`Self::request_assignment_with`].
+    #[must_use]
+    pub fn build_assignment_request(&self) -> reqwest::RequestBuilder {
+        let url = format!(
+            "{}/v1/enclave-assignment",
+            self.config.host_url().as_str().trim_end_matches('/')
+        );
+        self.http.post(url)
     }
 
     /// Requests an assignment and returns it only if its attestation verifies.
@@ -85,11 +104,20 @@ impl FaceVerifierClient {
     /// Returns [`Error`] if the request fails, the host answers with an error status,
     /// or the attestation document does not verify.
     pub async fn request_assignment(&self) -> Result<VerifiedAssignment, Error> {
-        let url = format!(
-            "{}{ASSIGNMENT_PATH}",
-            self.config.host_url().as_str().trim_end_matches('/')
-        );
-        let response = self.http.post(url).send().await.map_err(Error::Request)?;
+        self.request_assignment_with(self.build_assignment_request()).await
+    }
+
+    /// Sends a caller-customizable assignment request and verifies its response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the request fails, the host answers with an error status,
+    /// or the attestation document does not verify.
+    pub async fn request_assignment_with(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<VerifiedAssignment, Error> {
+        let response = request.send().await.map_err(Error::Request)?;
 
         let status = response.status();
         if !status.is_success() {
@@ -119,6 +147,35 @@ impl FaceVerifierClient {
         })
     }
 
+    /// Creates a sealed match request without sending it.
+    ///
+    /// Callers may customize the returned builder before passing it to
+    /// [`Self::request_match_with`]. The returned opener must be passed alongside that builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if serializing or sealing the request fails.
+    pub fn build_match_request(
+        &self,
+        assignment: &VerifiedAssignment,
+        inputs: &MatchInputs,
+    ) -> Result<(reqwest::RequestBuilder, pontifex::ResponseOpener), Error> {
+        let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
+        let (sealed, opener) = assignment
+            .consumer()
+            .seal_to_enclave(&plaintext)
+            .map_err(Error::Channel)?;
+        let url = format!(
+            "{}/v1/matches",
+            self.config.host_url().as_str().trim_end_matches('/')
+        );
+        let request = self.http.post(url).json(&MatchRequestBody {
+            ciphertext: STANDARD.encode(sealed),
+        });
+
+        Ok((request, opener))
+    }
+
     /// Runs a match against the enclave `assignment` names.
     ///
     /// [`MatchResult::Failed`] is a normal return, not an error. A statement is verified against the
@@ -134,33 +191,23 @@ impl FaceVerifierClient {
         assignment: &VerifiedAssignment,
         inputs: &MatchInputs,
     ) -> Result<MatchResult, Error> {
-        self.request_match_with_consumer(assignment.consumer(), inputs)
-            .await
+        let (request, opener) = self.build_match_request(assignment, inputs)?;
+        self.request_match_with(request, opener).await
     }
 
-    async fn request_match_with_consumer(
+    /// Sends a caller-customizable match request and verifies its response.
+    ///
+    /// The `request` and `opener` must come from the same call to [`Self::build_match_request`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the request fails or its response cannot be verified.
+    pub async fn request_match_with(
         &self,
-        consumer: &ChannelConsumer,
-        inputs: &MatchInputs,
+        request: reqwest::RequestBuilder,
+        opener: pontifex::ResponseOpener,
     ) -> Result<MatchResult, Error> {
-        let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
-        let (sealed, opener) = consumer
-            .seal_to_enclave(&plaintext)
-            .map_err(Error::Channel)?;
-
-        let url = format!(
-            "{}{MATCHES_PATH}",
-            self.config.host_url().as_str().trim_end_matches('/')
-        );
-        let response = self
-            .http
-            .post(url)
-            .json(&MatchRequestBody {
-                ciphertext: STANDARD.encode(sealed),
-            })
-            .send()
-            .await
-            .map_err(Error::Request)?;
+        let response = request.send().await.map_err(Error::Request)?;
 
         let status = response.status();
         if !status.is_success() {
