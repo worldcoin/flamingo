@@ -15,7 +15,7 @@ use axum::{
 };
 use flamingo_verifier_worker_protocol::{
     COMPARE_PATH, CONTENT_TYPE, CompareRequest, ComparisonScores, MAX_RESPONSE_BYTES, READY_PATH,
-    WorkerReady, WorkerResult, encode_message,
+    WorkerProtocolError, WorkerReady, WorkerResult, encode_message,
 };
 use flamingo_verifier_worker_rpc::{
     WorkerClient, WorkerClientConfig, WorkerClientError, WorkerServerConfig, WorkerServerError,
@@ -179,7 +179,9 @@ fn ready_router() -> Router {
 
 #[tokio::test]
 async fn real_server_round_trip_and_inclusive_scores() {
-    let (owner, client, server) = start(client_config(2), server_config(2), |_| {
+    let (owner, client, server) = start(client_config(2), server_config(2), |request| {
+        assert_eq!(request, images(0));
+
         Ok(WorkerResult::Compared(ComparisonScores {
             live_similarity: -1.0,
             challenge_similarity: 1.0,
@@ -198,6 +200,35 @@ async fn real_server_round_trip_and_inclusive_scores() {
         client.wait_unavailable().await,
         WorkerClientError::Closed
     ));
+}
+
+#[tokio::test]
+async fn oversized_encoded_request_is_rejected_locally_without_harming_session() {
+    let mut config = client_config(1);
+    config.max_request_bytes = 100;
+    let (owner, client, server) = start(config, server_config(1), |request| {
+        assert_eq!(
+            request,
+            images(1),
+            "rejected request must not reach the worker"
+        );
+
+        Ok(WorkerResult::Compared(SCORES))
+    })
+    .await;
+
+    let mut oversized = images(0);
+    oversized.credential_image = vec![0; config.max_image_bytes];
+    assert!(matches!(
+        client.compare(oversized).await,
+        Err(WorkerClientError::RequestEncoding(
+            WorkerProtocolError::TooLarge
+        ))
+    ));
+    assert!(client.is_available());
+    assert_eq!(client.compare(images(1)).await.unwrap(), SCORES);
+
+    shutdown(owner, server).await;
 }
 
 #[tokio::test]

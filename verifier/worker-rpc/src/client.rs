@@ -1,10 +1,8 @@
 use std::{num::NonZeroU16, range::RangeInclusive, sync::Arc, time::Duration};
 
 use flamingo_verifier_worker_protocol::{
-    COMPARE_PATH, CompareRequest, ComparisonScores, READY_PATH, WORKER_PROTOCOL_VERSION,
-    WorkerProtocolError, WorkerReady, encode_message,
+    CompareRequest, ComparisonScores, WORKER_PROTOCOL_VERSION, WorkerProtocolError,
 };
-use hyper_util::rt::TokioIo;
 use tokio::{
     net::UnixStream,
     sync::{Semaphore, mpsc, oneshot, watch},
@@ -13,7 +11,10 @@ use tokio::{
 };
 use tracing::Instrument;
 
-use crate::{http, session};
+use crate::{
+    http::{self, WorkerHttpClient},
+    session,
+};
 
 /// Broker-side admission, payload and deadline limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,14 +68,17 @@ impl WorkerSession {
         config.validate()?;
 
         let deadline = Instant::now() + config.handshake_timeout;
-        let (sender, connection) = timeout_at(
+        let (http_client, connection) = timeout_at(
             deadline,
-            http::client_builder(config.max_in_flight.get(), config.request_timeout)
-                .handshake(TokioIo::new(stream)),
+            WorkerHttpClient::connect(
+                stream,
+                config.max_in_flight.get(),
+                config.max_request_bytes,
+                config.request_timeout,
+            ),
         )
         .await
-        .map_err(|_| WorkerClientError::HandshakeTimeout)?
-        .map_err(WorkerClientError::transport)?;
+        .map_err(|_| WorkerClientError::HandshakeTimeout)??;
 
         let (commands, receiver) = mpsc::channel(usize::from(config.max_in_flight.get()));
         let (stop, stopped) = oneshot::channel();
@@ -83,7 +87,7 @@ impl WorkerSession {
         let task = tokio::spawn(
             session::run(
                 connection,
-                sender.clone(),
+                http_client.clone(),
                 receiver,
                 stopped,
                 status_sender,
@@ -96,9 +100,8 @@ impl WorkerSession {
             task: Some(task),
         };
 
-        let startup = async {
-            let ready: WorkerReady =
-                http::exchange(sender, http::request(READY_PATH, Vec::new())).await?;
+        let startup = async move {
+            let ready = http_client.ready(deadline).await?;
 
             if ready.protocol_version != WORKER_PROTOCOL_VERSION {
                 return Err(WorkerClientError::IncompatibleProtocol);
@@ -248,13 +251,11 @@ impl WorkerClient {
             .map_err(|_| WorkerClientError::AtCapacity)?;
         let admitted_at = Instant::now();
         let deadline = admitted_at + self.config.request_timeout;
-        let payload = encode_message(&request, self.config.max_request_bytes)
-            .map_err(WorkerClientError::RequestEncoding)?;
 
         let (reply, response) = oneshot::channel();
         self.commands
             .try_send(session::Command {
-                request: http::request(COMPARE_PATH, payload),
+                request,
                 deadline,
                 admitted_at,
                 reply,

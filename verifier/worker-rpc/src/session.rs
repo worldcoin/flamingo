@@ -1,20 +1,17 @@
 use std::{future::Future, range::RangeInclusive, sync::Arc};
 
-use axum::body::Bytes;
-use flamingo_verifier_worker_protocol::{ComparisonScores, WorkerResult};
-use http_body_util::Full;
-use hyper::{Request, client::conn::http2::SendRequest};
+use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores, WorkerResult};
 use tokio::{
     sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
     task::JoinSet,
-    time::{Instant, timeout_at},
+    time::Instant,
 };
 use tracing::Instrument;
 
-use crate::{WorkerClientError, http};
+use crate::{WorkerClientError, http::WorkerHttpClient};
 
 pub(crate) struct Command {
-    pub request: Request<Full<Bytes>>,
+    pub request: CompareRequest,
     pub deadline: Instant,
     pub admitted_at: Instant,
     pub reply: oneshot::Sender<Result<ComparisonScores, WorkerClientError>>,
@@ -23,8 +20,8 @@ pub(crate) struct Command {
 }
 
 pub(crate) async fn run(
-    connection: impl Future<Output = Result<(), hyper::Error>>,
-    sender: SendRequest<Full<Bytes>>,
+    connection: impl Future<Output = Result<(), WorkerClientError>>,
+    http_client: WorkerHttpClient,
     mut commands: mpsc::Receiver<Command>,
     mut stopped: oneshot::Receiver<WorkerClientError>,
     status: watch::Sender<Option<WorkerClientError>>,
@@ -42,14 +39,13 @@ pub(crate) async fn run(
                 Some(Err(error)) => break WorkerClientError::Task(Arc::new(error)),
                 None => unreachable!("nonempty task set"),
             },
-            result = &mut connection => break result.err()
-                .map_or(WorkerClientError::Unavailable, WorkerClientError::transport),
+            result = &mut connection => break result.err().unwrap_or(WorkerClientError::Unavailable),
             result = &mut stopped => break result.unwrap_or(WorkerClientError::Closed),
             command = commands.recv() => {
                 let Some(command) = command else { break WorkerClientError::Closed };
 
                 let span = command.span.clone();
-                tasks.spawn(compare(sender.clone(), command, score_range, status.clone()).instrument(span));
+                tasks.spawn(compare(http_client.clone(), command, score_range, status.clone()).instrument(span));
             }
         }
     };
@@ -67,7 +63,7 @@ pub(crate) async fn run(
 }
 
 async fn compare(
-    sender: SendRequest<Full<Bytes>>,
+    http_client: WorkerHttpClient,
     command: Command,
     score_range: RangeInclusive<f32>,
     status: watch::Sender<Option<WorkerClientError>>,
@@ -76,10 +72,9 @@ async fn compare(
         return Err(publish_failure(&status, WorkerClientError::RequestTimeout));
     }
 
-    let result = timeout_at(command.deadline, http::exchange(sender, command.request))
+    let result = http_client
+        .compare(command.request, command.deadline)
         .await
-        .map_err(|_| WorkerClientError::RequestTimeout)
-        .and_then(|result| result)
         .and_then(|result| match result {
             WorkerResult::AnalysisFailed => Err(WorkerClientError::AnalysisFailed),
             WorkerResult::Compared(scores)
@@ -91,14 +86,18 @@ async fn compare(
             WorkerResult::Compared(_) => Err(WorkerClientError::InvalidScore),
         });
 
-    metrics::counter!("worker_rpc.comparisons", "result" => result.as_ref().err().map_or("success", WorkerClientError::failure_class)).increment(1);
-    metrics::histogram!("worker_rpc.comparison_seconds")
-        .record(command.admitted_at.elapsed().as_secs_f64());
+    if !matches!(&result, Err(WorkerClientError::RequestEncoding(_))) {
+        metrics::counter!("worker_rpc.comparisons", "result" => result.as_ref().err().map_or("success", WorkerClientError::failure_class)).increment(1);
+        metrics::histogram!("worker_rpc.comparison_seconds")
+            .record(command.admitted_at.elapsed().as_secs_f64());
+    }
 
     if let Err(error) = &result
         && !matches!(
             error,
-            WorkerClientError::AtCapacity | WorkerClientError::AnalysisFailed
+            WorkerClientError::AtCapacity
+                | WorkerClientError::AnalysisFailed
+                | WorkerClientError::RequestEncoding(_)
         )
     {
         return Err(publish_failure(&status, error.clone()));
