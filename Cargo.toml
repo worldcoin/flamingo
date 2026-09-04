@@ -9,6 +9,8 @@ members = [
     "verifier/host",
     "verifier/protocol",
     "di/enclave",
+    "verifier/worker-rpc",
+    "verifier/worker-protocol",
     "di/host",
 ]
 resolver = "3"
@@ -38,6 +40,7 @@ flamingo-verifier-protocol = { version = "0.3.0", path = "verifier/protocol" }
 flamingo-verifier-sealed-types = { version = "0.3.0", path = "verifier/sealed-types" }
 eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
 face-engine = { git = "https://github.com/worldcoin/biometric-engines", rev = "face-engine-v2.16.0", default-features = false, features = ["tract"] }
+flamingo-verifier-worker-protocol = { path = "verifier/worker-protocol" }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"
