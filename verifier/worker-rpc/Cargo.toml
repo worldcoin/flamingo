@@ -7,22 +7,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-axum.workspace = true
-axum.features = ["http2", "tokio"]
 flamingo-verifier-worker-protocol.workspace = true
-http-body-util.workspace = true
-hyper.workspace = true
-hyper.features = ["client", "server", "http2"]
-hyper-util.workspace = true
-hyper-util.features = ["tokio", "service"]
 metrics.workspace = true
-serde.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-tokio.features = ["sync"]
 tracing.workspace = true
-
-[dev-dependencies]
-futures-util.workspace = true
-tokio.workspace = true
-tokio.features = ["sync", "test-util", "io-util"]

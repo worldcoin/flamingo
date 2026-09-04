@@ -1,67 +1,75 @@
 use flamingo_verifier_worker_protocol::{
-    CompareRequest, WorkerProtocolError, WorkerReady, decode_message, encode_message,
+    CompareRequest, WorkerProtocolError, decode_message, encode_message,
 };
 
 const LIMIT: usize = 1024;
 
-fn ready() -> WorkerReady {
-    WorkerReady {
-        protocol_version: 1,
-        max_in_flight: 2,
+/// Builds the smallest nonempty three-image comparison.
+fn request() -> CompareRequest {
+    CompareRequest {
+        credential_image: vec![1],
+        live_image: vec![2],
+        challenge_image: vec![3],
     }
 }
 
 #[test]
-fn startup_has_stable_cbor_bytes() {
-    let bytes = b"\xa2pprotocol_version\x01mmax_in_flight\x02";
-    assert_eq!(encode_message(&ready(), LIMIT).unwrap(), bytes);
+/// Pins the shared byte-string request encoding.
+fn comparison_has_stable_cbor_bytes() {
+    let bytes = b"\xa3pcredential_image\x41\x01jlive_image\x41\x02ochallenge_image\x41\x03";
+    assert_eq!(encode_message(&request(), LIMIT).unwrap(), bytes);
     assert_eq!(
-        decode_message::<WorkerReady>(bytes, LIMIT).unwrap(),
-        ready()
+        decode_message::<CompareRequest>(bytes, LIMIT).unwrap(),
+        request()
     );
 }
 
 #[test]
+/// Rejects every incomplete CBOR body.
 fn every_truncated_payload_is_rejected() {
-    let payload = encode_message(&ready(), LIMIT).unwrap();
+    let payload = encode_message(&request(), LIMIT).unwrap();
     for end in 0..payload.len() {
-        assert!(decode_message::<WorkerReady>(&payload[..end], LIMIT).is_err());
+        assert!(decode_message::<CompareRequest>(&payload[..end], LIMIT).is_err());
     }
 }
 
 #[test]
+/// Applies the same byte budget when encoding and decoding.
 fn exact_limit_is_accepted_and_oversize_is_rejected() {
-    let payload = encode_message(&ready(), LIMIT).unwrap();
-    assert_eq!(encode_message(&ready(), payload.len()).unwrap(), payload);
+    let payload = encode_message(&request(), LIMIT).unwrap();
+    assert_eq!(encode_message(&request(), payload.len()).unwrap(), payload);
     assert!(matches!(
-        encode_message(&ready(), payload.len() - 1),
+        encode_message(&request(), payload.len() - 1),
         Err(WorkerProtocolError::TooLarge)
     ));
     assert!(matches!(
-        decode_message::<WorkerReady>(&payload, payload.len() - 1),
+        decode_message::<CompareRequest>(&payload, payload.len() - 1),
         Err(WorkerProtocolError::TooLarge)
     ));
 }
 
 #[test]
+/// Rejects ambiguous or malformed request encodings.
 fn malformed_empty_trailing_unknown_and_duplicate_fields_are_rejected() {
-    let mut trailing = encode_message(&ready(), LIMIT).unwrap();
+    let mut trailing = encode_message(&request(), LIMIT).unwrap();
     trailing.push(0);
-    for payload in [
-        Vec::new(),
-        vec![0xff],
-        trailing,
-        b"\xa3pprotocol_version\x01mmax_in_flight\x02ax\x00".to_vec(),
-        b"\xa3pprotocol_version\x01mmax_in_flight\x02mmax_in_flight\x02".to_vec(),
-    ] {
+    let mut unknown = encode_message(&request(), LIMIT).unwrap();
+    unknown[0] = 0xa4;
+    unknown.extend_from_slice(b"ax\x00");
+    let mut duplicate = encode_message(&request(), LIMIT).unwrap();
+    duplicate[0] = 0xa4;
+    duplicate.extend_from_slice(b"jlive_image\x41\x02");
+
+    for payload in [Vec::new(), vec![0xff], trailing, unknown, duplicate] {
         assert!(matches!(
-            decode_message::<WorkerReady>(&payload, LIMIT),
+            decode_message::<CompareRequest>(&payload, LIMIT),
             Err(WorkerProtocolError::Malformed)
         ));
     }
 }
 
 #[test]
+/// Round-trips images while redacting their contents.
 fn images_round_trip_without_pixels_in_debug() {
     let request = CompareRequest {
         credential_image: b"private-image".to_vec(),
@@ -80,6 +88,7 @@ fn images_round_trip_without_pixels_in_debug() {
 }
 
 #[test]
+/// Rejects hostile nested length declarations.
 fn malicious_inner_lengths_do_not_control_allocation() {
     for encoded in [
         b"\xa3pcredential_image\x9b\xff\xff\xff\xff\xff\xff\xff\xff".as_slice(),
@@ -90,6 +99,7 @@ fn malicious_inner_lengths_do_not_control_allocation() {
 }
 
 #[test]
+/// Bounds decoding work for deeply nested CBOR.
 fn recursion_is_bounded() {
     let mut payload = vec![0x81; 100];
     payload.push(0);
@@ -100,13 +110,14 @@ fn recursion_is_bounded() {
 }
 
 #[test]
+/// Rejects disabled byte limits explicitly.
 fn zero_limits_are_explicit_errors() {
     assert!(matches!(
-        encode_message(&ready(), 0),
+        encode_message(&request(), 0),
         Err(WorkerProtocolError::InvalidLimit)
     ));
     assert!(matches!(
-        decode_message::<WorkerReady>(&[], 0),
+        decode_message::<CompareRequest>(&[], 0),
         Err(WorkerProtocolError::InvalidLimit)
     ));
 }

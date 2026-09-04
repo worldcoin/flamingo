@@ -1,18 +1,17 @@
 use std::{
     fs::File,
     io,
-    num::NonZeroU16,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     process::Command,
     range::RangeInclusive,
+    thread,
     time::{Duration, Instant},
 };
 
 use flamingo_verifier_worker_process::{WorkerProcess, WorkerProcessConfig, WorkerProcessError};
 use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
 use flamingo_verifier_worker_rpc::{WorkerClientConfig, WorkerClientError};
-use tokio::time::{sleep, timeout};
 
 const PEER: &str = env!("CARGO_BIN_EXE_worker-process-test-peer");
 const WAIT: Duration = Duration::from_secs(5);
@@ -21,12 +20,12 @@ const SCORES: ComparisonScores = ComparisonScores {
     challenge_similarity: 0.9,
 };
 
+/// Keeps subprocess scheduling separate from intentionally short comparison deadlines.
 fn config() -> WorkerProcessConfig {
     WorkerProcessConfig {
         rpc: WorkerClientConfig {
-            max_in_flight: NonZeroU16::new(4).unwrap(),
-            handshake_timeout: Duration::from_secs(2),
-            request_timeout: Duration::from_secs(2),
+            first_request_timeout: Duration::from_secs(3),
+            request_timeout: Duration::from_secs(1),
             max_request_bytes: 1024,
             max_image_bytes: 100,
             score_range: RangeInclusive {
@@ -34,15 +33,17 @@ fn config() -> WorkerProcessConfig {
                 last: 1.0,
             },
         },
-        shutdown_timeout: Duration::from_millis(300),
+        shutdown_timeout: Duration::from_millis(100),
         reap_timeout: Duration::from_secs(2),
     }
 }
 
+/// Launches only the explicitly built fixture executable.
 fn spawn(mode: &str, config: WorkerProcessConfig) -> WorkerProcess {
     WorkerProcess::spawn(Path::new(PEER), &[mode], config).unwrap()
 }
 
+/// Selects fixture behavior with an otherwise valid comparison.
 fn images(id: u8) -> CompareRequest {
     CompareRequest {
         credential_image: vec![id; 8],
@@ -51,9 +52,10 @@ fn images(id: u8) -> CompareRequest {
     }
 }
 
+/// Confirms the supervisor already reaped this exact child.
 fn assert_reaped(pid: u32) {
     let mut status = 0;
-    // SAFETY: This exact PID was created by this test; WNOHANG never blocks.
+    // SAFETY: This test created the exact PID; WNOHANG never blocks.
     assert_eq!(
         unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) },
         -1,
@@ -65,18 +67,18 @@ fn assert_reaped(pid: u32) {
     );
 }
 
-async fn wait_reaped(pid: u32) {
-    timeout(WAIT, async {
-        // kill(0) only checks existence; it never signals or reaps the process.
-        while unsafe { libc::kill(pid as i32, 0) } == 0 {
-            sleep(Duration::from_millis(10)).await;
-        }
-        assert_reaped(pid);
-    })
-    .await
-    .unwrap();
+/// Observes background cleanup without racing the supervisor to reap the child.
+fn wait_reaped(pid: u32) {
+    let deadline = Instant::now() + WAIT;
+    // SAFETY: Signal zero probes existence; it never signals or reaps a process.
+    while unsafe { libc::kill(pid as i32, 0) } == 0 {
+        assert!(Instant::now() < deadline, "worker cleanup timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_reaped(pid);
 }
 
+/// Finds the comparison error preserved through forced termination or secondary cleanup failures.
 fn rpc_cause(error: &WorkerProcessError) -> Option<&WorkerClientError> {
     match error {
         WorkerProcessError::Rpc(error) => Some(error),
@@ -88,222 +90,130 @@ fn rpc_cause(error: &WorkerProcessError) -> Option<&WorkerClientError> {
 }
 
 #[test]
-fn launch_before_runtime_and_round_trip() {
-    let worker = spawn("normal", config());
+/// The entire launch, comparison and shutdown path works without Tokio or a handshake.
+fn sequential_round_trips_and_analysis_recovery() {
+    let mut worker = spawn("normal", config());
     let pid = worker.id();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    runtime.block_on(async {
-        let (worker, client) = timeout(WAIT, worker.connect()).await.unwrap().unwrap();
-        assert_eq!(client.compare(images(1)).await.unwrap(), SCORES);
-        assert!(matches!(
-            client.compare(images(250)).await,
-            Err(WorkerClientError::AnalysisFailed)
-        ));
-        assert!(client.is_available());
-        assert!(
-            timeout(WAIT, worker.shutdown())
-                .await
-                .unwrap()
-                .unwrap()
-                .success()
-        );
-        assert!(!client.is_available());
-    });
-    assert_reaped(pid);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_callers_share_a_real_process() {
-    let worker = spawn("normal", config());
-    let pid = worker.id();
-    let (worker, client) = worker.connect().await.unwrap();
-    let mut calls = tokio::task::JoinSet::new();
-    for id in 0..4 {
-        let client = client.clone();
-        calls.spawn(async move { client.compare(images(id)).await });
+    for id in 1..=10 {
+        assert_eq!(worker.compare(images(id)).unwrap(), SCORES);
     }
-    while let Some(result) = timeout(WAIT, calls.join_next()).await.unwrap() {
-        assert_eq!(result.unwrap().unwrap(), SCORES);
-    }
-    worker.shutdown().await.unwrap();
-    assert_reaped(pid);
-}
-
-#[tokio::test]
-async fn cancellation_retains_capacity_until_inference_finishes() {
-    let mut config = config();
-    config.rpc.max_in_flight = NonZeroU16::new(1).unwrap();
-    let (worker, client) = spawn("normal", config).connect().await.unwrap();
-    let pid = worker.id();
-    let mut call = Box::pin(client.compare(images(253)));
-    tokio::select! {
-        result = &mut call => panic!("slow comparison finished early: {result:?}"),
-        () = tokio::task::yield_now() => {},
-    }
-    drop(call);
     assert!(matches!(
-        client.compare(images(0)).await,
-        Err(WorkerClientError::AtCapacity)
+        worker.compare(images(250)),
+        Err(WorkerProcessError::Rpc(WorkerClientError::AnalysisFailed))
     ));
-
-    timeout(WAIT, async {
-        loop {
-            match client.compare(images(0)).await {
-                Err(WorkerClientError::AtCapacity) => sleep(Duration::from_millis(10)).await,
-                result => {
-                    assert_eq!(result.unwrap(), SCORES);
-                    break;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap();
-    worker.shutdown().await.unwrap();
+    assert_eq!(worker.compare(images(1)).unwrap(), SCORES);
+    assert!(worker.try_wait().unwrap().is_none());
+    assert!(worker.shutdown().unwrap().success());
     assert_reaped(pid);
 }
 
-#[tokio::test]
-async fn startup_failures_are_reaped() {
-    for mode in ["startup-exit", "bad-version", "startup-stall"] {
-        let mut config = config();
-        if mode == "startup-stall" {
-            config.rpc.handshake_timeout = Duration::from_millis(200);
-        }
-        let worker = spawn(mode, config);
-        let pid = worker.id();
-        let error = timeout(WAIT, worker.connect()).await.unwrap().unwrap_err();
-        match mode {
-            "startup-exit" => assert!(
-                matches!(error, WorkerProcessError::Exited(status) if status.code() == Some(23)),
-                "{error:?}"
-            ),
-            "bad-version" => assert!(matches!(
-                rpc_cause(&error),
-                Some(WorkerClientError::IncompatibleProtocol)
-            )),
-            _ => assert!(matches!(
-                rpc_cause(&error),
-                Some(WorkerClientError::HandshakeTimeout)
-            )),
-        }
-        assert_reaped(pid);
-    }
-}
-
-#[tokio::test]
-async fn startup_budget_starts_at_launch_even_without_connect() {
-    let mut config = config();
-    config.rpc.handshake_timeout = Duration::from_millis(50);
-    let worker = spawn("startup-stall", config);
+#[test]
+/// Idle time consumes no initialization allowance; loading happens inside the first comparison.
+fn lazy_initialization_uses_first_comparison_budget() {
+    let mut limits = config();
+    limits.rpc.request_timeout = Duration::from_millis(80);
+    let mut worker = spawn("lazy-load", limits);
     let pid = worker.id();
-    let error = timeout(WAIT, worker.wait()).await.unwrap().unwrap_err();
+    thread::sleep(Duration::from_millis(120));
+    assert!(worker.try_wait().unwrap().is_none());
+    assert_eq!(worker.compare(images(1)).unwrap(), SCORES);
+    assert_eq!(worker.compare(images(2)).unwrap(), SCORES);
+
+    let error = worker.compare(images(253)).unwrap_err();
     assert!(matches!(
         rpc_cause(&error),
-        Some(WorkerClientError::HandshakeTimeout)
+        Some(WorkerClientError::RequestTimeout)
     ));
+    assert!(worker.try_wait().is_err());
     assert_reaped(pid);
 }
 
-#[tokio::test]
-async fn dropping_or_cancelling_startup_cleans_up() {
-    let worker = spawn("startup-stall", config());
+#[test]
+/// A hung initializer is allowed to be idle but is killed when the first request expires.
+fn first_request_timeout_kills_and_reaps_uninitialized_worker() {
+    let mut limits = config();
+    limits.rpc.first_request_timeout = Duration::from_millis(100);
+    limits.rpc.request_timeout = limits.rpc.first_request_timeout;
+    let mut worker = spawn("startup-stall", limits);
     let pid = worker.id();
-    let mut connection = Box::pin(worker.connect());
-    tokio::select! {
-        result = &mut connection => panic!("stalled startup completed: {result:?}"),
-        () = tokio::task::yield_now() => {},
-    }
-    drop(connection);
-    wait_reaped(pid).await;
-
-    let worker = spawn("startup-stall", config());
-    let pid = worker.id();
-    drop(worker);
-    wait_reaped(pid).await;
-}
-
-#[tokio::test]
-async fn crash_invalidates_all_clients_and_reaps() {
-    let (worker, client) = spawn("normal", config()).connect().await.unwrap();
-    let pid = worker.id();
-    let clone = client.clone();
-    assert!(
-        timeout(WAIT, client.compare(images(251)))
-            .await
-            .unwrap()
-            .is_err()
-    );
-    timeout(WAIT, clone.wait_unavailable()).await.unwrap();
-    assert!(!clone.is_available());
-    let error = timeout(WAIT, worker.wait()).await.unwrap().unwrap_err();
-    assert!(matches!(error, WorkerProcessError::Exited(status) if status.code() == Some(42)));
-    assert_reaped(pid);
-}
-
-#[tokio::test]
-async fn fatal_rpc_errors_stop_the_child() {
-    for mode in ["malformed", "invalid-score", "normal"] {
-        let mut config = config();
-        config.rpc.request_timeout = Duration::from_millis(200);
-        let (worker, client) = spawn(mode, config).connect().await.unwrap();
-        let pid = worker.id();
-        let id = if mode == "normal" { 252 } else { 0 };
-        let error = timeout(WAIT, client.compare(images(id)))
-            .await
-            .unwrap()
-            .unwrap_err();
-        match mode {
-            "malformed" => assert!(matches!(error, WorkerClientError::Protocol(_))),
-            "invalid-score" => assert!(matches!(error, WorkerClientError::InvalidScore)),
-            _ => assert!(matches!(error, WorkerClientError::RequestTimeout)),
-        }
-        assert!(!client.is_available());
-        let process_error = timeout(WAIT, worker.wait()).await.unwrap().unwrap_err();
-        assert_eq!(
-            rpc_cause(&process_error).unwrap().failure_class(),
-            error.failure_class()
-        );
-        assert_reaped(pid);
-    }
-}
-
-#[tokio::test]
-async fn unresponsive_shutdown_is_killed_and_reported() {
-    let (worker, client) = spawn("ignore-shutdown", config()).connect().await.unwrap();
-    let pid = worker.id();
-    let error = timeout(WAIT, worker.shutdown()).await.unwrap().unwrap_err();
+    thread::sleep(Duration::from_millis(150));
+    assert!(worker.try_wait().unwrap().is_none());
+    let started = Instant::now();
+    let error = worker.compare(images(1)).unwrap_err();
     assert!(matches!(
         error,
         WorkerProcessError::ForcedTermination { .. }
     ));
-    assert!(!client.is_available());
+    assert!(matches!(
+        rpc_cause(&error),
+        Some(WorkerClientError::RequestTimeout)
+    ));
+    assert!(started.elapsed() < WAIT);
     assert_reaped(pid);
 }
 
-#[tokio::test]
-async fn cancelled_stuck_inference_still_times_out_and_is_reaped() {
-    let mut config = config();
-    config.rpc.request_timeout = Duration::from_millis(200);
-    let (worker, client) = spawn("normal", config).connect().await.unwrap();
+#[test]
+/// Child exit invalidates later calls even when there has never been a comparison.
+fn idle_exit_is_observed_and_cached() {
+    let mut worker = spawn("startup-exit", config());
     let pid = worker.id();
-    let mut call = Box::pin(client.compare(images(252)));
-    tokio::select! {
-        result = &mut call => panic!("stuck inference completed: {result:?}"),
-        () = tokio::task::yield_now() => {},
-    }
-    drop(call);
+    let error = worker.wait().unwrap_err();
+    assert!(matches!(error, WorkerProcessError::Exited(status) if status.code() == Some(23)));
+    assert!(
+        matches!(worker.try_wait(), Err(WorkerProcessError::Exited(status)) if status.code() == Some(23))
+    );
+    assert!(worker.compare(images(1)).is_err());
+    assert_reaped(pid);
+}
 
+#[test]
+/// Unexpected model exits, initialization errors and panics are never analysis failures.
+fn model_crash_and_failure_are_reaped() {
+    for id in [251, 254, 255] {
+        let mut worker = spawn("normal", config());
+        let pid = worker.id();
+        let error = worker.compare(images(id)).unwrap_err();
+        assert!(matches!(error, WorkerProcessError::Exited(status) if !status.success()));
+        assert_reaped(pid);
+    }
+}
+
+#[test]
+/// Invalid worker replies invalidate the connection and stop the process before returning.
+fn fatal_rpc_errors_stop_the_child() {
+    for mode in ["malformed", "oversized", "truncated", "invalid-score"] {
+        let mut worker = spawn(mode, config());
+        let pid = worker.id();
+        let error = worker.compare(images(1)).unwrap_err();
+        assert!(
+            matches!(
+                rpc_cause(&error),
+                Some(
+                    WorkerClientError::Protocol(_)
+                        | WorkerClientError::Transport(_)
+                        | WorkerClientError::InvalidScore
+                )
+            ),
+            "{error:?}"
+        );
+        assert!(worker.compare(images(2)).is_err());
+        assert_reaped(pid);
+    }
+}
+
+#[test]
+/// A stuck callback cannot outlive its comparison deadline plus bounded process cleanup.
+fn stuck_inference_is_killed_without_a_runtime() {
+    let mut limits = config();
+    limits.rpc.request_timeout = Duration::from_millis(80);
+    let mut worker = spawn("normal", limits);
+    let pid = worker.id();
+    worker.compare(images(1)).unwrap();
+    let error = worker.compare(images(252)).unwrap_err();
     assert!(matches!(
-        timeout(WAIT, client.wait_unavailable()).await.unwrap(),
-        WorkerClientError::RequestTimeout
+        error,
+        WorkerProcessError::ForcedTermination { .. }
     ));
-    let error = timeout(WAIT, worker.wait()).await.unwrap().unwrap_err();
     assert!(matches!(
         rpc_cause(&error),
         Some(WorkerClientError::RequestTimeout)
@@ -311,57 +221,62 @@ async fn cancelled_stuck_inference_still_times_out_and_is_reaped() {
     assert_reaped(pid);
 }
 
-#[tokio::test]
-async fn connecting_twice_is_an_error_and_still_cleans_up() {
-    let (worker, client) = spawn("normal", config()).connect().await.unwrap();
+#[test]
+/// Losing the caller's thread handle does not cancel an already-running comparison or its cleanup.
+fn detached_caller_still_finishes_deadline_cleanup() {
+    let mut limits = config();
+    limits.rpc.first_request_timeout = Duration::from_millis(100);
+    limits.rpc.request_timeout = limits.rpc.first_request_timeout;
+    let mut worker = spawn("startup-stall", limits);
     let pid = worker.id();
+    let (finished, result) = std::sync::mpsc::channel();
+    drop(thread::spawn(move || {
+        finished.send(worker.compare(images(1))).unwrap()
+    }));
+    let error = result.recv_timeout(WAIT).unwrap().unwrap_err();
     assert!(matches!(
-        worker.connect().await,
-        Err(WorkerProcessError::AlreadyConnected)
+        rpc_cause(&error),
+        Some(WorkerClientError::RequestTimeout)
     ));
-    timeout(WAIT, client.wait_unavailable()).await.unwrap();
-    wait_reaped(pid).await;
-}
-
-#[tokio::test]
-async fn dropping_owner_closes_clones_and_reaps() {
-    let (worker, client) = spawn("ignore-shutdown", config()).connect().await.unwrap();
-    let pid = worker.id();
-    drop(worker);
-    timeout(WAIT, client.wait_unavailable()).await.unwrap();
-    wait_reaped(pid).await;
+    assert_reaped(pid);
 }
 
 #[test]
-fn runtime_shutdown_does_not_abandon_the_process() {
-    let worker = spawn("ignore-shutdown", config());
-    let pid = worker.id();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let (worker, client) = runtime.block_on(worker.connect()).unwrap();
-    drop(runtime);
-    assert!(!client.is_available());
-
-    let observer = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    observer.block_on(wait_reaped(pid));
-    drop(worker);
+/// Drop requests cleanup even before the first comparison and without a runtime to drive it.
+fn owner_drop_cleans_up_idle_and_uninitialized_children() {
+    for mode in ["normal", "startup-stall", "ignore-shutdown"] {
+        let worker = spawn(mode, config());
+        let pid = worker.id();
+        drop(worker);
+        wait_reaped(pid);
+    }
 }
 
-#[tokio::test]
-async fn extra_descriptors_and_environment_are_not_inherited() {
+#[test]
+/// A process that ignores graceful IPC shutdown is killed and reported as a failure.
+fn unresponsive_shutdown_is_explicit() {
+    let mut worker = spawn("ignore-shutdown", config());
+    let pid = worker.id();
+    worker.compare(images(1)).unwrap();
+    assert!(matches!(
+        worker.shutdown(),
+        Err(WorkerProcessError::ForcedTermination { .. })
+    ));
+    assert_reaped(pid);
+}
+
+#[test]
+/// Launch does not inherit environment variables or unintended non-CLOEXEC descriptors.
+fn extra_descriptors_and_environment_are_not_inherited() {
     let file = File::open("/dev/null").unwrap();
-    // Deliberately non-CLOEXEC and high-numbered, without changing any other thread's FD.
+    // SAFETY: Duplicates this test's descriptor without modifying any other descriptor.
     let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 512) };
     assert!(fd >= 512);
     let descriptor = unsafe { OwnedFd::from_raw_fd(fd) };
-    let (worker, _) = spawn("normal", config()).connect().await.unwrap();
+    let mut worker = spawn("normal", config());
     let pid = worker.id();
-    worker.shutdown().await.unwrap();
+    worker.compare(images(1)).unwrap();
+    worker.shutdown().unwrap();
     assert_reaped(pid);
     assert!(
         unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) } >= 0,
@@ -370,6 +285,7 @@ async fn extra_descriptors_and_environment_are_not_inherited() {
 }
 
 #[test]
+/// Closed standard descriptors cannot clobber FD 3 or Rust's exec-error pipe.
 fn closed_standard_descriptors_do_not_clobber_ipc_or_exec_errors() {
     let mut child = Command::new(PEER)
         .arg("closed-stdio-parent")
@@ -386,11 +302,12 @@ fn closed_standard_descriptors_do_not_clobber_ipc_or_exec_errors() {
             child.wait().unwrap();
             panic!("isolated launch probe timed out");
         }
-        std::thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
 #[test]
+/// Configuration and executable failures are returned before handing back a process owner.
 fn invalid_configuration_and_exec_failure_are_explicit() {
     let mut invalid = config();
     invalid.shutdown_timeout = Duration::ZERO;

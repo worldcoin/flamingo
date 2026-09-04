@@ -11,6 +11,7 @@ use std::{
 
 use crate::WorkerProcessError;
 
+/// Launches with only null stdio and the broker socket at FD 3 surviving exec.
 pub(crate) fn spawn(
     program: &Path,
     args: &[impl AsRef<OsStr>],
@@ -63,9 +64,7 @@ pub(crate) fn spawn(
         .map_err(|e| WorkerProcessError::io("launch worker", e))
 }
 
-// The pinned Nitro kernel is 4.14: close_range(CLOEXEC) is not available.
-// Enumerate the trusted procfs directly, without allocating after fork or silently
-// falling back to an fd-count cap that could miss a high-numbered descriptor.
+/// Supports Nitro's 4.14 kernel without allocating after fork or hiding enumeration failures.
 #[cfg(target_os = "linux")]
 fn mark_linux_descriptors() -> io::Result<()> {
     // SAFETY: Constant path and flags, no borrowed data retained by the syscall.
@@ -117,6 +116,7 @@ fn mark_linux_descriptors() -> io::Result<()> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+/// Validates Linux directory records before visiting numeric descriptors above FD 3.
 fn visit_linux_descriptors(
     mut entries: &[u8],
     mut visit: impl FnMut(i32) -> io::Result<()>,
@@ -160,6 +160,7 @@ fn visit_linux_descriptors(
 mod tests {
     use super::*;
 
+    /// Builds one synthetic linux_dirent64 record.
     fn entry(name: &[u8]) -> Vec<u8> {
         let mut bytes = vec![0; 20 + name.len()];
         let length = (bytes.len() as u16).to_ne_bytes();
@@ -169,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    /// Enumeration must not assume ordered or low-numbered descriptors.
     fn linux_enumeration_handles_high_and_unordered_descriptors() {
         let entries = [
             entry(b"."),
@@ -188,6 +190,7 @@ mod tests {
     }
 
     #[test]
+    /// Malformed records and failed descriptor updates abort enumeration.
     fn linux_enumeration_rejects_invalid_records_and_propagates_failures() {
         let valid = entry(b"42");
         for length in 1..valid.len() {

@@ -44,12 +44,9 @@ eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
 face-engine = { git = "https://github.com/worldcoin/biometric-engines", rev = "face-engine-v2.16.0", default-features = false, features = ["tract"] }
 flamingo-verifier-worker-protocol = { path = "verifier/worker-protocol" }
 flamingo-verifier-worker-rpc = { path = "verifier/worker-rpc" }
-futures-util = "0.3"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"
-hyper = "1.11"
-hyper-util = "0.1"
 image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "0.2"
 metrics = "0.24"

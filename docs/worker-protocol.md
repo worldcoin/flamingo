@@ -1,58 +1,47 @@
-# Worker RPC v1
+# Worker comparisons
 
-`worker-protocol` defines CBOR payloads; `worker-rpc` provides a Hyper client and
-reusable Axum server. The private worker supplies an initialized, synchronous
-comparison callback. Three encoded images go in; two scores or `AnalysisFailed`
-come out. Embeddings and broker keys never cross the socket.
+Blocking RPC over an inherited Unix socket (FD 3): four-byte big-endian length,
+then CBOR. One `CompareRequest` (three encoded images) produces one `WorkerResult`
+(two scores or `AnalysisFailed`). No handshake, ready message, version, request IDs,
+pipelining, retries or reconnect.
 
-- HTTP/2 over one inherited Unix socket (intended FD 3); no listener, retries or reconnect.
-  `GET /v1/ready` checks version/capacity; `POST /v1/compare` uses `application/cbor`.
-- Capacity is the smaller broker/worker limit. Admission rejects immediately.
-  HTTP/2 handles framing, multiplexing and response correlation.
-- Bodies, encoded images and deadlines are bounded independently on both sides.
-  Replies are at most 1 KiB; headers 4 KiB; frames 16 KiB; flow-control windows and
-  per-stream send buffers 65,535 bytes. CBOR rejects unknown/trailing/malformed data.
-- Local input errors, HTTP 429 and `AnalysisFailed` are nonfatal. Unexpected status
-  (including every 5xx), invalid scores, malformed replies, EOF and hard timeouts
-  permanently invalidate the session. Score bounds use std `RangeInclusive<f32>`.
-- Caller cancellation retains its admission slot, validation and original deadline.
-  The server holds its compute permit inside inference, including after stream resets.
-- `WorkerSession::connect` returns an owner and clonable client. Only the owner
-  shuts down the session; dropping it also closes all clients. Await `shutdown()`
-  for supervisor errors. Worker-side socket-close errors remain explicit.
-- `serve_worker` waits a bounded time for actual inference during cleanup.
-  `ShutdownTimeout` requires killing the worker process; blocking inference cannot
-  be forcibly cancelled by Tokio.
-- `is_available`/`wait_unavailable` expose broker readiness, not liveness.
-  `/v1/ready` is startup capability discovery, not an ongoing model-health probe.
-- Metrics use `worker_rpc.*`; spans redact images and inherit local trace context.
-  Production integration must export them to Datadog, propagate traces across IPC,
-  wire readiness, and add user-impact alerts.
+- `WorkerClient::new` takes a connected socket. `compare(&mut self, ...)` completes
+  before another request starts; the server runs an inline `FnMut` comparator.
+- `first_request_timeout` covers the first comparison, including lazy initialization.
+  Later calls use `request_timeout`. Idle time consumes neither budget.
+- Both sides bound lengths before allocation, encoded images and CBOR decoding.
+  Replies are at most 1 KiB; scores use std `RangeInclusive<f32>`.
+  The model adapter must bound decoded pixels.
+- Partial I/O never resets a deadline. Local input errors and `AnalysisFailed`
+  preserve the connection. Timeout, broken transport, malformed replies and invalid
+  scores permanently invalidate it. Model faults/panics must make the worker exit.
 
-## Process lifecycle
+## Process ownership
 
-`worker-process` launches an absolute executable with FD 3, empty environment and
-null stdio. Call `WorkerProcess::spawn` before serving threads or broker-key creation,
-then `connect` inside Tokio. The startup budget begins at launch; OS spawn is synchronous.
+`WorkerProcess::spawn` launches an absolute executable with empty environment,
+null stdio and FD 3. Call before serving threads or generating broker keys.
+The owner exposes blocking `compare`, `try_wait`, `wait` and `shutdown`.
+`wait` observes termination without requesting it and may wait indefinitely.
 
-One supervisor thread owns the child independently of Tokio. Fatal RPC errors, exit,
-startup expiry or owner drop close IPC; cleanup waits a bounded grace period, then
-kills and reaps. Forced termination is an error. `ReapTimeout` is fatal: background
-reaping continues where possible, but the enclosing process must not keep serving.
-Await `shutdown()` for cleanup results; `wait()` observes termination without stopping it.
+An independent thread supervises the child. Fatal comparisons, exit or owner drop
+trigger bounded grace, kill and reap. Fatal `compare` calls also await cleanup.
+A stuck comparator cannot interrupt itself; the broker must kill the process.
+Forced termination and reap failures remain errors, including background reaping
+that outlives its deadline. Only the direct child is supervised.
 
-Linux requires readable `/proc/self/fd`; enumeration failures abort launch. This
-supports the pinned Nitro 4.14 kernel. macOS enumeration is for development. Only the direct worker is
-supervised; this is not process-tree confinement. Worker stdio is deliberately discarded
-to avoid exposing images/secrets; diagnostics use RPC errors, PID and exit status.
-Lifecycle metrics use `worker_process.*`; Datadog export remains production integration work.
+Linux FD sanitization requires readable `/proc/self/fd` and supports Nitro 4.14.
+macOS is for development. This is not yet a sandbox; worker output is discarded.
 
-Minijail, decoded-image limits, signed provisioning, private worker packaging, production
-integration and public-image reproducibility verification remain separate work.
-Replace broker and worker together for v1. No production path changes yet.
+## Integration
 
-`cargo test --locked -p flamingo-verifier-worker-protocol -p flamingo-verifier-worker-rpc`
+Launch success is not model readiness. A hung initializer without startup traffic
+is detected by the first comparison. Production readiness must reflect known failures.
+Async brokers must admit only one blocking operation off executor threads and reject
+excess work; caller cancellation must retain admission and ownership until completion.
 
-`cargo test --locked -p flamingo-verifier-worker-process --all-features`
+Metrics use `worker_rpc.*` and `worker_process.*`, including first-comparison latency.
+Datadog export, cross-process traces, readiness/alerts, Minijail, private packaging,
+provisioning and reproducible-image verification remain separate work.
+Deploy and roll back broker/worker as a tested pair. Pontifex/production paths are unchanged.
 
-The `test-worker` feature builds the subprocess fixture; Linux workspace CI enables it.
+Test: `cargo test --locked -p flamingo-verifier-worker-protocol -p flamingo-verifier-worker-rpc -p flamingo-verifier-worker-process --all-features`.

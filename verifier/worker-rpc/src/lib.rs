@@ -1,9 +1,8 @@
-//! Bounded HTTP/2 RPC over one inherited Unix socket; no listener or reconnect.
+//! Blocking, single-request CBOR RPC over an inherited Unix socket; no handshake or retry.
 
 mod client;
-mod http;
 mod server;
-mod session;
+mod transport;
 
-pub use client::{WorkerClient, WorkerClientConfig, WorkerClientError, WorkerSession};
+pub use client::{WorkerClient, WorkerClientConfig, WorkerClientError};
 pub use server::{WorkerServerConfig, WorkerServerError, serve_worker};

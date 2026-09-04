@@ -2,16 +2,6 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, de::Visitor};
 
-/// Startup capabilities of an initialized worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerReady {
-    /// Protocol version implemented by the worker.
-    pub protocol_version: u16,
-    /// Maximum number of requests the worker is prepared to process concurrently.
-    pub max_in_flight: u16,
-}
-
 /// Inputs required for one three-way face comparison.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,7 +26,7 @@ pub struct CompareRequest {
     pub challenge_image: Vec<u8>,
 }
 
-/// Results returned by protocol version 1 workers.
+/// The only worker replies; infrastructure failures terminate the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum WorkerResult {
     /// The worker produced both required similarity scores.
@@ -70,6 +60,7 @@ impl CompareRequest {
 }
 
 impl fmt::Debug for CompareRequest {
+    /// Redacts image contents.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CompareRequest")
@@ -80,17 +71,19 @@ impl fmt::Debug for CompareRequest {
     }
 }
 
-// Accept only CBOR byte strings, never arrays with attacker-controlled allocation hints.
+/// Rejects arrays with attacker-controlled allocation hints.
 fn image_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
     /// Accepts byte buffers while rejecting sequence-based image encodings.
     struct Bytes;
     impl Visitor<'_> for Bytes {
         type Value = Vec<u8>;
 
+        /// Describes the accepted CBOR type without exposing image data.
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("an encoded image byte string")
         }
 
+        /// Takes ownership of the bounded decoder's byte buffer.
         fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Vec<u8>, E> {
             Ok(bytes)
         }

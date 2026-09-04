@@ -1,32 +1,21 @@
 use std::{
-    error::Error, io, num::NonZeroU16, os::fd::FromRawFd, path::Path, range::RangeInclusive,
-    sync::Arc, time::Duration,
+    error::Error,
+    io::{self, Read, Write},
+    os::{fd::FromRawFd, unix::net::UnixStream},
+    path::Path,
+    range::RangeInclusive,
+    time::Duration,
 };
 
-use axum::{
-    Router,
-    body::Body,
-    http::{Response, header},
-    routing::{get, post},
-};
 use flamingo_verifier_worker_process::{WorkerProcess, WorkerProcessConfig};
-use flamingo_verifier_worker_protocol::{
-    COMPARE_PATH, CONTENT_TYPE, ComparisonScores, MAX_RESPONSE_BYTES, READY_PATH, WorkerReady,
-    WorkerResult, encode_message,
-};
-use flamingo_verifier_worker_rpc::{
-    WorkerClientConfig, WorkerServerConfig, WorkerServerError, serve_worker,
-};
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    service::TowerToHyperService,
-};
+use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores, WorkerResult};
+use flamingo_verifier_worker_rpc::{WorkerClientConfig, WorkerServerConfig, serve_worker};
 
+/// Bounds isolated descriptor-allocation probes.
 fn config() -> WorkerProcessConfig {
     WorkerProcessConfig {
         rpc: WorkerClientConfig {
-            max_in_flight: NonZeroU16::new(4).unwrap(),
-            handshake_timeout: Duration::from_secs(3),
+            first_request_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(3),
             max_request_bytes: 1024,
             max_image_bytes: 100,
@@ -35,30 +24,31 @@ fn config() -> WorkerProcessConfig {
                 last: 1.0,
             },
         },
-        shutdown_timeout: Duration::from_millis(300),
+        shutdown_timeout: Duration::from_millis(100),
         reap_timeout: Duration::from_secs(3),
     }
 }
 
+/// Exercises the real executable/FD boundary with no runtime, environment or extra descriptors.
 fn main() -> Result<(), Box<dyn Error>> {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "normal".into());
     if mode == "closed-stdio-parent" {
         let executable = std::env::current_exe()?;
-        // Isolated fixture process: exercise FD allocation with all three standard FDs absent.
+        // SAFETY: This isolated fixture process has no threads or stdio users.
         unsafe {
             libc::close(0);
             libc::close(1);
             libc::close(2);
         }
-        let worker = WorkerProcess::spawn(Path::new(&executable), &["normal"], config())?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        return runtime.block_on(async {
-            let (worker, _) = worker.connect().await?;
-            worker.shutdown().await?;
-            Ok(())
-        });
+        let mut worker = WorkerProcess::spawn(Path::new(&executable), &["normal"], config())?;
+        worker.compare(CompareRequest {
+            credential_image: vec![1; 8],
+            live_image: vec![2; 8],
+            challenge_image: vec![3; 8],
+        })?;
+        worker.shutdown()?;
+        assert!(WorkerProcess::spawn(Path::new("/"), &["normal"], config()).is_err());
+        return Ok(());
     }
 
     assert!(
@@ -70,10 +60,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         None,
         "inherited unintended descriptor"
     );
-    // SAFETY: This is the process entry point, before any owner or runtime could take FD 3.
-    let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(3) };
-    socket.set_nonblocking(true)?;
-
+    // SAFETY: This entry point is the sole owner of inherited FD 3.
+    let mut socket = unsafe { UnixStream::from_raw_fd(3) };
     if mode == "startup-exit" {
         std::process::exit(23);
     }
@@ -81,117 +69,79 @@ fn main() -> Result<(), Box<dyn Error>> {
         forever();
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()?;
-    runtime.block_on(async move {
-        let socket = tokio::net::UnixStream::from_std(socket)?;
-        if mode == "malformed" || mode == "bad-version" {
-            let version = if mode == "bad-version" { 99 } else { 1 };
-            let router = Router::new()
-                .route(
-                    READY_PATH,
-                    get(move || async move {
-                        let payload = encode_message(
-                            &WorkerReady {
-                                protocol_version: version,
-                                max_in_flight: 4,
-                            },
-                            MAX_RESPONSE_BYTES,
-                        )
-                        .unwrap();
-                        response(payload)
-                    }),
-                )
-                .route(COMPARE_PATH, post(|| async { response(vec![0xff]) }));
-            let result = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                .serve_connection(TokioIo::new(socket), TowerToHyperService::new(router))
-                .await;
-            return result
-                .or_else(|error| {
-                    if expected_close(&error) {
-                        Ok(())
-                    } else {
-                        Err(error)
-                    }
-                })
-                .map_err(|error| Box::new(error) as Box<dyn Error>);
-        }
+    if mode == "malformed" || mode == "oversized" || mode == "truncated" {
+        read_request(&mut socket)?;
+        let bytes = match mode.as_str() {
+            "malformed" => vec![0, 0, 0, 1, 0xff],
+            "oversized" => u32::MAX.to_be_bytes().to_vec(),
+            _ => vec![0, 0, 0, 9, 1],
+        };
+        socket.write_all(&bytes)?;
+        socket.shutdown(std::net::Shutdown::Write)?;
+        assert_eq!(socket.read(&mut [0])?, 0);
+        return Ok(());
+    }
 
-        let callback_mode = Arc::new(mode.clone());
-        let result = serve_worker(
-            socket,
-            WorkerServerConfig {
-                max_in_flight: NonZeroU16::new(4).unwrap(),
-                max_request_bytes: 1024,
-                max_image_bytes: 100,
-                request_timeout: Duration::from_secs(10),
-                shutdown_timeout: Duration::from_millis(500),
-            },
-            move |request| {
-                assert_eq!(request.live_image, vec![2; 8]);
-                assert_eq!(request.challenge_image, vec![3; 8]);
-                match request.credential_image[0] {
-                    250 => return Ok(WorkerResult::AnalysisFailed),
-                    251 => std::process::exit(42),
-                    252 => forever(),
-                    253 => std::thread::sleep(Duration::from_millis(200)),
-                    _ => {}
+    let mut first = true;
+    let result = serve_worker(
+        socket,
+        WorkerServerConfig {
+            max_request_bytes: 1024,
+            max_image_bytes: 100,
+            first_request_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(10),
+        },
+        |request| {
+            if first && mode == "lazy-load" {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            first = false;
+            assert_eq!(request.live_image, vec![2; 8]);
+            assert_eq!(request.challenge_image, vec![3; 8]);
+            match request.credential_image[0] {
+                250 => return Ok(WorkerResult::AnalysisFailed),
+                251 => std::process::exit(42),
+                252 => forever(),
+                253 => std::thread::sleep(Duration::from_millis(250)),
+                254 => {
+                    return Err(Box::new(io::Error::other(
+                        "fixture model initialization failed",
+                    )));
                 }
-                let score = if callback_mode.as_str() == "invalid-score" {
-                    f32::NAN
-                } else {
-                    0.8
-                };
-                Ok(WorkerResult::Compared(ComparisonScores {
-                    live_similarity: score,
-                    challenge_similarity: 0.9,
-                }))
-            },
-        )
-        .await;
+                255 => panic!("fixture model panic"),
+                _ => {}
+            }
+            let score = if mode == "invalid-score" {
+                f32::NAN
+            } else {
+                0.8
+            };
+            Ok(WorkerResult::Compared(ComparisonScores {
+                live_similarity: score,
+                challenge_similarity: 0.9,
+            }))
+        },
+    );
 
-        if mode == "ignore-shutdown" {
-            forever();
-        }
-        match result {
-            Ok(()) => Ok(()),
-            Err(WorkerServerError::Transport(error)) if expected_close(&error) => Ok(()),
-            Err(error) => Err(Box::new(error) as Box<dyn Error>),
-        }
-    })
+    if mode == "ignore-shutdown" {
+        forever();
+    }
+    result.map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
-fn response(payload: Vec<u8>) -> Response<Body> {
-    Response::builder()
-        .header(header::CONTENT_TYPE, CONTENT_TYPE)
-        .body(Body::from(payload))
-        .unwrap()
+/// Drains one bounded request before producing an intentionally invalid response.
+fn read_request(socket: &mut UnixStream) -> io::Result<()> {
+    socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let mut length = [0; 4];
+    socket.read_exact(&mut length)?;
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length <= 1024);
+    socket.read_exact(&mut vec![0; length])
 }
 
+/// Simulates a process that cannot cooperate with socket shutdown.
 fn forever() -> ! {
     loop {
         std::thread::park();
     }
-}
-
-fn expected_close(error: &hyper::Error) -> bool {
-    if error.is_closed() || error.is_incomplete_message() {
-        return true;
-    }
-    let mut cause = error.source();
-    while let Some(error) = cause {
-        if let Some(error) = error.downcast_ref::<io::Error>() {
-            return matches!(
-                error.kind(),
-                io::ErrorKind::NotConnected
-                    | io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::UnexpectedEof
-            );
-        }
-        cause = error.source();
-    }
-    false
 }

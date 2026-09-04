@@ -9,26 +9,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientError};
-use tokio::sync::{oneshot, watch};
+use flamingo_verifier_worker_rpc::WorkerClientError;
 
 use crate::{WorkerProcessConfig, WorkerProcessError};
 
 const POLL: Duration = Duration::from_millis(10);
 
-#[derive(Debug)]
-pub(crate) enum Control {
-    Ready(WorkerClient, oneshot::Sender<()>),
-    Stop(Option<WorkerProcessError>),
-}
-
+/// Transfers child ownership only after the independent supervisor thread exists.
 pub(crate) fn start(
     mut child: Child,
     socket: UnixStream,
-    control: Receiver<Control>,
-    completion: watch::Sender<Option<Result<ExitStatus, WorkerProcessError>>>,
+    control: Receiver<Option<WorkerProcessError>>,
+    completion: mpsc::Sender<Result<ExitStatus, WorkerProcessError>>,
     config: WorkerProcessConfig,
-    started: Instant,
 ) -> Result<(), WorkerProcessError> {
     // Keep ownership in the launching thread until the reaper thread exists.
     let (sender, receiver) = mpsc::sync_channel::<Child>(1);
@@ -38,12 +31,13 @@ pub(crate) fn start(
         .spawn(move || {
             let _entered = span.enter();
             let Ok(mut child) = receiver.recv() else {
-                completion.send_replace(Some(Err(WorkerProcessError::SupervisorStopped)));
+                // A dropped receiver means the process owner no longer observes completion.
+                let _ = completion.send(Err(WorkerProcessError::SupervisorStopped));
                 return;
             };
             let pid = child.id();
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let cause = monitor(&mut child, &control, config, started);
+                let cause = monitor(&mut child, &control);
                 let cause = match socket.shutdown(Shutdown::Both) {
                     Ok(()) => cause,
                     Err(error) if error.kind() == io::ErrorKind::NotConnected => cause,
@@ -70,7 +64,8 @@ pub(crate) fn start(
 
             report(pid, &result);
             let needs_reaping = matches!(&result, Err(WorkerProcessError::ReapTimeout { .. }));
-            completion.send_replace(Some(result));
+            // Cleanup still runs to completion after the owner drops its receiver.
+            let _ = completion.send(result);
 
             // The caller has its deadline error. Retain ownership if the OS delays SIGKILL/reaping.
             if needs_reaping {
@@ -106,15 +101,11 @@ pub(crate) fn start(
     Ok(())
 }
 
+/// Watches for child exit or an explicit stop; idle workers have no startup deadline.
 fn monitor(
     child: &mut Child,
-    control: &Receiver<Control>,
-    config: WorkerProcessConfig,
-    started: Instant,
+    control: &Receiver<Option<WorkerProcessError>>,
 ) -> Option<WorkerProcessError> {
-    let deadline = started + config.rpc.handshake_timeout;
-    let mut client: Option<WorkerClient> = None;
-
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(WorkerProcessError::Exited(status)),
@@ -124,39 +115,14 @@ fn monitor(
         }
 
         match control.recv_timeout(POLL) {
-            Ok(Control::Ready(ready, acknowledged)) => {
-                if Instant::now() >= deadline {
-                    return Some(WorkerClientError::HandshakeTimeout.into());
-                }
-                client = Some(ready);
-                // Cancellation drops the owner, which also requests cleanup.
-                let _ = acknowledged.send(());
-            }
-            Ok(Control::Stop(cause)) => {
-                return cause.or_else(|| client.as_ref().and_then(session_failure));
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return client.as_ref().and_then(session_failure);
-            }
+            Ok(cause) => return cause,
+            Err(RecvTimeoutError::Disconnected) => return None,
             Err(RecvTimeoutError::Timeout) => {}
-        }
-
-        if client.is_none() && Instant::now() >= deadline {
-            return Some(WorkerClientError::HandshakeTimeout.into());
-        }
-        if let Some(error) = client.as_ref().and_then(session_failure) {
-            return Some(error);
         }
     }
 }
 
-fn session_failure(client: &WorkerClient) -> Option<WorkerProcessError> {
-    client
-        .failure()
-        .filter(|error| !matches!(error, WorkerClientError::Closed))
-        .map(WorkerProcessError::Rpc)
-}
-
+/// Closes the child lifecycle with explicit grace, kill and reap outcomes.
 fn cleanup(
     child: &mut Child,
     config: WorkerProcessConfig,
@@ -171,9 +137,11 @@ fn cleanup(
     match reap_until(child, Instant::now() + grace) {
         Ok(Some(status)) => {
             return match cause {
-                Some(WorkerProcessError::Rpc(
-                    WorkerClientError::Transport(_) | WorkerClientError::Unavailable,
-                )) if !status.success() => Err(WorkerProcessError::Exited(status)),
+                Some(WorkerProcessError::Rpc(WorkerClientError::Transport(_)))
+                    if !status.success() =>
+                {
+                    Err(WorkerProcessError::Exited(status))
+                }
                 Some(error) => Err(error),
                 None if status.success() => Ok(status),
                 None => Err(WorkerProcessError::Exited(status)),
@@ -216,6 +184,7 @@ fn cleanup(
     }
 }
 
+/// Polls the exact child until it exits or the absolute reap deadline expires.
 fn reap_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitStatus>> {
     loop {
         match child.try_wait() {
@@ -232,6 +201,7 @@ fn reap_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitSta
     }
 }
 
+/// Reports terminal outcomes without worker output or request data.
 fn report(pid: u32, result: &Result<ExitStatus, WorkerProcessError>) {
     let class = match result {
         Ok(_) => "graceful",

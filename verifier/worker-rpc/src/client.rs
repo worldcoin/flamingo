@@ -1,47 +1,40 @@
-use std::{num::NonZeroU16, range::RangeInclusive, sync::Arc, time::Duration};
+use std::{
+    io,
+    os::unix::net::UnixStream,
+    range::RangeInclusive,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use flamingo_verifier_worker_protocol::{
-    CompareRequest, ComparisonScores, WORKER_PROTOCOL_VERSION, WorkerProtocolError,
-};
-use tokio::{
-    net::UnixStream,
-    sync::{Semaphore, mpsc, oneshot, watch},
-    task::JoinHandle,
-    time::{Instant, timeout_at},
-};
-use tracing::Instrument;
-
-use crate::{
-    http::{self, WorkerHttpClient},
-    session,
+    CompareRequest, ComparisonScores, MAX_RESPONSE_BYTES, WorkerProtocolError, WorkerResult,
+    decode_message, encode_message,
 };
 
-/// Broker-side admission, payload and deadline limits.
+use crate::transport;
+
+/// Broker-enforced byte, score and whole-comparison limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorkerClientConfig {
-    /// Includes queued requests and cancelled callers whose work is still running.
-    pub max_in_flight: NonZeroU16,
-    /// Covers HTTP/2 setup and the startup capability response.
-    pub handshake_timeout: Duration,
-    /// From admission through the complete response; also bounds idle ping checks.
+    /// Total budget for the first transmitted comparison, including lazy model initialization.
+    pub first_request_timeout: Duration,
+    /// Total budget for each subsequent comparison.
     pub request_timeout: Duration,
-    /// Maximum encoded request body.
+    /// Maximum encoded request body, excluding its four-byte length.
     pub max_request_bytes: usize,
-    /// Maximum bytes in each nonempty encoded image.
+    /// Maximum bytes per nonempty encoded image.
     pub max_image_bytes: usize,
-    /// Model-specific inclusive score domain.
+    /// Inclusive model-specific score domain.
     pub score_range: RangeInclusive<f32>,
 }
 
 impl WorkerClientConfig {
-    /// Checks limits before allocating resources or launching a worker.
-    ///
-    /// # Errors
-    /// Returns `InvalidConfig` for invalid limits, deadlines or score bounds.
+    /// Rejects unusable limits before opening or launching a worker.
     pub fn validate(self) -> Result<(), WorkerClientError> {
-        if !http::valid_limits(self.max_request_bytes, self.max_image_bytes)
-            || !http::valid_timeout(self.handshake_timeout)
-            || !http::valid_timeout(self.request_timeout)
+        if !transport::valid_limits(self.max_request_bytes, self.max_image_bytes)
+            || !transport::valid_timeout(self.first_request_timeout)
+            || !transport::valid_timeout(self.request_timeout)
+            || self.first_request_timeout < self.request_timeout
             || !self.score_range.start.is_finite()
             || !self.score_range.last.is_finite()
             || self.score_range.start > self.score_range.last
@@ -53,336 +46,182 @@ impl WorkerClientConfig {
     }
 }
 
-/// Sole lifecycle owner. Dropping it closes the session even if request clients remain.
+/// Exclusive, blocking request owner. Drop closes its socket; no cloning or pipelining.
 #[derive(Debug)]
-pub struct WorkerSession {
-    /// One-shot shutdown signal carrying the closure reason.
-    stop: Option<oneshot::Sender<WorkerClientError>>,
-    /// Supervisor handle retained to observe failures during shutdown.
-    task: Option<JoinHandle<Result<(), WorkerClientError>>>,
-}
-
-impl WorkerSession {
-    /// Connects an already-open socket. The worker must have initialized its model first.
-    ///
-    /// # Errors
-    /// Rejects invalid configuration, startup failures and incompatible capabilities.
-    pub async fn connect(
-        stream: UnixStream,
-        config: WorkerClientConfig,
-    ) -> Result<(Self, WorkerClient), WorkerClientError> {
-        config.validate()?;
-
-        let deadline = Instant::now() + config.handshake_timeout;
-        let (http_client, connection) = timeout_at(
-            deadline,
-            WorkerHttpClient::connect(
-                stream,
-                config.max_in_flight.get(),
-                config.max_request_bytes,
-                config.request_timeout,
-            ),
-        )
-        .await
-        .map_err(|_| WorkerClientError::HandshakeTimeout)??;
-
-        let (commands, receiver) = mpsc::channel(usize::from(config.max_in_flight.get()));
-        let (stop, stopped) = oneshot::channel();
-        let (status_sender, status) = watch::channel(None);
-
-        let task = tokio::spawn(
-            session::run(
-                connection,
-                http_client.clone(),
-                receiver,
-                stopped,
-                status_sender,
-                config.score_range,
-            )
-            .in_current_span(),
-        );
-        let mut owner = Self {
-            stop: Some(stop),
-            task: Some(task),
-        };
-
-        let startup = async move {
-            let ready = http_client.ready(deadline).await?;
-
-            if ready.protocol_version != WORKER_PROTOCOL_VERSION {
-                return Err(WorkerClientError::IncompatibleProtocol);
-            }
-            if ready.max_in_flight == 0 {
-                return Err(WorkerClientError::InvalidCapacity);
-            }
-
-            Ok(ready)
-        };
-        let ready = match timeout_at(deadline, startup)
-            .await
-            .unwrap_or(Err(WorkerClientError::HandshakeTimeout))
-        {
-            Ok(ready) => ready,
-            Err(error) => {
-                owner.signal(error.clone());
-                if let Err(WorkerClientError::Task(error)) = owner.join().await {
-                    return Err(WorkerClientError::Task(error));
-                }
-                return Err(error);
-            }
-        };
-
-        let limit = usize::from(config.max_in_flight.get().min(ready.max_in_flight));
-        Ok((
-            owner,
-            WorkerClient {
-                config,
-                capacity: Arc::new(Semaphore::new(limit)),
-                commands,
-                status,
-            },
-        ))
-    }
-
-    fn signal(&mut self, error: WorkerClientError) {
-        if let Some(stop) = self.stop.take() {
-            // A closed receiver means the supervisor already terminated.
-            let _ = stop.send(error);
-        }
-    }
-
-    async fn join(&mut self) -> Result<(), WorkerClientError> {
-        self.task
-            .take()
-            .expect("session is joined once")
-            .await
-            .map_err(|error| WorkerClientError::Task(Arc::new(error)))?
-    }
-
-    /// Closes all clients and awaits the connection supervisor.
-    ///
-    /// # Errors
-    /// Preserves an earlier terminal failure or a supervisor panic.
-    pub async fn shutdown(mut self) -> Result<(), WorkerClientError> {
-        self.close();
-        self.join().await
-    }
-
-    /// Initiates closure; retain the owner and await `shutdown()` to observe supervisor errors.
-    pub fn close(&mut self) {
-        self.signal(WorkerClientError::Closed);
-    }
-}
-
-impl Drop for WorkerSession {
-    fn drop(&mut self) {
-        self.signal(WorkerClientError::Closed);
-    }
-}
-
-/// Clonable request handle; cannot shut down or reconnect its session.
-#[derive(Debug, Clone)]
 pub struct WorkerClient {
-    /// Broker-side request limits and score validation bounds.
+    /// Removed after a fatal error so the byte stream can never be reused.
+    stream: Option<UnixStream>,
+    /// Broker-side input and response validation limits.
     config: WorkerClientConfig,
-    /// Negotiated admission slots shared across clones and retained after caller cancellation.
-    capacity: Arc<Semaphore>,
-    /// Bounded request queue to the session supervisor.
-    commands: mpsc::Sender<session::Command>,
-    /// Shared terminal reason; `None` while the session is available.
-    status: watch::Receiver<Option<WorkerClientError>>,
+    /// Whether the next transmitted comparison includes the initialization budget.
+    first_request: bool,
+    /// First terminal error; local input and analysis failures do not populate it.
+    failure: Option<WorkerClientError>,
 }
 
 impl WorkerClient {
-    /// Session readiness, not a liveness probe or capacity reservation.
-    #[must_use]
-    pub fn is_available(&self) -> bool {
-        self.status.borrow().is_none() && self.status.has_changed().is_ok()
-    }
+    /// Takes a connected socket without reading, writing or verifying model readiness.
+    pub fn new(stream: UnixStream, config: WorkerClientConfig) -> Result<Self, WorkerClientError> {
+        config.validate()?;
+        stream
+            .set_nonblocking(false)
+            .map_err(WorkerClientError::transport)?;
 
-    /// Snapshot of the permanent failure, including unexpected supervisor disappearance.
-    #[must_use]
-    pub fn failure(&self) -> Option<WorkerClientError> {
-        self.status.borrow().clone().or_else(|| {
-            self.status
-                .has_changed()
-                .err()
-                .map(|_| WorkerClientError::Unavailable)
+        Ok(Self {
+            stream: Some(stream),
+            config,
+            first_request: true,
+            failure: None,
         })
     }
 
-    /// Returns the permanent failure/closure reason; suitable for broker readiness.
-    pub async fn wait_unavailable(&self) -> WorkerClientError {
-        let mut status = self.status.clone();
-        loop {
-            if let Some(error) = status.borrow().clone() {
-                return error;
-            }
-
-            if status.changed().await.is_err() {
-                return WorkerClientError::Unavailable;
-            }
-        }
+    /// Last observed terminal failure, not a model-readiness or liveness probe.
+    #[must_use]
+    pub fn failure(&self) -> Option<&WorkerClientError> {
+        self.failure.as_ref()
     }
 
-    fn terminal_error(&self) -> WorkerClientError {
-        self.status
-            .borrow()
-            .clone()
-            .unwrap_or(WorkerClientError::Unavailable)
-    }
-
-    /// Compares three images with immediate admission rejection and no retries.
-    ///
-    /// Cancelling the caller does not cancel validation, free its slot or reset its deadline.
-    ///
-    /// # Errors
-    /// Bad local inputs, overload and analysis failure affect only this request.
-    /// Timeout, transport failure, invalid scores or unexpected responses are session-fatal.
+    /// Sends one comparison and validates its complete reply before accepting another.
+    /// The first transmitted request includes model initialization. Fatal errors close the socket.
+    /// Do not call on an async executor thread; cancelling an async wrapper cannot stop this call.
     #[tracing::instrument(
         name = "worker.compare",
         skip_all,
-        fields(dependency = "biometric_worker")
+        fields(dependency = "biometric_worker", first_request = self.first_request)
     )]
-    pub async fn compare(
-        &self,
+    pub fn compare(
+        &mut self,
         request: CompareRequest,
     ) -> Result<ComparisonScores, WorkerClientError> {
-        let result = self.submit(request).await;
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+
+        let started = Instant::now();
+        let timeout = if self.first_request {
+            self.config.first_request_timeout
+        } else {
+            self.config.request_timeout
+        };
+        let deadline = started + timeout;
+        if !request.valid_image_sizes(self.config.max_image_bytes) {
+            metrics::counter!("worker_rpc.rejections", "class" => "invalid_input").increment(1);
+            return Err(WorkerClientError::InvalidImages);
+        }
+        let payload = encode_message(&request, self.config.max_request_bytes).map_err(|error| {
+            metrics::counter!("worker_rpc.rejections", "class" => "invalid_input").increment(1);
+            WorkerClientError::RequestEncoding(error)
+        })?;
+        drop(request);
+
+        let first_request = self.first_request;
+        self.first_request = false;
+        let result = self.exchange(&payload, deadline);
+        if first_request {
+            metrics::histogram!("worker_rpc.first_comparison_seconds")
+                .record(started.elapsed().as_secs_f64());
+        }
+        metrics::histogram!("worker_rpc.comparison_seconds")
+            .record(started.elapsed().as_secs_f64());
+        metrics::counter!("worker_rpc.comparisons", "result" => result.as_ref().err().map_or("success", WorkerClientError::failure_class)).increment(1);
+
         if let Err(error) = &result
-            && matches!(
-                error,
-                WorkerClientError::AtCapacity
-                    | WorkerClientError::InvalidImages
-                    | WorkerClientError::RequestEncoding(_)
-            )
+            && !matches!(error, WorkerClientError::AnalysisFailed)
         {
-            metrics::counter!("worker_rpc.rejections", "class" => error.failure_class())
-                .increment(1);
+            self.failure = Some(error.clone());
+            self.stream.take();
+            tracing::warn!(dependency = "biometric_worker", failure_class = error.failure_class(), %error, "worker connection failed");
         }
 
         result
     }
 
-    async fn submit(&self, request: CompareRequest) -> Result<ComparisonScores, WorkerClientError> {
-        if !self.is_available() {
-            return Err(self.terminal_error());
-        }
-        if !request.valid_image_sizes(self.config.max_image_bytes) {
-            return Err(WorkerClientError::InvalidImages);
-        }
+    /// Uses one absolute deadline across encoding, partial I/O and response validation.
+    fn exchange(
+        &mut self,
+        payload: &[u8],
+        deadline: Instant,
+    ) -> Result<ComparisonScores, WorkerClientError> {
+        let stream = self
+            .stream
+            .as_mut()
+            .expect("failed clients return before exchange");
+        transport::write_frame(stream, payload, deadline).map_err(WorkerClientError::transport)?;
+        let payload = transport::read_frame(stream, MAX_RESPONSE_BYTES, deadline)
+            .map_err(WorkerClientError::transport)?;
+        let response = decode_message::<WorkerResult>(&payload, MAX_RESPONSE_BYTES)
+            .map_err(WorkerClientError::Protocol)?;
+        transport::remaining(deadline).map_err(WorkerClientError::transport)?;
 
-        let permit = Arc::clone(&self.capacity)
-            .try_acquire_owned()
-            .map_err(|_| WorkerClientError::AtCapacity)?;
-        let admitted_at = Instant::now();
-        let deadline = admitted_at + self.config.request_timeout;
-
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .try_send(session::Command {
-                request,
-                deadline,
-                admitted_at,
-                reply,
-                _permit: permit,
-                span: tracing::Span::current(),
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => WorkerClientError::AtCapacity,
-                mpsc::error::TrySendError::Closed(_) => self.terminal_error(),
-            })?;
-
-        tokio::select! {
-            biased;
-            error = self.wait_unavailable() => Err(error),
-            result = response => result.unwrap_or_else(|_| Err(self.terminal_error())),
+        match response {
+            WorkerResult::AnalysisFailed => Err(WorkerClientError::AnalysisFailed),
+            WorkerResult::Compared(scores)
+                if self.config.score_range.contains(&scores.live_similarity)
+                    && self
+                        .config
+                        .score_range
+                        .contains(&scores.challenge_similarity) =>
+            {
+                Ok(scores)
+            }
+            WorkerResult::Compared(_) => Err(WorkerClientError::InvalidScore),
         }
     }
 }
 
-/// Explicit per-request and terminal errors; no remote error body is logged or trusted.
+/// Local validation failures or permanent connection failures; never contains response bytes.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum WorkerClientError {
-    /// Request serialization failed before sending.
+    /// Serialization failed before touching the socket.
     #[error("worker request encoding failed: {0}")]
     RequestEncoding(#[source] WorkerProtocolError),
-    /// Invalid CBOR response.
+    /// The reply was not a valid bounded CBOR result.
     #[error("worker response decoding failed: {0}")]
     Protocol(#[source] WorkerProtocolError),
-    /// Connection/stream failure.
-    #[error("worker HTTP/2 transport failed: {0}")]
-    Transport(#[source] Arc<hyper::Error>),
-    /// Oversized, interrupted or otherwise unreadable response.
-    #[error("worker response body failed: {0}")]
-    ResponseBody(#[source] Arc<dyn std::error::Error + Send + Sync>),
-    /// Unexpected HTTP status, including every 5xx.
-    #[error("worker returned HTTP {0}")]
-    HttpStatus(hyper::StatusCode),
-    /// Successful responses must contain CBOR.
-    #[error("worker returned an unexpected content type")]
-    UnexpectedContentType,
+    /// Socket or length-frame failure.
+    #[error("worker socket I/O failed: {0}")]
+    Transport(#[source] Arc<io::Error>),
     /// Invalid limits, deadlines or score domain.
     #[error("invalid worker client configuration")]
     InvalidConfig,
     /// Empty or oversized encoded image.
     #[error("worker images violate byte limits")]
     InvalidImages,
-    /// Startup exceeded its total deadline.
-    #[error("worker startup timed out")]
-    HandshakeTimeout,
-    /// Unsupported protocol.
-    #[error("incompatible worker protocol version")]
-    IncompatibleProtocol,
-    /// Worker advertised no capacity.
-    #[error("worker advertised zero capacity")]
-    InvalidCapacity,
-    /// Local admission or remote HTTP 429; does not invalidate the session.
-    #[error("worker is at capacity")]
-    AtCapacity,
-    /// An admitted comparison exceeded its original deadline.
+    /// The whole comparison exceeded its deadline.
     #[error("worker comparison timed out")]
     RequestTimeout,
-    /// Unexpected supervisor disappearance.
-    #[error("worker session is unavailable")]
-    Unavailable,
-    /// The lifecycle owner shut down or was dropped.
-    #[error("worker session was closed")]
-    Closed,
-    /// Out-of-domain or nonfinite score.
+    /// A score was nonfinite or outside the configured domain.
     #[error("worker returned an invalid similarity score")]
     InvalidScore,
-    /// Ordinary per-request analysis failure.
+    /// Ordinary per-request image analysis failure; the connection remains usable.
     #[error("worker could not analyze the supplied images")]
     AnalysisFailed,
-    /// Supervisor/request task failed.
-    #[error("worker task failed: {0}")]
-    Task(#[source] Arc<tokio::task::JoinError>),
 }
 
 impl WorkerClientError {
-    /// Stable, low-cardinality telemetry label; never includes images or remote bodies.
+    /// Stable, low-cardinality metric label.
     #[must_use]
     pub const fn failure_class(&self) -> &'static str {
         match self {
             Self::RequestEncoding(_) | Self::InvalidImages => "invalid_input",
             Self::InvalidConfig => "invalid_config",
-            Self::Protocol(_) | Self::UnexpectedContentType => "invalid_response",
-            Self::Transport(_) | Self::ResponseBody(_) => "transport",
-            Self::HttpStatus(_) => "http_status",
-            Self::HandshakeTimeout => "startup_timeout",
+            Self::Protocol(_) => "invalid_response",
+            Self::Transport(_) => "transport",
             Self::RequestTimeout => "request_timeout",
-            Self::IncompatibleProtocol | Self::InvalidCapacity => "incompatible_worker",
-            Self::AtCapacity => "at_capacity",
-            Self::Unavailable => "unavailable",
-            Self::Closed => "closed",
             Self::InvalidScore => "invalid_score",
             Self::AnalysisFailed => "analysis_failed",
-            Self::Task(_) => "task_failure",
         }
     }
 
-    pub(crate) fn transport(error: hyper::Error) -> Self {
-        Self::Transport(Arc::new(error))
+    /// Normalizes OS-specific socket timeout errors.
+    fn transport(error: io::Error) -> Self {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ) {
+            Self::RequestTimeout
+        } else {
+            Self::Transport(Arc::new(error))
+        }
     }
 }

@@ -15,6 +15,7 @@ struct BoundedBuffer {
 }
 
 impl Write for BoundedBuffer {
+    /// Rejects a write before extending past the limit.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > self.remaining {
             self.exceeded = true;
@@ -26,6 +27,7 @@ impl Write for BoundedBuffer {
         Ok(bytes.len())
     }
 
+    /// Memory writes need no flushing.
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }

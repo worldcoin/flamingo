@@ -1549,16 +1549,12 @@ dependencies = [
 name = "flamingo-verifier-worker-process"
 version = "0.1.0"
 dependencies = [
- "axum",
  "close_fds",
  "flamingo-verifier-worker-protocol",
  "flamingo-verifier-worker-rpc",
- "hyper",
- "hyper-util",
  "libc",
  "metrics",
  "thiserror 2.0.20",
- "tokio",
  "tracing",
 ]
 
@@ -1576,16 +1572,9 @@ dependencies = [
 name = "flamingo-verifier-worker-rpc"
 version = "0.1.0"
 dependencies = [
- "axum",
  "flamingo-verifier-worker-protocol",
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
  "metrics",
- "serde",
  "thiserror 2.0.20",
- "tokio",
  "tracing",
 ]
 
@@ -1819,25 +1808,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "h2"
-version = "0.4.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
-dependencies = [
- "atomic-waker",
- "bytes",
- "fnv",
- "futures-core",
- "futures-sink",
- "http",
- "indexmap 2.14.1",
- "slab",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "half"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2033,7 +2003,6 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
- "h2",
  "http",
  "http-body",
  "httparse",
@@ -4929,7 +4898,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "libc",
  "pin-project-lite",
  "tokio",
 ]

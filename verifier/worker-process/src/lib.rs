@@ -1,4 +1,4 @@
-//! Worker process ownership only; no sandbox or production launch path yet.
+//! Blocking worker process ownership; no sandbox or production launch path yet.
 
 mod launch;
 mod supervisor;
@@ -13,17 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use flamingo_verifier_worker_rpc::{
-    WorkerClient, WorkerClientConfig, WorkerClientError, WorkerSession,
-};
-use tokio::sync::{oneshot, watch};
+use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
+use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClientError};
 
-use supervisor::Control;
-
-/// Limits for one boot-scoped worker; no automatic restart.
+/// Limits for one boot-scoped worker; no handshake or automatic restart.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerProcessConfig {
-    /// The handshake budget starts at launch, not at `connect`.
+    /// The first comparison includes lazy model initialization.
     pub rpc: WorkerClientConfig,
     /// Grace period after closing IPC, before sending SIGKILL.
     pub shutdown_timeout: Duration,
@@ -32,13 +28,10 @@ pub struct WorkerProcessConfig {
 }
 
 impl WorkerProcessConfig {
+    /// Checks limits before acquiring descriptors or launching a child.
     fn validate(self) -> Result<(), WorkerProcessError> {
         self.rpc.validate()?;
-        for timeout in [
-            self.rpc.handshake_timeout,
-            self.shutdown_timeout,
-            self.reap_timeout,
-        ] {
+        for timeout in [self.shutdown_timeout, self.reap_timeout] {
             if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
                 return Err(WorkerProcessError::InvalidConfig);
             }
@@ -48,32 +41,24 @@ impl WorkerProcessConfig {
     }
 }
 
-/// Sole process owner. Drop initiates cleanup independently of the Tokio runtime.
+/// Sole process and comparison owner. Drop requests cleanup on an independent thread.
 #[derive(Debug)]
 pub struct WorkerProcess {
-    /// Child PID for diagnostics; the supervisor owns signaling and reaping.
+    /// Child PID for diagnostics; only the supervisor signals and reaps it.
     pid: u32,
-    /// RPC and process lifecycle limits.
-    config: WorkerProcessConfig,
-    /// Startup budget origin, recorded before launch.
-    started: Instant,
-    /// Broker socket consumed when connecting RPC to the Tokio runtime.
-    stream: Option<UnixStream>,
-    /// Lifecycle commands to the independent process supervisor thread.
-    control: mpsc::Sender<Control>,
-    /// Terminal supervision result; a reap timeout may leave background cleanup running.
-    completion: watch::Receiver<Option<Result<ExitStatus, WorkerProcessError>>>,
-    /// RPC lifecycle owner, present after connection succeeds.
-    session: Option<WorkerSession>,
+    /// Exclusive blocking connection; never exposed for cloning or concurrent requests.
+    client: WorkerClient,
+    /// Shutdown request and its optional initiating failure.
+    control: mpsc::Sender<Option<WorkerProcessError>>,
+    /// Supervisor result, published before any background reaping after a deadline error.
+    completion: mpsc::Receiver<Result<ExitStatus, WorkerProcessError>>,
+    /// Cached result so polling and waiting preserve the original failure.
+    result: Option<Result<ExitStatus, WorkerProcessError>>,
 }
 
 impl WorkerProcess {
     /// Launches an absolute executable with FD 3, empty environment and null stdio.
-    /// Call during bootstrap, before starting serving threads or generating broker keys.
-    /// The OS spawn itself is synchronous; its elapsed time counts against startup.
-    ///
-    /// # Errors
-    /// Rejects invalid configuration, relative paths, descriptor setup and launch failures.
+    /// Call before serving threads or broker-key creation. Success means launched, not model-ready.
     pub fn spawn(
         program: &Path,
         args: &[impl AsRef<OsStr>],
@@ -84,170 +69,99 @@ impl WorkerProcess {
             return Err(WorkerProcessError::InvalidConfig);
         }
 
-        let started = Instant::now();
         let (stream, worker) =
             UnixStream::pair().map_err(|e| WorkerProcessError::io("create IPC socket", e))?;
-        stream
-            .set_nonblocking(true)
-            .map_err(|e| WorkerProcessError::io("set IPC nonblocking", e))?;
         let shutdown_socket = stream
             .try_clone()
             .map_err(|e| WorkerProcessError::io("clone IPC socket", e))?;
+        let client = WorkerClient::new(stream, config.rpc)?;
         let child = launch::spawn(program, args, worker)?;
         let pid = child.id();
         let (control, receiver) = mpsc::channel();
-        let (completed, completion) = watch::channel(None);
+        let (completed, completion) = mpsc::channel();
 
-        supervisor::start(child, shutdown_socket, receiver, completed, config, started)?;
+        supervisor::start(child, shutdown_socket, receiver, completed, config)?;
 
         Ok(Self {
             pid,
-            config,
-            started,
-            stream: Some(stream),
+            client,
             control,
             completion,
-            session: None,
+            result: None,
         })
     }
 
-    /// PID for diagnostics only; signaling and reaping belong to this owner.
+    /// PID for diagnostics only; signaling and reaping belong to the supervisor.
     #[must_use]
     pub const fn id(&self) -> u32 {
         self.pid
     }
 
-    /// Attaches RPC after a Tokio runtime has started. Cancellation still cleans up the child.
-    ///
-    /// # Errors
-    /// Reports startup, transport and process failures, including incomplete cleanup.
-    pub async fn connect(mut self) -> Result<(Self, WorkerClient), WorkerProcessError> {
-        let stream = self
-            .stream
-            .take()
-            .ok_or(WorkerProcessError::AlreadyConnected)?;
-        let mut config = self.config.rpc;
-        let startup = async {
-            config.handshake_timeout = self
-                .config
-                .rpc
-                .handshake_timeout
-                .checked_sub(self.started.elapsed())
-                .filter(|remaining| !remaining.is_zero())
-                .ok_or(WorkerClientError::HandshakeTimeout)?;
-            let stream = tokio::net::UnixStream::from_std(stream)
-                .map_err(|e| WorkerProcessError::io("register IPC socket", e))?;
+    /// Completes one comparison, including lazy initialization on the first request.
+    /// Fatal errors also await bounded process cleanup; ordinary analysis failures do not stop it.
+    /// Async callers must use bounded blocking admission and retain ownership through completion.
+    #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = self.pid))]
+    pub fn compare(
+        &mut self,
+        request: CompareRequest,
+    ) -> Result<ComparisonScores, WorkerProcessError> {
+        if let Some(status) = self.try_wait()? {
+            return Err(WorkerProcessError::Exited(status));
+        }
 
-            WorkerSession::connect(stream, config)
-                .await
-                .map_err(WorkerProcessError::Rpc)
-        };
-        let result = tokio::select! {
-            result = startup => result,
-            result = self.wait() => return Err(result.err().unwrap_or(WorkerProcessError::SupervisorStopped)),
-        };
+        let result = self.client.compare(request);
+        if let Some(error) = self.client.failure().cloned() {
+            self.stop(Some(error.clone().into()));
+            return Err(self.wait().err().unwrap_or_else(|| error.into()));
+        }
 
-        let (session, client) = match result {
-            Ok(connected) => connected,
-            Err(error) => {
-                self.stop(Some(error.clone()));
-                return Err(self.wait().await.err().unwrap_or(error));
-            }
-        };
-        self.session = Some(session);
-        let (acknowledge, acknowledged) = oneshot::channel();
-        let sent = self
-            .control
-            .send(Control::Ready(client.clone(), acknowledge))
-            .is_ok();
-        let accepted = sent
-            && tokio::select! {
-                result = acknowledged => result.is_ok(),
-                result = self.wait() => return Err(result.err().unwrap_or(WorkerProcessError::SupervisorStopped)),
+        result.map_err(WorkerProcessError::Rpc)
+    }
+
+    /// Observes child termination without waiting; a running child is not proof of model readiness.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, WorkerProcessError> {
+        if self.result.is_none() {
+            self.result = match self.completion.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(WorkerProcessError::SupervisorStopped))
+                }
             };
-        if !accepted {
-            return Err(self
-                .wait()
-                .await
-                .err()
-                .unwrap_or(WorkerProcessError::SupervisorStopped));
         }
 
-        metrics::histogram!("worker_process.startup_seconds")
-            .record(self.started.elapsed().as_secs_f64());
-        Ok((self, client))
+        self.result.clone().transpose()
     }
 
-    /// Waits for termination and cleanup without initiating shutdown.
-    ///
-    /// # Errors
-    /// Preserves fatal RPC errors, exit status, forced termination and cleanup failures.
-    pub async fn wait(&self) -> Result<ExitStatus, WorkerProcessError> {
-        let mut completion = self.completion.clone();
-        loop {
-            if let Some(result) = completion.borrow().clone() {
-                return result;
-            }
-            completion
-                .changed()
-                .await
-                .map_err(|_| WorkerProcessError::SupervisorStopped)?;
+    /// Waits for termination and cleanup without initiating shutdown; an idle healthy child keeps waiting.
+    pub fn wait(&mut self) -> Result<ExitStatus, WorkerProcessError> {
+        if self.result.is_none() {
+            self.result = Some(
+                self.completion
+                    .recv()
+                    .unwrap_or(Err(WorkerProcessError::SupervisorStopped)),
+            );
         }
+
+        self.result.clone().expect("completion result was recorded")
     }
 
-    /// Closes RPC, drains for a bounded time, then kills/reaps if necessary.
-    ///
-    /// # Errors
-    /// Forced termination is an error even if SIGKILL successfully stopped the worker.
-    pub async fn shutdown(mut self) -> Result<ExitStatus, WorkerProcessError> {
-        if let Some(session) = &mut self.session {
-            session.close();
-        }
+    /// Closes IPC, waits a bounded grace period, then kills and reaps if necessary.
+    /// Forced termination remains an error even after successful reaping.
+    pub fn shutdown(mut self) -> Result<ExitStatus, WorkerProcessError> {
         self.stop(None);
-        let result = self.wait().await;
-
-        if let Some(session) = self.session.take() {
-            let rpc = tokio::time::timeout(self.config.reap_timeout, session.shutdown())
-                .await
-                .map_err(|_| {
-                    WorkerProcessError::io(
-                        "join RPC supervisor",
-                        io::Error::new(io::ErrorKind::TimedOut, "RPC shutdown deadline exceeded"),
-                    )
-                })
-                .and_then(|result| result.map_err(WorkerProcessError::Rpc));
-            if let Err(error) = rpc {
-                if result.is_ok() {
-                    return Err(error);
-                }
-                // Preserve independent cleanup failures; ordinary RPC failures are already the cause.
-                if matches!(
-                    &error,
-                    WorkerProcessError::Io { .. }
-                        | WorkerProcessError::Rpc(WorkerClientError::Task(_))
-                ) {
-                    return Err(WorkerProcessError::Cleanup {
-                        cleanup: Box::new(error),
-                        cause: result.err().map(Box::new),
-                    });
-                }
-            }
-        }
-
-        result
+        self.wait()
     }
 
+    /// A disconnected control receiver means the supervisor has already stopped.
     fn stop(&self, cause: Option<WorkerProcessError>) {
-        // A closed receiver means cleanup already finished.
-        let _ = self.control.send(Control::Stop(cause));
+        let _ = self.control.send(cause);
     }
 }
 
 impl Drop for WorkerProcess {
+    /// Starts independent cleanup without blocking the dropping thread.
     fn drop(&mut self) {
-        if let Some(session) = &mut self.session {
-            session.close();
-        }
         self.stop(None);
     }
 }
@@ -267,7 +181,7 @@ pub enum WorkerProcessError {
         #[source]
         source: Arc<io::Error>,
     },
-    /// RPC startup or session failure.
+    /// Comparison or connection failure.
     #[error(transparent)]
     Rpc(#[from] WorkerClientError),
     /// Unexpected process exit, including nonzero status during shutdown.
@@ -304,12 +218,10 @@ pub enum WorkerProcessError {
     /// The supervisor disappeared without completing its lifecycle protocol.
     #[error("worker supervisor stopped unexpectedly")]
     SupervisorStopped,
-    /// A second RPC connection was attempted for the same process.
-    #[error("worker process is already connected")]
-    AlreadyConnected,
 }
 
 impl WorkerProcessError {
+    /// Adds the failed local operation without capturing worker output.
     fn io(operation: &'static str, source: io::Error) -> Self {
         Self::Io {
             operation,
