@@ -26,6 +26,7 @@ pub(crate) fn start(
     // Keep ownership in the launching thread until the reaper thread exists.
     let (sender, receiver) = mpsc::sync_channel::<Child>(1);
     let span = tracing::Span::current();
+    let supervisor_config = config.clone();
     let supervisor = thread::Builder::new()
         .name("worker-process".into())
         .spawn(move || {
@@ -48,7 +49,7 @@ pub(crate) fn start(
                 };
 
                 let stopping = Instant::now();
-                let result = cleanup(&mut child, config, cause, true);
+                let result = cleanup(&mut child, &supervisor_config, cause, true);
                 metrics::histogram!("worker_process.shutdown_seconds")
                     .record(stopping.elapsed().as_secs_f64());
                 result
@@ -56,7 +57,7 @@ pub(crate) fn start(
             .unwrap_or_else(|_| {
                 cleanup(
                     &mut child,
-                    config,
+                    &supervisor_config,
                     Some(WorkerProcessError::SupervisorStopped),
                     true,
                 )
@@ -85,13 +86,13 @@ pub(crate) fn start(
 
     if let Err(error) = supervisor {
         let cause = WorkerProcessError::io("start worker supervisor", error);
-        return cleanup(&mut child, config, Some(cause), false).map(|_| ());
+        return cleanup(&mut child, &config, Some(cause), false).map(|_| ());
     }
     if let Err(error) = sender.send(child) {
         child = error.0;
         return cleanup(
             &mut child,
-            config,
+            &config,
             Some(WorkerProcessError::SupervisorStopped),
             false,
         )
@@ -125,7 +126,7 @@ fn monitor(
 /// Closes the child lifecycle with explicit grace, kill and reap outcomes.
 fn cleanup(
     child: &mut Child,
-    config: WorkerProcessConfig,
+    config: &WorkerProcessConfig,
     cause: Option<WorkerProcessError>,
     background_reaper: bool,
 ) -> Result<ExitStatus, WorkerProcessError> {

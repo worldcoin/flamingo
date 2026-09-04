@@ -1,7 +1,6 @@
 use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
-    range::RangeInclusive,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -29,10 +28,7 @@ fn config() -> WorkerClientConfig {
         request_timeout: WAIT,
         max_request_bytes: 1024,
         max_image_bytes: 100,
-        score_range: RangeInclusive {
-            start: -1.0,
-            last: 1.0,
-        },
+        score_range: -1.0..=1.0,
     }
 }
 
@@ -323,11 +319,12 @@ fn blocked_upload_uses_same_deadline() {
     limits.request_timeout = limits.first_request_timeout;
     limits.max_image_bytes = 4 * 1024 * 1024;
     limits.max_request_bytes = 3 * limits.max_image_bytes + 1024;
+    let max_image_bytes = limits.max_image_bytes;
     let mut client = WorkerClient::new(broker, limits).unwrap();
     let request = CompareRequest {
-        credential_image: vec![1; limits.max_image_bytes],
-        live_image: vec![2; limits.max_image_bytes],
-        challenge_image: vec![3; limits.max_image_bytes],
+        credential_image: vec![1; max_image_bytes],
+        live_image: vec![2; max_image_bytes],
+        challenge_image: vec![3; max_image_bytes],
     };
     let started = Instant::now();
     assert!(matches!(
@@ -337,7 +334,7 @@ fn blocked_upload_uses_same_deadline() {
     assert!(started.elapsed() < Duration::from_secs(2));
     let mut length = [0; 4];
     worker.read_exact(&mut length).unwrap();
-    assert!(u32::from_be_bytes(length) as usize > limits.max_image_bytes);
+    assert!(u32::from_be_bytes(length) as usize > max_image_bytes);
 }
 
 #[test]
@@ -360,10 +357,10 @@ fn invalid_configuration_is_rejected() {
     invalid.max_request_bytes = usize::MAX;
     cases.push(invalid);
     let mut invalid = config();
-    invalid.score_range.start = f32::NAN;
+    invalid.score_range = f32::NAN..=1.0;
     cases.push(invalid);
     let mut invalid = config();
-    invalid.score_range.start = 2.0;
+    invalid.score_range = 2.0..=1.0;
     cases.push(invalid);
     for limits in cases {
         let (broker, _worker) = UnixStream::pair().unwrap();

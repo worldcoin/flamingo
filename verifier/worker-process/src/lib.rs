@@ -17,7 +17,7 @@ use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
 use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClientError};
 
 /// Limits for one boot-scoped worker; no handshake or automatic restart.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WorkerProcessConfig {
     /// The first comparison includes lazy model initialization.
     pub rpc: WorkerClientConfig,
@@ -29,7 +29,7 @@ pub struct WorkerProcessConfig {
 
 impl WorkerProcessConfig {
     /// Checks limits before acquiring descriptors or launching a child.
-    fn validate(self) -> Result<(), WorkerProcessError> {
+    fn validate(&self) -> Result<(), WorkerProcessError> {
         self.rpc.validate()?;
         for timeout in [self.shutdown_timeout, self.reap_timeout] {
             if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
@@ -74,7 +74,7 @@ impl WorkerProcess {
         let shutdown_socket = stream
             .try_clone()
             .map_err(|e| WorkerProcessError::io("clone IPC socket", e))?;
-        let client = WorkerClient::new(stream, config.rpc)?;
+        let client = WorkerClient::new(stream, config.rpc.clone())?;
         let child = launch::spawn(program, args, worker)?;
         let pid = child.id();
         let (control, receiver) = mpsc::channel();

@@ -4,7 +4,6 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     process::Command,
-    range::RangeInclusive,
     thread,
     time::{Duration, Instant},
 };
@@ -28,10 +27,7 @@ fn config() -> WorkerProcessConfig {
             request_timeout: Duration::from_secs(1),
             max_request_bytes: 1024,
             max_image_bytes: 100,
-            score_range: RangeInclusive {
-                start: -1.0,
-                last: 1.0,
-            },
+            score_range: -1.0..=1.0,
         },
         shutdown_timeout: Duration::from_millis(100),
         reap_timeout: Duration::from_secs(2),

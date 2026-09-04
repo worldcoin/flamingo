@@ -1,7 +1,7 @@
 use std::{
     io,
+    ops::RangeInclusive,
     os::unix::net::UnixStream,
-    range::RangeInclusive,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -14,7 +14,7 @@ use flamingo_verifier_worker_protocol::{
 use crate::transport;
 
 /// Broker-enforced byte, score and whole-comparison limits.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkerClientConfig {
     /// Total budget for the first transmitted comparison, including lazy model initialization.
     pub first_request_timeout: Duration,
@@ -30,14 +30,14 @@ pub struct WorkerClientConfig {
 
 impl WorkerClientConfig {
     /// Rejects unusable limits before opening or launching a worker.
-    pub fn validate(self) -> Result<(), WorkerClientError> {
+    pub fn validate(&self) -> Result<(), WorkerClientError> {
         if !transport::valid_limits(self.max_request_bytes, self.max_image_bytes)
             || !transport::valid_timeout(self.first_request_timeout)
             || !transport::valid_timeout(self.request_timeout)
             || self.first_request_timeout < self.request_timeout
-            || !self.score_range.start.is_finite()
-            || !self.score_range.last.is_finite()
-            || self.score_range.start > self.score_range.last
+            || !self.score_range.start().is_finite()
+            || !self.score_range.end().is_finite()
+            || self.score_range.start() > self.score_range.end()
         {
             return Err(WorkerClientError::InvalidConfig);
         }

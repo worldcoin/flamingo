@@ -3,7 +3,6 @@ use std::{
     io::{self, Read, Write},
     os::{fd::FromRawFd, unix::net::UnixStream},
     path::Path,
-    range::RangeInclusive,
     time::Duration,
 };
 
@@ -19,10 +18,7 @@ fn config() -> WorkerProcessConfig {
             request_timeout: Duration::from_secs(3),
             max_request_bytes: 1024,
             max_image_bytes: 100,
-            score_range: RangeInclusive {
-                start: -1.0,
-                last: 1.0,
-            },
+            score_range: -1.0..=1.0,
         },
         shutdown_timeout: Duration::from_millis(100),
         reap_timeout: Duration::from_secs(3),
