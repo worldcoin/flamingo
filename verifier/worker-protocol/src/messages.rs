@@ -82,6 +82,7 @@ impl fmt::Debug for CompareRequest {
 
 // Accept only CBOR byte strings, never arrays with attacker-controlled allocation hints.
 fn image_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    /// Accepts byte buffers while rejecting sequence-based image encodings.
     struct Bytes;
     impl Visitor<'_> for Bytes {
         type Value = Vec<u8>;

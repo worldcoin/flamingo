@@ -29,8 +29,30 @@ come out. Embeddings and broker keys never cross the socket.
   Production integration must export them to Datadog, propagate traces across IPC,
   wire readiness, and add user-impact alerts.
 
-Process launch/kill, Minijail, decoded-image limits, signed provisioning, reproducible
-build verification and progressive production rollout remain separate work.
-No production path changes in this PR; replace broker and worker together for v1.
+## Process lifecycle
+
+`worker-process` launches an absolute executable with FD 3, empty environment and
+null stdio. Call `WorkerProcess::spawn` before serving threads or broker-key creation,
+then `connect` inside Tokio. The startup budget begins at launch; OS spawn is synchronous.
+
+One supervisor thread owns the child independently of Tokio. Fatal RPC errors, exit,
+startup expiry or owner drop close IPC; cleanup waits a bounded grace period, then
+kills and reaps. Forced termination is an error. `ReapTimeout` is fatal: background
+reaping continues where possible, but the enclosing process must not keep serving.
+Await `shutdown()` for cleanup results; `wait()` observes termination without stopping it.
+
+Linux requires readable `/proc/self/fd`; enumeration failures abort launch. This
+supports the pinned Nitro 4.14 kernel. macOS enumeration is for development. Only the direct worker is
+supervised; this is not process-tree confinement. Worker stdio is deliberately discarded
+to avoid exposing images/secrets; diagnostics use RPC errors, PID and exit status.
+Lifecycle metrics use `worker_process.*`; Datadog export remains production integration work.
+
+Minijail, decoded-image limits, signed provisioning, private worker packaging, production
+integration and public-image reproducibility verification remain separate work.
+Replace broker and worker together for v1. No production path changes yet.
 
 `cargo test --locked -p flamingo-verifier-worker-protocol -p flamingo-verifier-worker-rpc`
+
+`cargo test --locked -p flamingo-verifier-worker-process --all-features`
+
+The `test-worker` feature builds the subprocess fixture; Linux workspace CI enables it.

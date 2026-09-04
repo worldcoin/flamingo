@@ -4,9 +4,13 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::WorkerProtocolError;
 
+/// Serialization sink that rejects writes beyond its byte budget.
 struct BoundedBuffer {
+    /// Encoded bytes accepted so far.
     bytes: Vec<u8>,
+    /// Unused byte budget.
     remaining: usize,
+    /// Distinguishes a limit violation from other serialization failures.
     exceeded: bool,
 }
 

@@ -692,6 +692,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "close_fds"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bc416f33de9d59e79e57560f450d21ff8393adcf1cdfc3e6d8fb93d5f88a2ed"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1533,6 +1543,23 @@ dependencies = [
  "serde",
  "serde_bytes",
  "zeroize",
+]
+
+[[package]]
+name = "flamingo-verifier-worker-process"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "close_fds",
+ "flamingo-verifier-worker-protocol",
+ "flamingo-verifier-worker-rpc",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "metrics",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

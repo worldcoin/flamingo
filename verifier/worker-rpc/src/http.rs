@@ -25,7 +25,9 @@ const RESET_STREAMS: usize = 16;
 /// Typed transport; the session owns admission, deadline selection and the connection driver.
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerHttpClient {
+    /// Clonable HTTP/2 sender sharing one worker connection.
     sender: SendRequest<Full<Bytes>>,
+    /// Maximum encoded CBOR request body size.
     max_request_bytes: usize,
 }
 

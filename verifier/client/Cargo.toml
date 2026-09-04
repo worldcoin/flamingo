@@ -24,6 +24,7 @@ url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+axum.default-features = true
 flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 hex-literal.workspace = true

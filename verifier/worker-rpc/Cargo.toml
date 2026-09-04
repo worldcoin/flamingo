@@ -6,19 +6,23 @@ rust-version = "1.97.0"
 license = "MIT"
 publish = false
 
-# Standalone manifest: shared by the public broker and private worker.
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http2", "tokio"] }
-flamingo-verifier-worker-protocol = { path = "../worker-protocol" }
-http-body-util = "0.1"
-hyper = { version = "1.11", features = ["client", "server", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio", "service"] }
-metrics = "0.24"
-serde = "1.0"
-thiserror = "2"
-tokio = { version = "1.48", features = ["macros", "net", "rt", "sync", "time"] }
-tracing = "0.1"
+axum.workspace = true
+axum.features = ["http2", "tokio"]
+flamingo-verifier-worker-protocol.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper.features = ["client", "server", "http2"]
+hyper-util.workspace = true
+hyper-util.features = ["tokio", "service"]
+metrics.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio.features = ["sync"]
+tracing.workspace = true
 
 [dev-dependencies]
-futures-util = "0.3"
-tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "sync", "test-util", "time", "io-util"] }
+futures-util.workspace = true
+tokio.workspace = true
+tokio.features = ["sync", "test-util", "io-util"]

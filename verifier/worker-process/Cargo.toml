@@ -1,0 +1,40 @@
+[package]
+name = "flamingo-verifier-worker-process"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "MIT"
+publish = false
+
+[features]
+test-worker = ["dep:axum", "dep:flamingo-verifier-worker-protocol", "dep:hyper", "dep:hyper-util", "tokio/rt-multi-thread", "tokio/io-util"]
+
+[dependencies]
+close_fds.workspace = true
+flamingo-verifier-worker-rpc.workspace = true
+libc.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio.features = ["sync"]
+tracing.workspace = true
+axum.workspace = true
+axum.features = ["http2", "tokio"]
+axum.optional = true
+flamingo-verifier-worker-protocol.workspace = true
+flamingo-verifier-worker-protocol.optional = true
+hyper.workspace = true
+hyper.features = ["server", "http2"]
+hyper.optional = true
+hyper-util.workspace = true
+hyper-util.features = ["tokio", "service"]
+hyper-util.optional = true
+
+[[bin]]
+name = "worker-process-test-peer"
+path = "tests/support/fake-worker.rs"
+required-features = ["test-worker"]
+
+[[test]]
+name = "process"
+required-features = ["test-worker"]

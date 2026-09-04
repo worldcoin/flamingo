@@ -11,6 +11,7 @@ members = [
     "di/enclave",
     "verifier/worker-rpc",
     "verifier/worker-protocol",
+    "verifier/worker-process",
     "di/host",
 ]
 resolver = "3"
@@ -29,9 +30,10 @@ anyhow = "1.0"
 ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5" }
 ark-ff = "0.5"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", default-features = false }
 base64 = "0.22"
 ciborium = "0.2"
+close_fds = "0.3.2"
 coset = "0.4.2"
 flamingo-verifier-api-types = { version = "0.3.0", path = "verifier/api-types" }
 flamingo-verifier-client = { path = "verifier/client" }
@@ -41,10 +43,16 @@ flamingo-verifier-sealed-types = { version = "0.3.0", path = "verifier/sealed-ty
 eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
 face-engine = { git = "https://github.com/worldcoin/biometric-engines", rev = "face-engine-v2.16.0", default-features = false, features = ["tract"] }
 flamingo-verifier-worker-protocol = { path = "verifier/worker-protocol" }
+flamingo-verifier-worker-rpc = { path = "verifier/worker-rpc" }
+futures-util = "0.3"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"
+hyper = "1.11"
+hyper-util = "0.1"
 image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
+libc = "0.2"
+metrics = "0.24"
 pontifex = { version = "2.0.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
 rand = "0.8"

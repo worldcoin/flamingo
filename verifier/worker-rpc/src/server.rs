@@ -38,17 +38,27 @@ pub struct WorkerServerConfig {
     pub shutdown_timeout: Duration,
 }
 
+/// Handler state shared by requests on one worker connection.
 struct ServerState {
+    /// Worker-enforced limits, independent of the broker's configuration.
     config: WorkerServerConfig,
+    /// Admission slots spanning body reads, queued jobs and running inference.
     capacity: Arc<Semaphore>,
+    /// Bounded queue to the supervised inference dispatcher.
     work: mpsc::Sender<Work>,
 }
 
+/// Validated comparison queued for supervised inference.
 struct Work {
+    /// Decoded request with encoded-image byte limits already checked.
     request: CompareRequest,
+    /// Absolute deadline covering body reading, queueing and inference.
     deadline: Instant,
+    /// Result channel to the HTTP handler, which may have been cancelled.
     reply: oneshot::Sender<WorkerResult>,
+    /// Admission slot moved into inference so HTTP cancellation cannot release it early.
     permit: OwnedSemaphorePermit,
+    /// Originating handler's tracing context.
     span: tracing::Span,
 }
 

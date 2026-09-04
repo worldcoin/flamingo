@@ -10,12 +10,19 @@ use tracing::Instrument;
 
 use crate::{WorkerClientError, http::WorkerHttpClient};
 
+/// Admitted comparison owned by the session until completion or closure.
 pub(crate) struct Command {
+    /// Image inputs awaiting transport encoding.
     pub request: CompareRequest,
+    /// Absolute deadline covering queueing through response validation.
     pub deadline: Instant,
+    /// Admission time used for end-to-end latency metrics.
     pub admitted_at: Instant,
+    /// Result channel; cancellation may drop the receiving caller.
     pub reply: oneshot::Sender<Result<ComparisonScores, WorkerClientError>>,
+    /// Admission slot retained through validation even if the caller cancels.
     pub _permit: OwnedSemaphorePermit,
+    /// Originating request's tracing context.
     pub span: tracing::Span,
 }
 
@@ -39,8 +46,8 @@ pub(crate) async fn run(
                 Some(Err(error)) => break WorkerClientError::Task(Arc::new(error)),
                 None => unreachable!("nonempty task set"),
             },
-            result = &mut connection => break result.err().unwrap_or(WorkerClientError::Unavailable),
             result = &mut stopped => break result.unwrap_or(WorkerClientError::Closed),
+            result = &mut connection => break result.err().unwrap_or(WorkerClientError::Unavailable),
             command = commands.recv() => {
                 let Some(command) = command else { break WorkerClientError::Closed };
 

@@ -34,7 +34,11 @@ pub struct WorkerClientConfig {
 }
 
 impl WorkerClientConfig {
-    fn validate(self) -> Result<(), WorkerClientError> {
+    /// Checks limits before allocating resources or launching a worker.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` for invalid limits, deadlines or score bounds.
+    pub fn validate(self) -> Result<(), WorkerClientError> {
         if !http::valid_limits(self.max_request_bytes, self.max_image_bytes)
             || !http::valid_timeout(self.handshake_timeout)
             || !http::valid_timeout(self.request_timeout)
@@ -52,7 +56,9 @@ impl WorkerClientConfig {
 /// Sole lifecycle owner. Dropping it closes the session even if request clients remain.
 #[derive(Debug)]
 pub struct WorkerSession {
+    /// One-shot shutdown signal carrying the closure reason.
     stop: Option<oneshot::Sender<WorkerClientError>>,
+    /// Supervisor handle retained to observe failures during shutdown.
     task: Option<JoinHandle<Result<(), WorkerClientError>>>,
 }
 
@@ -158,8 +164,13 @@ impl WorkerSession {
     /// # Errors
     /// Preserves an earlier terminal failure or a supervisor panic.
     pub async fn shutdown(mut self) -> Result<(), WorkerClientError> {
-        self.signal(WorkerClientError::Closed);
+        self.close();
         self.join().await
+    }
+
+    /// Initiates closure; retain the owner and await `shutdown()` to observe supervisor errors.
+    pub fn close(&mut self) {
+        self.signal(WorkerClientError::Closed);
     }
 }
 
@@ -172,9 +183,13 @@ impl Drop for WorkerSession {
 /// Clonable request handle; cannot shut down or reconnect its session.
 #[derive(Debug, Clone)]
 pub struct WorkerClient {
+    /// Broker-side request limits and score validation bounds.
     config: WorkerClientConfig,
+    /// Negotiated admission slots shared across clones and retained after caller cancellation.
     capacity: Arc<Semaphore>,
+    /// Bounded request queue to the session supervisor.
     commands: mpsc::Sender<session::Command>,
+    /// Shared terminal reason; `None` while the session is available.
     status: watch::Receiver<Option<WorkerClientError>>,
 }
 
@@ -183,6 +198,17 @@ impl WorkerClient {
     #[must_use]
     pub fn is_available(&self) -> bool {
         self.status.borrow().is_none() && self.status.has_changed().is_ok()
+    }
+
+    /// Snapshot of the permanent failure, including unexpected supervisor disappearance.
+    #[must_use]
+    pub fn failure(&self) -> Option<WorkerClientError> {
+        self.status.borrow().clone().or_else(|| {
+            self.status
+                .has_changed()
+                .err()
+                .map(|_| WorkerClientError::Unavailable)
+        })
     }
 
     /// Returns the permanent failure/closure reason; suitable for broker readiness.
