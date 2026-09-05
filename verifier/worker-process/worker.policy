@@ -1,0 +1,82 @@
+# x86_64 Linux: applied before exec/loader, default KILL_PROCESS (see sandbox.rs).
+# Filesystem access is confined to the read-only runtime root. No proc/sys/dev,
+# new sockets (including vsock), processes, namespaces, ptrace, process_vm_*,
+# io_uring, keyrings, BPF, mounts or privilege changes are permitted.
+
+# ELF/glibc loader and read-only model/config loading.
+read: 1
+write: 1
+readv: 1
+writev: 1
+close: 1
+fcntl: arg1 == F_GETFD || arg1 == F_SETFD || arg1 == F_GETFL || arg1 == F_SETFL || arg1 == F_DUPFD_CLOEXEC
+fstat: 1
+newfstatat: 1
+statx: 1
+lseek: 1
+pread64: 1
+openat: arg2 in O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY
+access: 1
+readlink: 1
+readlinkat: 1
+getdents64: 1
+getcwd: 1
+statfs: 1
+# Loader mappings and inference allocations, never simultaneously writable/executable.
+mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+munmap: 1
+mremap: 1
+madvise: 1
+brk: 1
+arch_prctl: arg0 == ARCH_SET_FS || arg0 == ARCH_GET_FS; return EINVAL
+# Naming threads and inspecting confinement only; no PR_SET_DUMPABLE/PR_SET_MM.
+prctl: arg0 == PR_SET_NAME || arg0 == PR_GET_NAME || arg0 == PR_GET_NO_NEW_PRIVS || arg0 == PR_GET_SECCOMP || arg0 == PR_CAPBSET_READ
+prlimit64: arg0 == 0 && arg2 == 0
+getrlimit: 1
+getrandom: arg2 in ~GRND_RANDOM
+getpid: 1
+gettid: 1
+getuid: 1
+geteuid: 1
+getgid: 1
+getegid: 1
+getgroups: 1
+capget: 1
+
+# Pthreads only: require CLONE_THREAD and reject namespace/process-creation flags.
+clone: arg0 & CLONE_THREAD && arg0 in CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|CLONE_DETACHED
+# clone3 hides flags behind a pointer; libc must fall back to the filtered clone.
+clone3: return ENOSYS
+set_tid_address: 1
+set_robust_list: 1
+rseq: 1
+rt_sigaction: 1
+rt_sigprocmask: 1
+rt_sigreturn: 1
+sigaltstack: 1
+tgkill: arg0 == 1
+futex: 1
+clock_gettime: 1
+clock_nanosleep: 1
+nanosleep: 1
+# pthread_getattr_np queries individual TIDs; only worker tasks exist in this PID namespace.
+sched_getaffinity: 1
+sched_yield: 1
+pause: 1
+
+# The inherited connected Unix stream (or its duplicates) is the only channel.
+poll: 1
+ppoll: 1
+# Rust UnixStream::set_nonblocking; no device-specific ioctls (including NSM).
+ioctl: arg1 == FIONBIO
+setsockopt: arg1 == SOL_SOCKET && arg2 == SO_RCVTIMEO || arg1 == SOL_SOCKET && arg2 == SO_SNDTIMEO
+getsockopt: arg1 == SOL_SOCKET && arg2 == SO_ERROR || arg1 == SOL_SOCKET && arg2 == SO_TYPE
+recvfrom: arg4 == 0 && arg5 == 0
+sendto: arg4 == 0 && arg5 == 0
+shutdown: 1
+# Bootstrap executes FD 4 with CLOEXEC; no pathname-based exec or /proc fallback.
+# 0x1000 is AT_EMPTY_PATH, absent from Minijail's non-GNU constant table.
+execveat: arg0 == 4 && arg4 == 0x1000
+exit: 1
+exit_group: 1
