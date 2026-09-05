@@ -99,7 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(worker.compare(images(1))?, scores);
     assert!(matches!(
         worker.compare(images(202)),
-        Err(WorkerError::Jail(minijail::Error::SeccompViolation(_)))
+        // The pinned Rust wrapper exposes Minijail's 253 seccomp sentinel as a return code.
+        Err(WorkerError::Jail(minijail::Error::ReturnCode(253)))
     ));
     assert!(std::fs::read_to_string(&children_path)?.trim().is_empty());
 
