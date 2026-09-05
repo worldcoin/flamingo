@@ -1,231 +1,167 @@
-//! Blocking worker process ownership; no sandbox or production launch path yet.
+//! Linux worker ownership through Minijail; launch before threads or broker keys exist.
 
-mod launch;
-mod supervisor;
+#![cfg(target_os = "linux")]
 
 use std::{
-    ffi::OsStr,
+    fs::File,
     io,
-    os::unix::net::UnixStream,
+    os::{fd::AsRawFd, unix::net::UnixStream},
     path::Path,
-    process::ExitStatus,
-    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
 use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
 use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClientError};
+use minijail::Minijail;
 
-/// Limits for one boot-scoped worker; no handshake or automatic restart.
-#[derive(Debug, Clone)]
-pub struct WorkerProcessConfig {
-    /// The first comparison includes lazy model initialization.
-    pub rpc: WorkerClientConfig,
-    /// Grace period after closing IPC, before sending SIGKILL.
-    pub shutdown_timeout: Duration,
-    /// Deadline for observing/reaping the killed child.
-    pub reap_timeout: Duration,
+const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+// Upstream's Cargo fallback builds static Minijail but does not declare its libcap dependency.
+#[link(name = "cap")]
+unsafe extern "C" {}
+
+/// Owns one blocking connection and its PID namespace. No restart or background supervisor.
+pub struct Worker {
+    /// Validates each comparison and permanently closes IPC after a fatal error.
+    rpc: WorkerClient,
+    /// Owns the sandbox configuration and reaps its child.
+    jail: Minijail,
+    /// Cleared after reaping so cleanup cannot signal a reused PID.
+    pid: Option<libc::pid_t>,
 }
 
-impl WorkerProcessConfig {
-    /// Checks limits before acquiring descriptors or launching a child.
-    fn validate(&self) -> Result<(), WorkerProcessError> {
-        self.rpc.validate()?;
-        for timeout in [self.shutdown_timeout, self.reap_timeout] {
-            if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
-                return Err(WorkerProcessError::InvalidConfig);
+impl Worker {
+    /// Launches an open executable with FD 3 and a trusted, build-controlled seccomp policy.
+    /// Call from a single-threaded bootstrap before generating keys. Success is not readiness.
+    pub fn spawn(
+        binary: &File,
+        policy: &Path,
+        config: WorkerClientConfig,
+    ) -> Result<Self, WorkerError> {
+        let (rpc, child) = UnixStream::pair()?;
+        let rpc = WorkerClient::new(rpc, config)?;
+
+        let mut jail = Minijail::new()?;
+        jail.no_new_privs();
+        jail.reset_signal_mask();
+        jail.namespace_pids();
+        jail.parse_seccomp_filters(policy)?;
+        jail.use_seccomp_filter();
+
+        let argv = [c"worker".as_ptr(), std::ptr::null()];
+        let envp = [std::ptr::null()];
+        // SAFETY: Minijail checks that the caller is single-threaded and remaps/closes FDs.
+        // In the child, only libc calls run; failed exec exits without dropping Rust owners.
+        // run_fd_remap uses LD_PRELOAD, which would let a supplied loader run before seccomp.
+        let pid = unsafe { jail.fork_remap(&[(child.as_raw_fd(), 3), (binary.as_raw_fd(), 4)])? };
+        if pid == 0 {
+            // SAFETY: FD 4 is the executable. Close it on exec; only IPC and null stdio survive.
+            unsafe {
+                if libc::fcntl(4, libc::F_SETFD, libc::FD_CLOEXEC) == 0 {
+                    libc::fexecve(4, argv.as_ptr(), envp.as_ptr());
+                }
+                libc::_exit(127);
             }
         }
 
-        Ok(())
-    }
-}
-
-/// Sole process and comparison owner. Drop requests cleanup on an independent thread.
-#[derive(Debug)]
-pub struct WorkerProcess {
-    /// Child PID for diagnostics; only the supervisor signals and reaps it.
-    pid: u32,
-    /// Exclusive blocking connection; never exposed for cloning or concurrent requests.
-    client: WorkerClient,
-    /// Shutdown request and its optional initiating failure.
-    control: mpsc::Sender<Option<WorkerProcessError>>,
-    /// Supervisor result, published before any background reaping after a deadline error.
-    completion: mpsc::Receiver<Result<ExitStatus, WorkerProcessError>>,
-    /// Cached result so polling and waiting preserve the original failure.
-    result: Option<Result<ExitStatus, WorkerProcessError>>,
-}
-
-impl WorkerProcess {
-    /// Launches an absolute executable with FD 3, empty environment and null stdio.
-    /// Call before serving threads or broker-key creation. Success means launched, not model-ready.
-    pub fn spawn(
-        program: &Path,
-        args: &[impl AsRef<OsStr>],
-        config: WorkerProcessConfig,
-    ) -> Result<Self, WorkerProcessError> {
-        config.validate()?;
-        if !program.is_absolute() {
-            return Err(WorkerProcessError::InvalidConfig);
-        }
-
-        let (stream, worker) =
-            UnixStream::pair().map_err(|e| WorkerProcessError::io("create IPC socket", e))?;
-        let shutdown_socket = stream
-            .try_clone()
-            .map_err(|e| WorkerProcessError::io("clone IPC socket", e))?;
-        let client = WorkerClient::new(stream, config.rpc.clone())?;
-        let child = launch::spawn(program, args, worker)?;
-        let pid = child.id();
-        let (control, receiver) = mpsc::channel();
-        let (completed, completion) = mpsc::channel();
-
-        supervisor::start(child, shutdown_socket, receiver, completed, config)?;
-
         Ok(Self {
-            pid,
-            client,
-            control,
-            completion,
-            result: None,
+            rpc,
+            jail,
+            pid: Some(pid),
         })
     }
 
-    /// PID for diagnostics only; signaling and reaping belong to the supervisor.
-    #[must_use]
-    pub const fn id(&self) -> u32 {
-        self.pid
-    }
-
-    /// Completes one comparison, including lazy initialization on the first request.
-    /// Fatal errors also await bounded process cleanup; ordinary analysis failures do not stop it.
-    /// Async callers must use bounded blocking admission and retain ownership through completion.
-    #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = self.pid))]
-    pub fn compare(
-        &mut self,
-        request: CompareRequest,
-    ) -> Result<ComparisonScores, WorkerProcessError> {
-        if let Some(status) = self.try_wait()? {
-            return Err(WorkerProcessError::Exited(status));
+    /// Completes one comparison; fatal RPC failures also terminate the whole PID namespace.
+    #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = ?self.pid))]
+    pub fn compare(&mut self, request: CompareRequest) -> Result<ComparisonScores, WorkerError> {
+        if self.pid.is_none() {
+            return Err(WorkerError::Stopped);
         }
 
-        let result = self.client.compare(request);
-        if let Some(error) = self.client.failure().cloned() {
-            self.stop(Some(error.clone().into()));
-            return Err(self.wait().err().unwrap_or_else(|| error.into()));
+        let result = self.rpc.compare(request);
+        if self.rpc.failure().is_some() {
+            self.shutdown()?;
         }
 
-        result.map_err(WorkerProcessError::Rpc)
+        result.map_err(WorkerError::Rpc)
     }
 
-    /// Observes child termination without waiting; a running child is not proof of model readiness.
-    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, WorkerProcessError> {
-        if self.result.is_none() {
-            self.result = match self.completion.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(WorkerProcessError::SupervisorStopped))
-                }
+    /// Forcibly stops the namespace and reaps it within a fixed deadline. Safe to repeat.
+    pub fn shutdown(&mut self) -> Result<(), WorkerError> {
+        let Some(pid) = self.pid else {
+            return Ok(());
+        };
+        // SAFETY: This owner has not reaped pid. Killing namespace PID 1 kills its descendants.
+        // SIGTERM can be ignored by PID 1, so Minijail::kill is unsuitable for a stuck worker.
+        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
+        }
+
+        let deadline = Instant::now() + REAP_TIMEOUT;
+        loop {
+            // SAFETY: waitid initializes the record; WNOWAIT leaves reaping to Minijail.
+            let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut status,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
             };
+            if result != 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    self.pid = None;
+                }
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error.into());
+                }
+            } else if unsafe { status.si_pid() } != 0 {
+                self.pid = None;
+                return match self.jail.wait() {
+                    Ok(()) | Err(minijail::Error::Killed(9)) => Ok(()),
+                    Err(error) => Err(error.into()),
+                };
+            }
+
+            if Instant::now() >= deadline {
+                return Err(WorkerError::ReapTimeout);
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-
-        self.result.clone().transpose()
-    }
-
-    /// Waits for termination and cleanup without initiating shutdown; an idle healthy child keeps waiting.
-    pub fn wait(&mut self) -> Result<ExitStatus, WorkerProcessError> {
-        if self.result.is_none() {
-            self.result = Some(
-                self.completion
-                    .recv()
-                    .unwrap_or(Err(WorkerProcessError::SupervisorStopped)),
-            );
-        }
-
-        self.result.clone().expect("completion result was recorded")
-    }
-
-    /// Closes IPC, waits a bounded grace period, then kills and reaps if necessary.
-    /// Forced termination remains an error even after successful reaping.
-    pub fn shutdown(mut self) -> Result<ExitStatus, WorkerProcessError> {
-        self.stop(None);
-        self.wait()
-    }
-
-    /// A disconnected control receiver means the supervisor has already stopped.
-    fn stop(&self, cause: Option<WorkerProcessError>) {
-        let _ = self.control.send(cause);
     }
 }
 
-impl Drop for WorkerProcess {
-    /// Starts independent cleanup without blocking the dropping thread.
+impl Drop for Worker {
+    /// Attempts bounded cleanup and reports failures; Minijail's own Drop only frees memory.
     fn drop(&mut self) {
-        self.stop(None);
+        if let Err(error) = self.shutdown() {
+            metrics::counter!("worker_process.cleanup_failures").increment(1);
+            tracing::error!(dependency = "biometric_worker", %error, "worker cleanup failed");
+        }
     }
 }
 
-/// Local lifecycle failures; never includes worker stdout/stderr or request images.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum WorkerProcessError {
-    /// Invalid limits or a non-absolute executable path.
-    #[error("invalid worker process configuration or executable path")]
-    InvalidConfig,
-    /// Local launch, supervision or cleanup operation failed.
-    #[error("could not {operation}: {source}")]
-    Io {
-        /// Attempted lifecycle operation.
-        operation: &'static str,
-        /// Underlying operating system error.
-        #[source]
-        source: Arc<io::Error>,
-    },
-    /// Comparison or connection failure.
+/// Launch, comparison or cleanup failure. Worker-controlled output is never captured.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerError {
+    /// The process has already been reaped.
+    #[error("worker is shut down")]
+    Stopped,
+    /// Socket creation or process cleanup failed.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// Minijail could not launch, configure or reap the worker.
+    #[error(transparent)]
+    Jail(#[from] minijail::Error),
+    /// Comparison failed; local input and analysis errors preserve the connection.
     #[error(transparent)]
     Rpc(#[from] WorkerClientError),
-    /// Unexpected process exit, including nonzero status during shutdown.
-    #[error("worker exited unexpectedly: {0}")]
-    Exited(ExitStatus),
-    /// Shutdown exceeded its grace period, but the child was reaped.
-    #[error("worker exceeded its shutdown deadline; final status: {status}; cause: {cause:?}")]
-    ForcedTermination {
-        /// Observed exit status after the grace period elapsed.
-        status: ExitStatus,
-        /// Failure that initiated shutdown or occurred during cleanup, if any.
-        cause: Option<Box<Self>>,
-    },
-    /// The child was not reaped within the cleanup deadline.
-    #[error(
-        "worker {pid} was not reaped by the deadline (background reaper: {background_reaper}); cause: {cause:?}"
-    )]
-    ReapTimeout {
-        /// Child whose reap deadline elapsed.
-        pid: u32,
-        /// Whether the supervisor retains the child for background reaping.
-        background_reaper: bool,
-        /// Failure that initiated shutdown or occurred during cleanup, if any.
-        cause: Option<Box<Self>>,
-    },
-    /// Cleanup failed while handling an earlier result.
-    #[error("worker cleanup failed: {cleanup}; original cause: {cause:?}")]
-    Cleanup {
-        /// Additional failure encountered during cleanup.
-        cleanup: Box<Self>,
-        /// Original failure, if any.
-        cause: Option<Box<Self>>,
-    },
-    /// The supervisor disappeared without completing its lifecycle protocol.
-    #[error("worker supervisor stopped unexpectedly")]
-    SupervisorStopped,
-}
-
-impl WorkerProcessError {
-    /// Adds the failed local operation without capturing worker output.
-    fn io(operation: &'static str, source: io::Error) -> Self {
-        Self::Io {
-            operation,
-            source: Arc::new(source),
-        }
-    }
+    /// SIGKILL was sent, but the kernel has not completed process cleanup.
+    #[error("worker was not reaped within two seconds after SIGKILL")]
+    ReapTimeout,
 }

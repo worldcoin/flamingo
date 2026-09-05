@@ -1,47 +1,38 @@
 # Worker comparisons
 
-Blocking RPC over an inherited Unix socket (FD 3): four-byte big-endian length,
-then CBOR. One `CompareRequest` (three encoded images) produces one `WorkerResult`
-(two scores or `AnalysisFailed`). No handshake, ready message, version, request IDs,
-pipelining, retries or reconnect.
+Blocking RPC over inherited Unix socket FD 3: four-byte big-endian length, then
+CBOR. One request (three encoded images) produces two scores or `AnalysisFailed`.
+No handshake, ready message, version, pipelining, retries or reconnect.
 
-- `WorkerClient::new` takes a connected socket. `compare(&mut self, ...)` completes
-  before another request starts; the server runs an inline `FnMut` comparator.
-- `first_request_timeout` covers the first comparison, including lazy initialization.
-  Later calls use `request_timeout`. Idle time consumes neither budget.
-- Both sides bound lengths before allocation, encoded images and CBOR decoding.
-  Replies are at most 1 KiB; scores use std `RangeInclusive<f32>`.
-  The model adapter must bound decoded pixels.
-- Partial I/O never resets a deadline. Local input errors and `AnalysisFailed`
-  preserve the connection. Timeout, broken transport, malformed replies and invalid
-  scores permanently invalidate it. Model faults/panics must make the worker exit.
+- `compare(&mut self, ...)` completes before another request starts.
+- The first request's deadline includes lazy initialization; idle time consumes nothing.
+- Encoded images, CBOR and replies are bounded; the adapter must bound decoded pixels.
+- Local input errors and `AnalysisFailed` preserve the connection. Transport errors,
+  timeouts, malformed replies and invalid scores permanently close it.
 
 ## Process ownership
 
-`WorkerProcess::spawn` launches an absolute executable with empty environment,
-null stdio and FD 3. Call before serving threads or generating broker keys.
-The owner exposes blocking `compare`, `try_wait`, `wait` and `shutdown`.
-`wait` observes termination without requesting it and may wait indefinitely.
+Linux-only `Worker::spawn(&File, &Path, WorkerClientConfig)` uses Minijail.
+Launch from a single-threaded bootstrap before creating broker keys.
+The worker gets null stdio, empty environment and FD 3 inside a new PID namespace.
+Minijail remaps/closes descriptors. A short `fexecve` path applies seccomp before
+the executable's loader; upstream `run_fd_remap` instead uses `LD_PRELOAD`.
 
-An independent thread supervises the child. Fatal comparisons, exit or owner drop
-trigger bounded grace, kill and reap. Fatal `compare` calls also await cleanup.
-A stuck comparator cannot interrupt itself; the broker must kill the process.
-Forced termination and reap failures remain errors, including background reaping
-that outlives its deadline. Only the direct child is supervised.
+The owner compares synchronously and shuts down explicitly or on Drop.
+Fatal RPC failures also shut down the namespace. SIGKILL stops a stuck PID 1 and
+its descendants; a fixed two-second reap deadline reports kernel cleanup delays.
+There is no supervisor thread, idle-exit polling or background reaper.
+Spawn success is not readiness; idle exits are detected on the next comparison.
 
-Linux FD sanitization requires readable `/proc/self/fd` and supports Nitro 4.14.
-macOS is for development. This is not yet a sandbox; worker output is discarded.
+The policy is trusted build input. The test policy is deliberately permissive:
+filesystem isolation, privilege/resource limits, private packaging and provisioning
+remain subsequent work. Production Face Engine and Pontifex are unchanged.
 
-## Integration
+Async integration must retain ownership and single-request admission through the
+blocking operation, even if its caller cancels. Minijail's Rust owner is not Send.
+Datadog export, readiness wiring and public-image reproducibility remain separate work.
 
-Launch success is not model readiness. A hung initializer without startup traffic
-is detected by the first comparison. Production readiness must reflect known failures.
-Async brokers must admit only one blocking operation off executor threads and reject
-excess work; caller cancellation must retain admission and ownership until completion.
-
-Metrics use `worker_rpc.*` and `worker_process.*`, including first-comparison latency.
-Datadog export, cross-process traces, readiness/alerts, Minijail, private packaging,
-provisioning and reproducible-image verification remain separate work.
-Deploy and roll back broker/worker as a tested pair. Pontifex/production paths are unchanged.
-
-Test: `cargo test --locked -p flamingo-verifier-worker-protocol -p flamingo-verifier-worker-rpc -p flamingo-verifier-worker-process --all-features`.
+Tests: portable RPC tests run with Cargo. Build the Linux process integration
+executable with `cargo test -p flamingo-verifier-worker-process --all-features --no-run`,
+then run it as root under `timeout --kill-after=5s 60s` (as in Rust CI).
+It uses no libtest threads.

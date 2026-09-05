@@ -28,7 +28,7 @@ pub struct WorkerServerConfig {
 
 /// Reads, computes and replies sequentially. The callback may initialize its model lazily.
 /// Infrastructure errors and panics terminate the connection; the worker entry point must exit.
-/// A stuck callback cannot be interrupted here: the broker's supervisor must kill the process.
+/// A stuck callback cannot be interrupted here: the broker must kill the process.
 pub fn serve_worker<F>(
     mut stream: UnixStream,
     config: WorkerServerConfig,

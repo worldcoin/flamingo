@@ -33,7 +33,6 @@ async-trait = "0.1"
 axum = { version = "0.8", default-features = false }
 base64 = "0.22"
 ciborium = "0.2"
-close_fds = "0.3.2"
 coset = "0.4.2"
 flamingo-verifier-api-types = { version = "0.3.0", path = "verifier/api-types" }
 flamingo-verifier-client = { path = "verifier/client" }
@@ -50,6 +49,7 @@ http-body-util = "0.1"
 image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "0.2"
 metrics = "0.24"
+minijail = { git = "https://github.com/google/minijail", rev = "b0b5dc6997956cdc027295ade5e425c416f30d33" }
 pontifex = { version = "2.0.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
 rand = "0.8"

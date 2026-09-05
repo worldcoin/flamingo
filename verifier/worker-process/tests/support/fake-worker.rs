@@ -1,143 +1,117 @@
+//! Public fixture for the Minijail boundary; never ships with the production broker.
+
+#[cfg(target_os = "linux")]
 use std::{
-    error::Error,
-    io::{self, Read, Write},
+    io,
     os::{fd::FromRawFd, unix::net::UnixStream},
-    path::Path,
     time::Duration,
 };
 
-use flamingo_verifier_worker_process::{WorkerProcess, WorkerProcessConfig};
-use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores, WorkerResult};
-use flamingo_verifier_worker_rpc::{WorkerClientConfig, WorkerServerConfig, serve_worker};
+#[cfg(target_os = "linux")]
+use flamingo_verifier_worker_protocol::{ComparisonScores, WorkerResult};
+#[cfg(target_os = "linux")]
+use flamingo_verifier_worker_rpc::{WorkerServerConfig, serve_worker};
 
-/// Bounds isolated descriptor-allocation probes.
-fn config() -> WorkerProcessConfig {
-    WorkerProcessConfig {
-        rpc: WorkerClientConfig {
-            first_request_timeout: Duration::from_secs(3),
-            request_timeout: Duration::from_secs(3),
-            max_request_bytes: 1024,
-            max_image_bytes: 100,
-            score_range: -1.0..=1.0,
-        },
-        shutdown_timeout: Duration::from_millis(100),
-        reap_timeout: Duration::from_secs(3),
-    }
-}
-
-/// Exercises the real executable/FD boundary with no runtime, environment or extra descriptors.
-fn main() -> Result<(), Box<dyn Error>> {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "normal".into());
-    if mode == "closed-stdio-parent" {
-        let executable = std::env::current_exe()?;
-        // SAFETY: This isolated fixture process has no threads or stdio users.
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+/// Checks confinement before Rust main, where a preload-based sandbox would be too late.
+static CHECK_EARLY_SANDBOX: extern "C" fn() = {
+    /// Uses only libc operations during loader initialization.
+    extern "C" fn check() {
+        // SAFETY: These queries do not retain pointers or modify process state.
         unsafe {
-            libc::close(0);
-            libc::close(1);
-            libc::close(2);
+            if libc::getpid() != 1
+                || libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1
+                || libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) != 2
+            {
+                libc::_exit(120);
+            }
         }
-        let mut worker = WorkerProcess::spawn(Path::new(&executable), &["normal"], config())?;
-        worker.compare(CompareRequest {
-            credential_image: vec![1; 8],
-            live_image: vec![2; 8],
-            challenge_image: vec![3; 8],
-        })?;
-        worker.shutdown()?;
-        assert!(WorkerProcess::spawn(Path::new("/"), &["normal"], config()).is_err());
-        return Ok(());
     }
+    check
+};
 
+#[cfg(target_os = "linux")]
+/// Receives only FD 3; behavior is selected by each comparison's first image byte.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         std::env::vars_os().next().is_none(),
         "inherited environment"
     );
-    assert_eq!(
-        close_fds::iter_open_fds(4).next(),
-        None,
-        "inherited unintended descriptor"
-    );
-    // SAFETY: This entry point is the sole owner of inherited FD 3.
-    let mut socket = unsafe { UnixStream::from_raw_fd(3) };
-    if mode == "startup-exit" {
-        std::process::exit(23);
+    for fd in 0..=2 {
+        assert_eq!(
+            std::fs::read_link(format!("/proc/self/fd/{fd}"))?,
+            std::path::Path::new("/dev/null")
+        );
     }
-    if mode == "startup-stall" {
-        forever();
+    for fd in [4, 5, 6, 64] {
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) },
+            -1,
+            "inherited FD {fd}"
+        );
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
     }
-
-    if mode == "malformed" || mode == "oversized" || mode == "truncated" {
-        read_request(&mut socket)?;
-        let bytes = match mode.as_str() {
-            "malformed" => vec![0, 0, 0, 1, 0xff],
-            "oversized" => u32::MAX.to_be_bytes().to_vec(),
-            _ => vec![0, 0, 0, 9, 1],
-        };
-        socket.write_all(&bytes)?;
-        socket.shutdown(std::net::Shutdown::Write)?;
-        assert_eq!(socket.read(&mut [0])?, 0);
-        return Ok(());
-    }
-
+    // SAFETY: This executable exclusively owns inherited FD 3.
+    let socket = unsafe { UnixStream::from_raw_fd(3) };
     let mut first = true;
-    let result = serve_worker(
+    serve_worker(
         socket,
         WorkerServerConfig {
             max_request_bytes: 1024,
             max_image_bytes: 100,
-            first_request_timeout: Duration::from_secs(10),
-            request_timeout: Duration::from_secs(10),
+            first_request_timeout: Duration::from_secs(20),
+            request_timeout: Duration::from_secs(20),
         },
         |request| {
-            if first && mode == "lazy-load" {
-                std::thread::sleep(Duration::from_millis(200));
+            if first {
+                std::thread::sleep(Duration::from_millis(400));
+                first = false;
             }
-            first = false;
-            assert_eq!(request.live_image, vec![2; 8]);
-            assert_eq!(request.challenge_image, vec![3; 8]);
             match request.credential_image[0] {
-                250 => return Ok(WorkerResult::AnalysisFailed),
-                251 => std::process::exit(42),
-                252 => forever(),
-                253 => std::thread::sleep(Duration::from_millis(250)),
-                254 => {
-                    return Err(Box::new(io::Error::other(
-                        "fixture model initialization failed",
-                    )));
+                200 => {
+                    // SAFETY: The fixture is single-threaded and the child performs only libc calls.
+                    let child = unsafe { libc::fork() };
+                    assert!(child >= 0);
+                    if child == 0 {
+                        unsafe {
+                            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                            loop {
+                                libc::pause();
+                            }
+                        }
+                    }
                 }
-                255 => panic!("fixture model panic"),
+                201 => assert_eq!(std::thread::spawn(|| 42).join().unwrap(), 42),
+                202 => {
+                    // SAFETY: The fixture policy forbids socket creation.
+                    unsafe {
+                        libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+                    }
+                    panic!("forbidden socket syscall returned");
+                }
+                250 => return Ok(WorkerResult::AnalysisFailed),
+                252 => unsafe {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    loop {
+                        libc::pause();
+                    }
+                },
+                254 => return Err(Box::new(io::Error::other("fixture initialization failed"))),
                 _ => {}
             }
-            let score = if mode == "invalid-score" {
-                f32::NAN
-            } else {
-                0.8
-            };
             Ok(WorkerResult::Compared(ComparisonScores {
-                live_similarity: score,
+                live_similarity: 0.8,
                 challenge_similarity: 0.9,
             }))
         },
-    );
-
-    if mode == "ignore-shutdown" {
-        forever();
-    }
-    result.map_err(|error| Box::new(error) as Box<dyn Error>)
+    )?;
+    Ok(())
 }
 
-/// Drains one bounded request before producing an intentionally invalid response.
-fn read_request(socket: &mut UnixStream) -> io::Result<()> {
-    socket.set_read_timeout(Some(Duration::from_secs(3)))?;
-    let mut length = [0; 4];
-    socket.read_exact(&mut length)?;
-    let length = u32::from_be_bytes(length) as usize;
-    assert!(length <= 1024);
-    socket.read_exact(&mut vec![0; length])
-}
-
-/// Simulates a process that cannot cooperate with socket shutdown.
-fn forever() -> ! {
-    loop {
-        std::thread::park();
-    }
+#[cfg(not(target_os = "linux"))]
+/// This fixture cannot exercise Minijail on other operating systems.
+fn main() {
+    panic!("worker-process fixture requires Linux");
 }

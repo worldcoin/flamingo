@@ -60,7 +60,14 @@ jobs:
           app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
           private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - name: tests
-        run: cargo test --locked --workspace --all-features --verbose
+        run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-worker-process --verbose
+      - name: Minijail process tests
+        run: |
+          cargo test --locked -p flamingo-verifier-worker-process --all-features --no-run \
+            --message-format=json > target/worker-test-artifacts.json
+          test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "process") | .executable // empty' target/worker-test-artifacts.json)
+          test -n "$test_binary"
+          sudo timeout --kill-after=5s 60s "$test_binary"
 
   # Evaluate every Nix output without spending the 90-minute EIF build.
   flake:

@@ -9,11 +9,11 @@ publish = false
 [features]
 test-worker = []
 
-[dependencies]
-close_fds.workspace = true
+[target.'cfg(target_os = "linux")'.dependencies]
 flamingo-verifier-worker-rpc.workspace = true
 libc.workspace = true
 metrics.workspace = true
+minijail.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 flamingo-verifier-worker-protocol.workspace = true
@@ -22,7 +22,9 @@ flamingo-verifier-worker-protocol.workspace = true
 name = "worker-process-test-peer"
 path = "tests/support/fake-worker.rs"
 required-features = ["test-worker"]
+test = false
 
 [[test]]
 name = "process"
 required-features = ["test-worker"]
+harness = false
