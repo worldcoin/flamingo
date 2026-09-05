@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "linux")]
 use std::{
-    io,
+    io::{self, Write},
     os::{fd::FromRawFd, unix::net::UnixStream},
     time::Duration,
 };
@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // SAFETY: This executable exclusively owns inherited FD 3.
     let socket = unsafe { UnixStream::from_raw_fd(3) };
+    let mut raw_reply = socket.try_clone()?;
     let mut first = true;
     serve_worker(
         socket,
@@ -91,6 +92,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     panic!("forbidden socket syscall returned");
                 }
+                203 => {
+                    raw_reply.write_all(&[0, 0, 0, 1, 0xff])?;
+                    std::process::exit(0);
+                }
+                204 => {
+                    return Ok(WorkerResult::Compared(ComparisonScores {
+                        live_similarity: f32::NAN,
+                        challenge_similarity: 0.9,
+                    }));
+                }
                 250 => return Ok(WorkerResult::AnalysisFailed),
                 252 => unsafe {
                     libc::signal(libc::SIGTERM, libc::SIG_IGN);
@@ -98,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         libc::pause();
                     }
                 },
+                253 => std::process::exit(42),
                 254 => return Err(Box::new(io::Error::other("fixture initialization failed"))),
                 _ => {}
             }

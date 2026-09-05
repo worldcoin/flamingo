@@ -12,16 +12,23 @@ No handshake, ready message, version, pipelining, retries or reconnect.
 
 ## Process ownership
 
-Linux-only `Worker::spawn(&File, &Path, WorkerClientConfig)` uses Minijail.
+Linux-only `Worker::spawn(&File, &Path, WorkerClientConfig, on_fatal)` uses Minijail.
 Launch from a single-threaded bootstrap before creating broker keys.
 The worker gets null stdio, empty environment and FD 3 inside a new PID namespace.
 Minijail remaps/closes descriptors. A short `fexecve` path applies seccomp before
 the executable's loader; upstream `run_fd_remap` instead uses `LD_PRELOAD`.
 
-The owner compares synchronously and shuts down explicitly or on Drop.
-Fatal RPC failures also shut down the namespace. SIGKILL stops a stuck PID 1 and
-its descendants; a fixed two-second reap deadline reports kernel cleanup delays.
-There is no supervisor thread, idle-exit polling or background reaper.
+One worker lives for the broker's lifetime. A fatal comparison records the original
+RPC failure, requests SIGKILL, then invokes the broker-supplied
+`fn(WorkerClientError) -> !` handler. That handler must immediately exit the process
+(for example, `std::process::exit(1)`), not panic, stop only a task, or wait for
+runtime shutdown. Kill failures are reported but cannot prevent the fatal handler.
+The enclave init must terminate the guest when the broker exits; recovery provisions
+a fresh enclave and fresh keys. Verify this behavior on the pinned Nitro image.
+
+Drop also requests SIGKILL for normal broker shutdown or unwinding. There is no
+worker restart, wait/reap loop, cleanup deadline, or background supervisor. The
+broker must not reap the worker elsewhere or keep running after dropping it.
 Spawn success is not readiness; idle exits are detected on the next comparison.
 
 The policy is trusted build input. The test policy is deliberately permissive:
@@ -35,4 +42,6 @@ Datadog export, readiness wiring and public-image reproducibility remain separat
 Tests: portable RPC tests run with Cargo. Build the Linux process integration
 executable with `cargo test -p flamingo-verifier-worker-process --all-features --no-run`,
 then run it as root under `timeout --kill-after=5s 60s` (as in Rust CI).
-It uses no libtest threads.
+It uses no libtest threads. Each broker test runs under `unshare` (util-linux) in
+its own PID namespace with a ten-second timeout; broker exit removes descendants.
+Only the normal-drop test waits for the child, to verify that SIGKILL was issued.

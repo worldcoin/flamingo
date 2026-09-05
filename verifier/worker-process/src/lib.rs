@@ -7,36 +7,38 @@ use std::{
     io,
     os::{fd::AsRawFd, unix::net::UnixStream},
     path::Path,
-    time::{Duration, Instant},
 };
 
 use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
 use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClientError};
 use minijail::Minijail;
 
-const REAP_TIMEOUT: Duration = Duration::from_secs(2);
-
 // Upstream's Cargo fallback builds static Minijail but does not declare its libcap dependency.
 #[link(name = "cap")]
 unsafe extern "C" {}
 
-/// Owns one blocking connection and its PID namespace. No restart or background supervisor.
+/// Owns one worker for the broker's lifetime. Fatal comparisons terminate the broker.
 pub struct Worker {
     /// Validates each comparison and permanently closes IPC after a fatal error.
     rpc: WorkerClient,
-    /// Owns the sandbox configuration and reaps its child.
-    jail: Minijail,
-    /// Cleared after reaping so cleanup cannot signal a reused PID.
-    pid: Option<libc::pid_t>,
+    /// Keeps Minijail ownership on the bootstrap thread; Drop only frees its configuration.
+    _jail: Minijail,
+    /// Never reaped here, so it cannot be reused before the broker exits.
+    pid: libc::pid_t,
+    /// Broker-owned process exit policy; must not unwind or wait for worker cleanup.
+    on_fatal: fn(WorkerClientError) -> !,
 }
 
 impl Worker {
     /// Launches an open executable with FD 3 and a trusted, build-controlled seccomp policy.
     /// Call from a single-threaded bootstrap before generating keys. Success is not readiness.
+    /// `on_fatal` must immediately exit the broker process, not panic or stop only a task.
+    /// The enclave init must terminate the guest when the broker exits.
     pub fn spawn(
         binary: &File,
         policy: &Path,
         config: WorkerClientConfig,
+        on_fatal: fn(WorkerClientError) -> !,
     ) -> Result<Self, WorkerError> {
         let (rpc, child) = UnixStream::pair()?;
         let rpc = WorkerClient::new(rpc, config)?;
@@ -66,102 +68,56 @@ impl Worker {
 
         Ok(Self {
             rpc,
-            jail,
-            pid: Some(pid),
+            _jail: jail,
+            pid,
+            on_fatal,
         })
     }
 
-    /// Completes one comparison; fatal RPC failures also terminate the whole PID namespace.
-    #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = ?self.pid))]
+    /// Returns only success or recoverable RPC errors. Fatal errors kill the worker and exit
+    /// through the broker's handler; RPC telemetry already records the original failure.
+    #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = self.pid))]
     pub fn compare(&mut self, request: CompareRequest) -> Result<ComparisonScores, WorkerError> {
-        if self.pid.is_none() {
-            return Err(WorkerError::Stopped);
-        }
-
         let result = self.rpc.compare(request);
-        if self.rpc.failure().is_some() {
-            self.shutdown()?;
+        if let Some(error) = self.rpc.failure().cloned() {
+            self.kill();
+            (self.on_fatal)(error);
         }
 
         result.map_err(WorkerError::Rpc)
     }
 
-    /// Forcibly stops the namespace and reaps it within a fixed deadline. Safe to repeat.
-    pub fn shutdown(&mut self) -> Result<(), WorkerError> {
-        let Some(pid) = self.pid else {
-            return Ok(());
-        };
-        // SAFETY: This owner has not reaped pid. Killing namespace PID 1 kills its descendants.
-        // SIGTERM can be ignored by PID 1, so Minijail::kill is unsuitable for a stuck worker.
-        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+    /// Requests namespace termination without waiting; guest teardown owns final cleanup.
+    fn kill(&self) {
+        // SAFETY: This owner never reaps pid. SIGKILL terminates namespace PID 1 and its
+        // descendants; a failed signal must not prevent the broker's fatal exit.
+        if unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error.into());
+                metrics::counter!("worker_process.kill_failures").increment(1);
+                tracing::error!(dependency = "biometric_worker", pid = self.pid, %error, "worker kill failed");
             }
-        }
-
-        let deadline = Instant::now() + REAP_TIMEOUT;
-        loop {
-            // SAFETY: waitid initializes the record; WNOWAIT leaves reaping to Minijail.
-            let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            let result = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    pid as libc::id_t,
-                    &mut status,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            };
-            if result != 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ECHILD) {
-                    self.pid = None;
-                }
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error.into());
-                }
-            } else if unsafe { status.si_pid() } != 0 {
-                self.pid = None;
-                return match self.jail.wait() {
-                    Ok(()) | Err(minijail::Error::Killed(9)) => Ok(()),
-                    Err(error) => Err(error.into()),
-                };
-            }
-
-            if Instant::now() >= deadline {
-                return Err(WorkerError::ReapTimeout);
-            }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
 
 impl Drop for Worker {
-    /// Attempts bounded cleanup and reports failures; Minijail's own Drop only frees memory.
+    /// Requests termination on normal broker shutdown or unwinding, without reaping.
     fn drop(&mut self) {
-        if let Err(error) = self.shutdown() {
-            metrics::counter!("worker_process.cleanup_failures").increment(1);
-            tracing::error!(dependency = "biometric_worker", %error, "worker cleanup failed");
-        }
+        self.kill();
     }
 }
 
-/// Launch, comparison or cleanup failure. Worker-controlled output is never captured.
+/// Launch or recoverable comparison failure. Fatal comparisons invoke the broker's exit handler.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
-    /// The process has already been reaped.
-    #[error("worker is shut down")]
-    Stopped,
-    /// Socket creation or process cleanup failed.
+    /// Socket creation failed.
     #[error(transparent)]
     Io(#[from] io::Error),
-    /// Minijail could not launch, configure or reap the worker.
+    /// Minijail could not launch or configure the worker.
     #[error(transparent)]
     Jail(#[from] minijail::Error),
-    /// Comparison failed; local input and analysis errors preserve the connection.
+    /// Client setup or local input/analysis failure; comparison failures here are recoverable.
     #[error(transparent)]
     Rpc(#[from] WorkerClientError),
-    /// SIGKILL was sent, but the kernel has not completed process cleanup.
-    #[error("worker was not reaped within two seconds after SIGKILL")]
-    ReapTimeout,
 }
