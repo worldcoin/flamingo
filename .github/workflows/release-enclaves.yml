@@ -107,7 +107,12 @@ jobs:
         run: scripts/build-enclaves.sh --workload "$WORKLOAD" target/release
       - name: Package OCI layout
         run: |
-          oci_store=$(nix build --no-link --no-update-lock-file --print-out-paths ".#${WORKLOAD}-oci")
+          case "$WORKLOAD" in
+            verifier) package="flamingo-verifier" ;;
+            di) package="di" ;;
+            *) echo "::error::Unknown workload: $WORKLOAD" >&2; exit 1 ;;
+          esac
+          oci_store=$(nix build --no-link --no-update-lock-file --print-out-paths ".#${package}-oci")
           tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
             -C "$oci_store" -czf "target/release/$WORKLOAD-oci.tar.gz" .
       - name: Build manifest

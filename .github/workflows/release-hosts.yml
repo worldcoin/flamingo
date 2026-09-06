@@ -39,6 +39,7 @@ jobs:
     outputs:
       workload: ${{ steps.release.outputs.workload }}
       version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
       sha: ${{ steps.release.outputs.sha }}
       publish: ${{ steps.release.outputs.publish }}
     steps:
@@ -51,8 +52,13 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
+          set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            workload="${GITHUB_REF_NAME%%-host/*}"
+            case "$GITHUB_REF_NAME" in
+              flamingo-verifier-host/v*) workload=verifier ;;
+              di-host/v*) workload=di ;;
+              *) echo "::error::Unknown host tag: $GITHUB_REF_NAME" >&2; exit 1 ;;
+            esac
             version="${GITHUB_REF_NAME#*/v}"
             publish=true
           else
@@ -60,9 +66,18 @@ jobs:
             version="$INPUT_VERSION"
             publish=$([[ "$DRY_RUN" == "true" ]] && echo false || echo true)
           fi
+          case "$workload" in
+            verifier) tag="flamingo-verifier-host/v$version" ;;
+            di) tag="di-host/v$version" ;;
+            *) echo "::error::Unknown workload: $workload" >&2; exit 1 ;;
+          esac
+          if [[ ! "$version" =~ ^[0-9][0-9A-Za-z._-]*$ ]] || (( ${#version} > 127 )); then
+            echo "::error::Version must fit a Docker tag with a v prefix." >&2; exit 1;
+          fi
           {
             echo "workload=$workload"
             echo "version=$version"
+            echo "tag=$tag"
             echo "sha=$(git rev-parse HEAD)"
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
@@ -91,12 +106,12 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.prepare.outputs.version }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
           IMAGE: ${{ needs.build.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
         run: |
-          tag="${{ needs.prepare.outputs.workload }}-host/v$VERSION"
           printf 'Host image: `%s@%s`\n' "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/body.md"
-          gh release create --draft --target "$RELEASE_SHA" -t "$tag" \
-            -F "$RUNNER_TEMP/body.md" "$tag"
+          gh release create --draft --target "$RELEASE_SHA" -t "$RELEASE_TAG" \
+            -F "$RUNNER_TEMP/body.md" "$RELEASE_TAG"

@@ -18,7 +18,7 @@ set -euo pipefail
 # Env: HUGGING_FACE_TOKEN (verifier only, and only when a model is not in the store
 #      yet — read access to the model repositories).
 
-# A new workload is an entry here plus a `<name>-eif` output in flake.nix.
+# Workload names map to the package names exported by flake.nix below.
 WORKLOADS=("verifier" "di")
 
 usage() {
@@ -65,10 +65,11 @@ while (( $# > 0 )); do
   shift
 done
 
-if [[ ! " ${WORKLOADS[*]} " == *" $workload "* ]]; then
-  echo "[ERROR] Unknown workload: $workload (expected one of: ${WORKLOADS[*]})" >&2
-  exit 2
-fi
+case "$workload" in
+  verifier) package="flamingo-verifier" ;;
+  di) package="di" ;;
+  *) echo "[ERROR] Unknown workload: $workload (expected one of: ${WORKLOADS[*]})" >&2; exit 2 ;;
+esac
 
 command -v nix >/dev/null || {
   echo "[ERROR] nix not found. The OCI image and EIF are built by flake.nix." >&2
@@ -137,7 +138,7 @@ if [[ "$workload" == "verifier" ]]; then
 fi
 
 echo "Building reproducible $workload OCI image..."
-if ! oci_store=$(nix build ".#${workload}-oci" --no-update-lock-file --no-link --print-out-paths); then
+if ! oci_store=$(nix build ".#${package}-oci" --no-update-lock-file --no-link --print-out-paths); then
   echo >&2
   echo "[ERROR] OCI image build failed; the error above says why. A 'platform" >&2
   echo "        mismatch' for x86_64-linux means this host needs a remote builder." >&2
@@ -145,7 +146,7 @@ if ! oci_store=$(nix build ".#${workload}-oci" --no-update-lock-file --no-link -
 fi
 
 echo "Building $workload EIF..."
-if ! eif_store=$(nix build ".#${workload}-eif" --no-update-lock-file --no-link --print-out-paths); then
+if ! eif_store=$(nix build ".#${package}-eif" --no-update-lock-file --no-link --print-out-paths); then
   echo >&2
   echo "[ERROR] EIF build failed; the error above says why." >&2
   exit 1
