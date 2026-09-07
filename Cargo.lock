@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "di-enclave"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "di-host"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -1417,7 +1417,7 @@ checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
 name = "flamingo-verifier-api-types"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1425,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-e2e"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "flamingo-verifier-client",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "face-engine",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave-types"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "pontifex",
  "serde",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-host"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ark-ff",
  "coset",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-sealed-types"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ciborium",
  "flamingo-verifier-protocol",

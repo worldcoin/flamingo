@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.2.1...flamingo-verifier-client-v0.2.2) - 2026-09-07
+
+### Other
+
+- dzejkop/client improvements ([#72](https://github.com/worldcoin/flamingo/pull/72))
+
 ## [0.2.1](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.2.0...flamingo-verifier-client-v0.2.1) - 2026-09-05
 
 ### Added
