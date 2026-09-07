@@ -109,6 +109,7 @@ jobs:
         run: |
           oci_store=$(nix build --no-link --no-update-lock-file --print-out-paths ".#${WORKLOAD}-oci")
           tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            --mode='u+rwX,go+rX' \
             -C "$oci_store" -czf "target/release/$WORKLOAD-oci.tar.gz" .
       - name: Build manifest
         env:
