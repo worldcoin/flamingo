@@ -306,14 +306,17 @@ mod tests {
         // The statement verifies under the key this boot attests, and commits to every input.
         let statement = match_token::verify(&attested.token, signer.signing_public_key())
             .expect("statement should verify");
-        assert_eq!(statement.live_image_hash, Sha256::digest(LIVE).as_slice());
+        assert_eq!(
+            statement.live_image_hash,
+            <[u8; 32]>::from(Sha256::digest(LIVE))
+        );
         assert_eq!(
             statement.credential_claim,
-            Sha256::digest(&inputs.hashes_json).as_slice()
+            <[u8; 32]>::from(Sha256::digest(&inputs.hashes_json))
         );
         assert_eq!(
             statement.challenger_image_hash,
-            Sha256::digest(CHALLENGE).as_slice()
+            <[u8; 32]>::from(Sha256::digest(CHALLENGE))
         );
     }
 
@@ -382,12 +385,12 @@ mod tests {
         let response = handler(state, request).await.expect("match should succeed");
 
         // The credential claim is the most sensitive thing the host must not learn.
-        let claim = Sha256::digest(hashes_json_for(CREDENTIAL));
+        let claim: [u8; 32] = Sha256::digest(hashes_json_for(CREDENTIAL)).into();
         assert!(
             !response
                 .ciphertext
                 .windows(claim.len())
-                .any(|window| window == claim.as_slice())
+                .any(|window| window == claim)
         );
     }
 
@@ -479,7 +482,7 @@ mod tests {
 
         assert_eq!(
             statement.challenger_image_hash,
-            Sha256::digest(OTHER_CHALLENGE).as_slice()
+            <[u8; 32]>::from(Sha256::digest(OTHER_CHALLENGE))
         );
     }
 

@@ -72,7 +72,7 @@ mod tests {
 
         let claim = bind_credential_claim(image, &hashes_json).expect("binding should succeed");
 
-        assert_eq!(claim, Sha256::digest(&hashes_json).as_slice());
+        assert_eq!(claim, <[u8; 32]>::from(Sha256::digest(&hashes_json)));
     }
 
     #[test]
