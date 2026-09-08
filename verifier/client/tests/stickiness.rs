@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, header};
 use axum::routing::post;
 use flamingo_verifier_client::PcrMeasurement;
-use flamingo_verifier_client::{Config, FaceVerifierClient};
+use flamingo_verifier_client::{Config, FlamingoVerifierClient};
 use hex_literal::hex;
 
 /// What a target group's `lb_cookie` stickiness looks like on the wire.
@@ -71,8 +71,8 @@ async fn carries_the_affinity_cookie_from_the_assignment_to_the_next_call() {
             .expect("stub should run");
     });
 
-    let client =
-        FaceVerifierClient::new(config(&format!("http://{address}"))).expect("client should build");
+    let client = FlamingoVerifierClient::new(config(&format!("http://{address}")))
+        .expect("client should build");
 
     for _ in 0..2 {
         client

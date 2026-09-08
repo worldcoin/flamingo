@@ -276,7 +276,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(
-            crate::FaceVerifierClient::new(config),
+            crate::FlamingoVerifierClient::new(config),
             Err(Error::InvalidConfig { .. })
         ));
     }

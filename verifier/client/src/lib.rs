@@ -5,7 +5,7 @@
 //! commits to that key; Pontifex checks the commitment, measurements, signature and freshness.
 //!
 //! ```no_run
-//! use flamingo_verifier_client::{Config, FaceVerifierClient, PcrMeasurement};
+//! use flamingo_verifier_client::{Config, FlamingoVerifierClient, PcrMeasurement};
 //! use flamingo_verifier_sealed_types::MatchInputs;
 //!
 //! # async fn example(inputs: &MatchInputs, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
@@ -13,7 +13,7 @@
 //!     "https://verifier.example.com",
 //!     vec![vec![PcrMeasurement::new(0, pcr0)]],
 //! )?;
-//! let client = FaceVerifierClient::new(config)?;
+//! let client = FlamingoVerifierClient::new(config)?;
 //! let assignment = client.request_assignment().await?;
 //! let result = client.request_match(&assignment, inputs).await?;
 //! # Ok(())
@@ -32,7 +32,7 @@ mod client;
 mod config;
 mod error;
 
-pub use client::{FaceVerifierClient, VerifiedAssignment};
+pub use client::{FlamingoVerifierClient, VerifiedAssignment};
 pub use config::Config;
 pub use error::Error;
 pub use pontifex::{ChannelConsumer, PcrMeasurement};
