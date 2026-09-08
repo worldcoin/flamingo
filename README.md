@@ -1,8 +1,8 @@
-# Embedding Verifier
+# Flamingo
 
 TODO: This Readme contains a lot of AI slob and needs to be fully reworked once we move out of prototyping phase.
 
-Rust workspaces for the embedding verifier host and secure enclave.
+Rust workspaces for the Flamingo Verifier host and secure enclave.
 
 ## Structure
 
@@ -79,7 +79,7 @@ Nix builds the OCI image and converts its root filesystem directly with aws-nitr
 ```bash
 # Reproducible OCI image -> deterministic EIF + PCRs.
 # Needs Linux x86_64; Nitro hardware is only needed to run.
-scripts/build-enclaves.sh --workload verifier   # -> target/eif/flamingo-verifier-enclave.eif, flamingo-verifier-pcr.json
+scripts/build-enclaves.sh --workload verifier   # -> target/eif/verifier-enclave.eif, verifier-pcr.json
 scripts/build-enclaves.sh --workload di         # -> target/eif/di-enclave.eif, di-pcr.json
 
 # Build or inspect only the reproducible OCI boundary.

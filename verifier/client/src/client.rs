@@ -1,4 +1,4 @@
-//! HTTP client for the embedding verifier host.
+//! HTTP client for the Flamingo Verifier host.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -38,7 +38,7 @@ impl VerifiedAssignment {
     }
 }
 
-/// Calls the Flamingo verifier host and verifies the attestation documents it relays.
+/// Calls the Flamingo Verifier host and verifies the attestation documents it relays.
 ///
 /// Nothing is returned until the enclave that produced it has been verified, so callers
 /// cannot accidentally use an unattested key.

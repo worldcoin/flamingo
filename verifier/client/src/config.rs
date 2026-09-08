@@ -25,7 +25,7 @@ const fn default_request_timeout_millis() -> u64 {
     60_000
 }
 
-/// Configuration to interact with an embedding verifier host.
+/// Configuration to interact with a Flamingo Verifier host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

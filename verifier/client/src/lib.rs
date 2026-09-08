@@ -1,4 +1,4 @@
-//! Client for the embedding verifier's enclave-assignment flow.
+//! Client for the Flamingo Verifier's enclave-assignment flow.
 //!
 //! Fetches an assignment, verifies the AWS Nitro attestation document it carries, and yields
 //! a [`ChannelConsumer`] bound to the separately supplied public key. The signed document

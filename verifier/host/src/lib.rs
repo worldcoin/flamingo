@@ -1,4 +1,4 @@
-//! HTTP host for the embedding verifier — the untrusted side of the enclave boundary.
+//! HTTP host for the Flamingo Verifier — the untrusted side of the enclave boundary.
 
 #![deny(
     clippy::all,
