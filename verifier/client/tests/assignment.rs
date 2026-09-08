@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use flamingo_verifier_client as client;
 use flamingo_verifier_client::PcrMeasurement;
-use flamingo_verifier_client::{Config, FaceVerifierClient};
+use flamingo_verifier_client::{Config, FlamingoVerifierClient};
 use hex_literal::hex;
 
 fn config(base_url: &str) -> Config {
@@ -58,7 +58,7 @@ async fn rejects_an_assignment_whose_attestation_does_not_verify() {
     // A syntactically fine response carrying a document signed by nobody.
     let base_url = serve_assignment("hEBAQEA=", "a2V5").await;
 
-    let error = FaceVerifierClient::new(config(&base_url))
+    let error = FlamingoVerifierClient::new(config(&base_url))
         .expect("client should build")
         .request_assignment()
         .await
@@ -74,7 +74,7 @@ async fn rejects_an_assignment_whose_attestation_does_not_verify() {
 async fn rejects_malformed_base64_in_either_assignment_field() {
     for (document, key) in [("!", "a2V5"), ("hEBAQEA=", "!")] {
         let base_url = serve_assignment(document, key).await;
-        let error = FaceVerifierClient::new(config(&base_url))
+        let error = FlamingoVerifierClient::new(config(&base_url))
             .unwrap()
             .request_assignment()
             .await
@@ -91,7 +91,7 @@ async fn surfaces_a_host_error_status_rather_than_retrying() {
     ))
     .await;
 
-    let error = FaceVerifierClient::new(config(&base_url))
+    let error = FlamingoVerifierClient::new(config(&base_url))
         .expect("client should build")
         .request_assignment()
         .await

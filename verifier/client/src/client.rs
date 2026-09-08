@@ -1,4 +1,4 @@
-//! HTTP client for the embedding verifier host.
+//! HTTP client for the Flamingo Verifier host.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -38,19 +38,18 @@ impl VerifiedAssignment {
     }
 }
 
-// TODO: Rename FaceVerifierClient to FlamingoVerifierClient.
-/// Calls the face verifier host and verifies the attestation documents it relays.
+/// Calls the Flamingo Verifier host and verifies the attestation documents it relays.
 ///
 /// Nothing is returned until the enclave that produced it has been verified, so callers
 /// cannot accidentally use an unattested key.
 #[derive(Debug)]
-pub struct FaceVerifierClient {
+pub struct FlamingoVerifierClient {
     config: Config,
     http: reqwest::Client,
     verifier: Verifier,
 }
 
-impl FaceVerifierClient {
+impl FlamingoVerifierClient {
     /// Builds a client from `config`.
     ///
     /// # Errors
@@ -296,7 +295,7 @@ mod tests {
     use pontifex::{ChannelConsumer, ChannelDomain, ChannelEnclave};
     use serde_json::{Value, json};
 
-    use super::{FaceVerifierClient, MatchRequestBody};
+    use super::{FlamingoVerifierClient, MatchRequestBody};
     use crate::{Config, Error, PcrMeasurement};
 
     fn config(base_url: &str) -> Config {
@@ -355,7 +354,7 @@ mod tests {
     }
 
     async fn request_match_with_consumer(
-        client: &FaceVerifierClient,
+        client: &FlamingoVerifierClient,
         consumer: &ChannelConsumer,
         inputs: &MatchInputs,
     ) -> Result<MatchResult, Error> {
@@ -465,7 +464,7 @@ mod tests {
     async fn a_sealed_rejection_round_trips() {
         let answer = MatchResult::Failed(FailureReason::MatchBelowThreshold);
         let (base_url, responder, seen) = serve_enclave(answer.clone(), false).await;
-        let client = FaceVerifierClient::new(config(&base_url)).expect("client should build");
+        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
 
         let result = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
             .await
@@ -491,7 +490,7 @@ mod tests {
     async fn a_reply_from_another_exchange_cannot_be_opened() {
         let (base_url, responder, _) =
             serve_enclave(MatchResult::Failed(FailureReason::MalformedInputs), true).await;
-        let client = FaceVerifierClient::new(config(&base_url)).expect("client should build");
+        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
 
         let error = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
             .await
@@ -503,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn a_stale_assignment_asks_for_a_reassignment() {
         let base_url = serve_error(StatusCode::CONFLICT, "reassign_required", true).await;
-        let client = FaceVerifierClient::new(config(&base_url)).expect("client should build");
+        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
         let responder = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
             .expect("channel key");
 
@@ -520,7 +519,7 @@ mod tests {
     #[tokio::test]
     async fn other_envelopes_keep_their_code_and_retry_flag() {
         let base_url = serve_error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", false).await;
-        let client = FaceVerifierClient::new(config(&base_url)).expect("client should build");
+        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
         let responder = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
             .expect("channel key");
 
@@ -549,7 +548,7 @@ mod tests {
             post(|| async { (StatusCode::BAD_GATEWAY, "not json") }),
         );
         let base_url = serve(router).await;
-        let client = FaceVerifierClient::new(config(&base_url)).expect("client should build");
+        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
         let responder = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
             .expect("channel key");
 
@@ -568,7 +567,8 @@ mod tests {
                 signing_key_attestation: attestation,
             });
             let (base_url, responder, _) = serve_enclave(answer, false).await;
-            let client = FaceVerifierClient::new(config(&base_url)).expect("client should build");
+            let client =
+                FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
 
             let error = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
                 .await
