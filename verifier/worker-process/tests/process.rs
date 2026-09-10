@@ -4,7 +4,9 @@
 use std::{fs::File, os::unix::fs::PermissionsExt, path::Path, process::Command, time::Duration};
 
 #[cfg(target_os = "linux")]
-use flamingo_verifier_worker_process::{SandboxConfig, WORKER_UID, Worker, WorkerError};
+use flamingo_verifier_worker_process::{
+    SandboxConfig, WORKER_UID, Worker, WorkerError, prepare_enclave_root,
+};
 #[cfg(target_os = "linux")]
 use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
 #[cfg(target_os = "linux")]
@@ -97,8 +99,26 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         let outer_root = std::ffi::CString::new(outer_root.as_os_str().as_bytes())?;
         assert_eq!(unsafe { libc::chroot(outer_root.as_ptr()) }, 0);
         assert_eq!(unsafe { libc::chdir(c"/".as_ptr()) }, 0);
+        // A plain chroot is not a mount point: Minijail's propagation change fails.
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    c"/".as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REC | libc::MS_PRIVATE,
+                    std::ptr::null(),
+                )
+            },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EINVAL)
+        );
         root = Path::new("/root");
     }
+    prepare_enclave_root()?;
 
     if case == "recoverable" {
         assert!(

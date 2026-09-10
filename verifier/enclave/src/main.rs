@@ -12,7 +12,7 @@ use flamingo_verifier_enclave::{
     state::EnclaveState,
 };
 #[cfg(target_os = "linux")]
-use flamingo_verifier_worker_process::{SandboxConfig, Worker};
+use flamingo_verifier_worker_process::{SandboxConfig, Worker, prepare_enclave_root};
 #[cfg(target_os = "linux")]
 use flamingo_verifier_worker_rpc::{WorkerClientConfig, WorkerClientError};
 #[cfg(target_os = "linux")]
@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
     }));
 
     rng::verify_nsm_hwrng_current().context("Nitro hardware RNG is not configured")?;
+    prepare_enclave_root().context("failed to prepare enclave root mount for Minijail")?;
     let mut boot = bootstrap::receive().context("worker artifact provisioning failed")?;
     let worker = Worker::spawn(
         &boot.runtime.binary,
