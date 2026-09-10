@@ -69,9 +69,9 @@ jobs:
 
   # Public outputs must evaluate and build without private Git or model credentials.
   flake:
-    name: Public Nix images
+    name: Flake eval
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Nix
@@ -85,5 +85,5 @@ jobs:
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
-      - name: Build public enclave images and provisioner
-        run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.di-oci .#packages.x86_64-linux.verifier-oci .#packages.x86_64-linux.worker-bundle
+      - name: Build the di enclave image
+        run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.di-oci

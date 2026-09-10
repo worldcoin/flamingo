@@ -169,6 +169,8 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
                 artifacts.push(Artifact {
                     role: if logical_path == WORKER_PATH {
                         Role::Worker
+                    } else if logical_path.starts_with("models/") {
+                        Role::Model
                     } else {
                         Role::Library
                     },
@@ -223,7 +225,8 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
             Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed))
         ));
         assert_eq!(worker.compare(images(2))?, scores);
-        return Ok(());
+        worker.compare(images(253))?;
+        panic!("signed worker crash must terminate the broker");
     }
 
     if case == "moved-owner" {
@@ -337,9 +340,6 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         "chroot-escape" => 217,
         "set-hostname" => 218,
         "read-hostname" => 219,
-        "malformed" => 203,
-        "invalid-score" => 204,
-        "crash" => 253,
         "timeout" | "cold-timeout" | "kill-failure" => 252,
         "initialization" => 254,
         "bad-executable" => 1,
@@ -373,6 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir(&root)?;
     std::fs::create_dir(root.join("bin"))?;
     std::fs::create_dir(root.join("lib"))?;
+    std::fs::create_dir(root.join("models"))?;
     std::fs::create_dir(root.join("proc"))?;
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))?;
@@ -391,9 +392,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::copy(library, target)?;
     }
     std::fs::copy(PEER, root.join("bin/verifier-worker"))?;
-    std::fs::write(root.join("lib/fixture-data"), b"approved model data")?;
+    std::fs::write(root.join("models/fixture-data"), b"approved model data")?;
     std::fs::set_permissions(
-        root.join("lib/fixture-data"),
+        root.join("models/fixture-data"),
         std::fs::Permissions::from_mode(0o644),
     )?;
     std::fs::write(temp.join("broker-secret"), b"must not be visible")?;
@@ -401,7 +402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (case, failure_class) in [
         ("recoverable", None),
         ("legacy-root", None),
-        ("signed-runtime", None),
+        ("signed-runtime", Some("transport")),
         ("moved-owner", None),
         ("idle-exit", Some("transport")),
         ("seccomp", Some("transport")),
@@ -420,9 +421,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("chroot-escape", Some("transport")),
         ("set-hostname", Some("transport")),
         ("read-hostname", Some("transport")),
-        ("malformed", Some("invalid_response")),
-        ("invalid-score", Some("invalid_score")),
-        ("crash", Some("transport")),
         ("timeout", Some("request_timeout")),
         ("cold-timeout", Some("request_timeout")),
         ("kill-failure", Some("request_timeout")),

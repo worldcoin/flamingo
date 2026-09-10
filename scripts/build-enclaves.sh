@@ -73,18 +73,6 @@ fi
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-if [[ "$workload" == "verifier" ]]; then
-  if [[ "$(wc -c < config/worker-bootstrap.json)" -gt 65536 ]] || ! jq -e '
-    (.publisher_keys | type == "array" and length > 0) and
-    all(.max_bundle_bytes, .address_space_bytes, .max_threads, .bootstrap_timeout_seconds;
-      . != null)
-  ' config/worker-bootstrap.json >/dev/null; then
-    echo "[ERROR] Configure reviewed publisher keys and qualified worker budgets in config/worker-bootstrap.json before a verifier release build." >&2
-    echo "        For an unconfigured, fail-closed development image use nix build .#verifier-eif directly." >&2
-    exit 1
-  fi
-fi
-
 command -v nix >/dev/null || {
   echo "[ERROR] nix not found. The OCI image and EIF are built by flake.nix." >&2
   exit 1

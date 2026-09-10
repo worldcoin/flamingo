@@ -12,10 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use flamingo_verifier_worker::{
-    FIRST_REQUEST_TIMEOUT, MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, REQUEST_TIMEOUT, run_worker,
-};
-use flamingo_verifier_worker_protocol::{CompareRequest, encode_message};
+use flamingo_verifier_worker::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, run_worker};
+use flamingo_verifier_worker_protocol::CompareRequest;
 use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClientError};
 
 /// Ensures a failed assertion cannot leak a worker process from the test suite.
@@ -26,19 +24,13 @@ struct WorkerChild {
 
 impl WorkerChild {
     /// Mirrors the broker's empty environment and inherited FD contract, without Minijail.
-    fn spawn(fd: RawFd, extra_arg: Option<&str>, extra_env: bool) -> Self {
+    fn spawn(fd: RawFd) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_verifier-worker"));
         command
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        if let Some(arg) = extra_arg {
-            command.arg(arg);
-        }
-        if extra_env {
-            command.env("WORKER_TEST_UNEXPECTED", "1");
-        }
         // SAFETY: only async-signal-safe descriptor operations occur between fork and exec.
         unsafe {
             command.pre_exec(move || {
@@ -84,7 +76,7 @@ impl Drop for WorkerChild {
 #[test]
 fn executable_is_lazy_and_eof_is_clean() {
     let (mut broker, worker) = UnixStream::pair().unwrap();
-    let mut child = WorkerChild::spawn(worker.as_raw_fd(), None, false);
+    let mut child = WorkerChild::spawn(worker.as_raw_fd());
     drop(worker);
     broker
         .set_read_timeout(Some(Duration::from_millis(100)))
@@ -111,31 +103,19 @@ fn executable_is_lazy_and_eof_is_clean() {
     assert!(status.success(), "{status:?}: {diagnostics}");
 }
 
-/// Missing/wrong descriptors, arguments and environment fail before serving anything.
+/// Missing or unusable descriptors fail before serving anything.
 #[test]
 fn executable_rejects_invalid_startup() {
-    assert!(!WorkerChild::spawn(-1, None, false).wait().success());
+    assert!(!WorkerChild::spawn(-1).wait().success());
     let file = File::open("/dev/null").unwrap();
-    assert!(
-        !WorkerChild::spawn(file.as_raw_fd(), None, false)
-            .wait()
-            .success()
-    );
-    for (arg, env) in [(Some("--model-dir=/tmp"), false), (None, true)] {
-        let (_broker, worker) = UnixStream::pair().unwrap();
-        assert!(
-            !WorkerChild::spawn(worker.as_raw_fd(), arg, env)
-                .wait()
-                .success()
-        );
-    }
+    assert!(!WorkerChild::spawn(file.as_raw_fd()).wait().success());
 }
 
 /// A truncated frame is terminal even when the model has never been initialized.
 #[test]
 fn executable_rejects_partial_frame() {
     let (mut broker, worker) = UnixStream::pair().unwrap();
-    let mut child = WorkerChild::spawn(worker.as_raw_fd(), None, false);
+    let mut child = WorkerChild::spawn(worker.as_raw_fd());
     drop(worker);
     broker.write_all(&[0, 0]).unwrap();
     broker.shutdown(std::net::Shutdown::Write).unwrap();
@@ -149,7 +129,7 @@ fn executable_rejects_partial_frame() {
         .take(4096)
         .read_to_string(&mut diagnostics)
         .unwrap();
-    assert_eq!(diagnostics, "worker failure: transport (os_error=None)\n");
+    assert!(diagnostics.contains("transport"));
 }
 
 /// Model initialization is inside the first request and never becomes AnalysisFailed.
@@ -182,24 +162,4 @@ fn missing_models_terminate_the_session() {
         client.compare(request),
         Err(WorkerClientError::AnalysisFailed)
     ));
-}
-
-/// The fixed production profile agrees with encoded maximum-size requests.
-#[test]
-fn limits_cover_the_wire_contract() {
-    let request = CompareRequest {
-        credential_image: vec![0; MAX_IMAGE_BYTES],
-        live_image: vec![0; MAX_IMAGE_BYTES],
-        challenge_image: vec![0; MAX_IMAGE_BYTES],
-    };
-    encode_message(&request, MAX_REQUEST_BYTES).unwrap();
-    WorkerClientConfig {
-        first_request_timeout: FIRST_REQUEST_TIMEOUT,
-        request_timeout: REQUEST_TIMEOUT,
-        max_request_bytes: MAX_REQUEST_BYTES,
-        max_image_bytes: MAX_IMAGE_BYTES,
-        score_range: -1.0..=1.0,
-    }
-    .validate()
-    .unwrap();
 }

@@ -88,15 +88,11 @@ async fn serve(boot: &mut BootWorker, worker: Worker) -> anyhow::Result<()> {
     worker.check_alive();
     let face_engine = Arc::new(FaceEngine::new(worker));
     // Attests both boot keys, so a broken NSM stops the boot and both caches start populated.
-    let runtime = tokio::runtime::Handle::current();
-    let mut state = attestation::run_bounded(move || {
-        runtime
-            .block_on(attestation::connect())
-            .context("Nitro Secure Module is unavailable")?;
-        EnclaveState::generate(Arc::new(NsmAttestor), face_engine)
-            .map_err(|error| anyhow!("failed to generate and attest the boot keys: {error:?}"))
-    })
-    .await?;
+    attestation::connect()
+        .await
+        .context("Nitro Secure Module is unavailable")?;
+    let mut state = EnclaveState::generate(Arc::new(NsmAttestor), face_engine)
+        .map_err(|error| anyhow!("failed to generate and attest the boot keys: {error:?}"))?;
     let (encryption_refresh, signing_refresh) = state.start_attestation_refresh();
     let state = Arc::new(state);
 

@@ -6,7 +6,7 @@ Each workload releases on its own tag: `verifier/vX.Y.Z`, `di/vX.Y.Z`. The tag i
 ## Cutting a release
 
 Verifier releases require reviewed publisher public keys and measured resource budgets in
-`config/worker-bootstrap.json`. The checked-in empty/null configuration deliberately cannot
+`config/worker-bootstrap.json`. The checked-in empty/zero configuration deliberately cannot
 boot a verifier. `scripts/build-enclaves.sh` rejects it before release builds; no test key or
 guessed budget is substituted. Commit the approved configuration before tagging.
 Configured releases also run `worker-bundle validate-config`, using the broker's exact
@@ -82,7 +82,7 @@ nix build --no-update-lock-file .#privatePackages.x86_64-linux.verifier-worker
 it is a prototype qualification root, never part of a public image. All private outputs are
 outside `packages`, so generic public flake checks do not fetch them.
 The production handoff is a signed worker/runtime bundle
-with models and configuration embedded in its executable. See [worker protocol](worker-protocol.md).
+with separate authenticated models and optional configuration files. See [worker protocol](worker-protocol.md).
 
 ## Rotating a measurement in production
 

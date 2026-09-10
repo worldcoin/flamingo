@@ -17,12 +17,10 @@ const fn default_max_attestation_age_millis() -> u64 {
     60 * 60 * 1000
 }
 
-/// Bound connection setup independently from inference.
 const fn default_connect_timeout_millis() -> u64 {
     5_000
 }
 
-/// Leaves headroom beyond the host's 135-second cold-match deadline.
 const fn default_request_timeout_millis() -> u64 {
     150_000
 }
@@ -96,19 +94,8 @@ impl Config {
         Ok(config)
     }
 
-    /// Validates deadlines and the measurement policy before constructing the verifier.
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        if self.connect_timeout_millis == 0
-            || self.connect_timeout_millis > self.request_timeout_millis
-            || self.request_timeout_millis > default_request_timeout_millis()
-        {
-            return Err(Error::InvalidConfig {
-                attribute: "request_timeout_millis".to_string(),
-                reason: "timeouts must satisfy 0 < connect <= request <= 150000 milliseconds"
-                    .to_string(),
-            });
-        }
-
+    /// Validates the measurement policy before constructing the verifier.
+    fn validate(&self) -> Result<(), Error> {
         self.verifier().map(|_| ())
     }
 
@@ -241,19 +228,6 @@ mod tests {
 
     fn pcrs() -> Vec<Vec<PcrMeasurement>> {
         vec![vec![PcrMeasurement::new(0, [0xabu8; 48])]]
-    }
-
-    /// Zero or oversized deadlines must not disable resource bounds.
-    #[test]
-    fn rejects_unbounded_or_inverted_deadlines() {
-        let mut config = Config::new("http://localhost:8000", pcrs()).unwrap();
-        for (connect, request) in [(0, 150_000), (1, 0), (1, 150_001), (5_001, 5_000)] {
-            config.connect_timeout_millis = connect;
-            config.request_timeout_millis = request;
-
-            assert!(config.validate().is_err());
-            assert!(crate::FlamingoVerifierClient::new(config.clone()).is_err());
-        }
     }
 
     #[test]

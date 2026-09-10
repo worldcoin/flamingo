@@ -1,7 +1,7 @@
 {
   "publisher_keys": [],
-  "max_bundle_bytes": null,
-  "address_space_bytes": null,
-  "max_threads": null,
-  "bootstrap_timeout_seconds": null
+  "max_bundle_bytes": 0,
+  "address_space_bytes": 0,
+  "max_threads": 0,
+  "bootstrap_timeout_seconds": 0
 }

@@ -44,7 +44,7 @@ pub struct Manifest {
 pub struct Artifact {
     /// Restricted relative path, never a host path.
     pub logical_path: String,
-    /// Only the worker and its runtime linker/library closure are supported.
+    /// Declares how the worker uses this signed file.
     pub role: Role,
     /// Lowercase hex SHA-384 of the entire file.
     pub sha384: String,
@@ -52,12 +52,16 @@ pub struct Artifact {
     pub size: u64,
 }
 
-/// Models and graph configuration belong inside the biometrics executable.
+/// Roles describe the signed files inside the isolated runtime root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// The sole worker executable.
     Worker,
+    /// External model weights loaded by the worker.
+    Model,
+    /// Optional graph configuration supplied with the runtime.
+    Configuration,
     /// Its ELF interpreter, when dynamically linked.
     Loader,
     /// A runtime shared library or linker data file.
@@ -152,6 +156,8 @@ impl Manifest {
             }
             match artifact.role {
                 Role::Worker if path == WORKER_PATH => workers += 1,
+                Role::Model if path.starts_with("models/") => {}
+                Role::Configuration if path.starts_with("config/") => {}
                 Role::Loader | Role::Library
                     if path.starts_with("lib/")
                         || path.starts_with("lib64/")

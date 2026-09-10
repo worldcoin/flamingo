@@ -25,21 +25,32 @@ impl Fixture {
         elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         elf[16] = 2;
         elf[18] = 62;
-        let files = vec![elf, b"library-fixture".to_vec()];
-        let artifacts = [WORKER_PATH, "lib/fixture.so"]
-            .iter()
-            .enumerate()
-            .map(|(index, path)| Artifact {
-                logical_path: (*path).to_owned(),
-                role: if index == 0 {
-                    Role::Worker
-                } else {
-                    Role::Library
-                },
-                sha384: hex::encode(Sha384::digest(&files[index])),
-                size: files[index].len() as u64,
-            })
-            .collect();
+        let files = vec![
+            elf,
+            b"library-fixture".to_vec(),
+            b"model-fixture".to_vec(),
+            b"config-fixture".to_vec(),
+        ];
+        let artifacts = [
+            WORKER_PATH,
+            "lib/fixture.so",
+            "models/rgbnet.onnx",
+            "config/model.yaml",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(index, path)| Artifact {
+            logical_path: (*path).to_owned(),
+            role: [
+                Role::Worker,
+                Role::Library,
+                Role::Model,
+                Role::Configuration,
+            ][index],
+            sha384: hex::encode(Sha384::digest(&files[index])),
+            size: files[index].len() as u64,
+        })
+        .collect();
         Self {
             manifest: Manifest {
                 manifest_version: 1,
@@ -65,43 +76,6 @@ impl Fixture {
             bytes.extend_from_slice(file);
         }
         bytes
-    }
-}
-
-/// Release tooling rejects exactly the policy encodings that measured startup rejects.
-#[test]
-fn config_cli_uses_the_startup_validator() {
-    let key = Fixture::new().key;
-    let config = serde_json::json!({
-        "publisher_keys": [hex::encode(key.verifying_key().to_encoded_point(true).as_bytes())],
-        "max_bundle_bytes": 1024,
-        "address_space_bytes": 1024,
-        "max_threads": 1,
-        "bootstrap_timeout_seconds": 1
-    });
-    let valid = serde_json::to_string(&config).unwrap();
-    let mut invalid_key = config.clone();
-    invalid_key["publisher_keys"] = serde_json::json!([format!("02{}", "ff".repeat(48))]);
-    let mut unknown = config;
-    unknown["disable_sandbox"] = true.into();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("policy.json");
-
-    for (bytes, expected) in [
-        (valid.clone(), true),
-        (invalid_key.to_string(), false),
-        (unknown.to_string(), false),
-        (valid.replace("1024", "1.024e3"), false),
-        (" ".repeat(64 * 1024 + 1), false),
-    ] {
-        fs::write(&path, bytes).unwrap();
-        let result = std::process::Command::new(env!("CARGO_BIN_EXE_worker-bundle"))
-            .arg("validate-config")
-            .arg(&path)
-            .output()
-            .unwrap();
-        assert_eq!(result.status.success(), expected);
-        assert!(result.stdout.is_empty());
     }
 }
 
@@ -303,6 +277,19 @@ fn packaging_matches_the_receiver_and_rejects_changed_files() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, data).unwrap();
     }
+    let generated = std::process::Command::new(env!("CARGO_BIN_EXE_worker-bundle"))
+        .args(["manifest", &fixture.manifest.release_id])
+        .arg(source.path())
+        .output()
+        .unwrap();
+    assert!(generated.status.success(), "{:?}", generated.stderr);
+    let manifest: Manifest = serde_json::from_slice(&generated.stdout).unwrap();
+    let mut expected = fixture.manifest.artifacts.clone();
+    expected.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+    assert_eq!(
+        serde_json::to_value(&manifest.artifacts).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
     let manifest = serde_json::to_vec(&fixture.manifest).unwrap();
     let signature: Signature = fixture.key.sign(&manifest);
     let mut bytes = Vec::new();

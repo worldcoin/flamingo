@@ -2,9 +2,7 @@
 
 use std::{fs::File, io::Read, os::unix::net::UnixStream, path::PathBuf, thread};
 
-use flamingo_verifier_worker::{
-    FIRST_REQUEST_TIMEOUT, MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, REQUEST_TIMEOUT, run_worker,
-};
+use flamingo_verifier_worker::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, run_worker};
 use flamingo_verifier_worker_protocol::CompareRequest;
 use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClientError};
 
@@ -32,8 +30,8 @@ fn real_model_roundtrip() {
     let mut client = WorkerClient::new(
         broker,
         WorkerClientConfig {
-            first_request_timeout: FIRST_REQUEST_TIMEOUT,
-            request_timeout: REQUEST_TIMEOUT,
+            first_request_timeout: std::time::Duration::from_secs(120),
+            request_timeout: std::time::Duration::from_secs(10),
             max_request_bytes: MAX_REQUEST_BYTES,
             max_image_bytes: MAX_IMAGE_BYTES,
             score_range: -1.0..=1.0,

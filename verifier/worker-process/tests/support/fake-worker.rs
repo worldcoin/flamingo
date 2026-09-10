@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "linux")]
 use std::{
-    io::{self, Write},
+    io,
     os::{fd::FromRawFd, unix::net::UnixStream},
     time::Duration,
 };
@@ -71,7 +71,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "visible host path: {path}"
         );
     }
-    assert_eq!(std::fs::read("/lib/fixture-data")?, b"approved model data");
+    assert_eq!(
+        std::fs::read("/models/fixture-data")?,
+        b"approved model data"
+    );
     assert_eq!(std::env::current_dir()?, std::path::Path::new("/"));
     let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     assert_eq!(
@@ -99,15 +102,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable exclusively owns inherited FD 3.
     let socket = unsafe { UnixStream::from_raw_fd(3) };
     assert!(socket.local_addr()?.is_unnamed());
-    let mut raw_reply = socket.try_clone()?;
     let mut first = true;
     serve_worker(
         socket,
         WorkerServerConfig {
             max_request_bytes: 1024,
             max_image_bytes: 100,
-            first_request_timeout: Duration::from_secs(20),
-            request_timeout: Duration::from_secs(20),
         },
         |request| {
             if first {
@@ -129,16 +129,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
                     }
                     // Returning scores makes the broker test fail if the syscall was allowed.
-                }
-                203 => {
-                    raw_reply.write_all(&[0, 0, 0, 1, 0xff])?;
-                    std::process::exit(0);
-                }
-                204 => {
-                    return Ok(WorkerResult::Compared(ComparisonScores {
-                        live_similarity: f32::NAN,
-                        challenge_similarity: 0.9,
-                    }));
                 }
                 205..=219 => {
                     // All calls must kill the whole process, even from a secondary thread.
@@ -174,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             212 => {
                                 libc::openat(
                                     libc::AT_FDCWD,
-                                    c"/lib/fixture-data".as_ptr(),
+                                    c"/models/fixture-data".as_ptr(),
                                     libc::O_WRONLY,
                                 );
                             }
@@ -191,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             215 => {
                                 libc::syscall(
                                     libc::SYS_execve,
-                                    c"/lib/fixture-data".as_ptr(),
+                                    c"/models/fixture-data".as_ptr(),
                                     0,
                                     0,
                                 );
@@ -253,7 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         assert!(fd < 64);
                         files.push(unsafe { std::fs::File::from_raw_fd(fd) });
                     }
-                    assert_eq!(files.len(), 59); // stdio, RPC and raw_reply already use 0..=4.
+                    assert_eq!(files.len(), 60); // stdio and RPC already use 0..=3.
                 }
                 222 => {
                     use std::sync::{

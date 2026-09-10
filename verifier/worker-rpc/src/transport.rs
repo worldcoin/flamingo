@@ -110,29 +110,3 @@ pub(crate) fn read_frame(
     read_all(stream, &mut length, deadline)?;
     read_body(stream, length, limit, deadline)
 }
-
-/// Allows idle workers to wait indefinitely; the frame budget starts at its first byte.
-/// EOF between requests is graceful, but EOF inside a request is an error.
-pub(crate) fn read_request(
-    stream: &mut UnixStream,
-    limit: usize,
-    timeout: Duration,
-) -> io::Result<Option<(Vec<u8>, Instant)>> {
-    stream.set_read_timeout(None)?;
-    let mut length = [0; 4];
-    loop {
-        match stream.read(&mut length[..1]) {
-            Ok(0) => return Ok(None),
-            Ok(_) => break,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-
-    let deadline = Instant::now() + timeout;
-    read_all(stream, &mut length[1..], deadline)?;
-    Ok(Some((
-        read_body(stream, length, limit, deadline)?,
-        deadline,
-    )))
-}

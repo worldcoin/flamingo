@@ -88,6 +88,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     manifest.artifacts.push(Artifact {
                         role: if relative == WORKER_PATH {
                             Role::Worker
+                        } else if relative.starts_with("models/") {
+                            Role::Model
+                        } else if relative.starts_with("config/") {
+                            Role::Configuration
                         } else {
                             Role::Library
                         },

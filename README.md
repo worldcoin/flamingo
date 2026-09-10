@@ -5,7 +5,7 @@ and one separately sandboxed biometric worker. The broker decrypts requests and
 signs results; the worker receives only three images and returns two comparison
 scores. Broker keys, claims and thresholds never enter the worker.
 
-The biometrics-owned executable must embed its models and configuration. It is
+The signed runtime contains the worker, models and required libraries. It is
 authenticated and sandboxed before broker keys or serving threads exist. There is
 no placeholder, in-process fallback, worker restart or support for other proof types.
 
@@ -87,7 +87,7 @@ panic. Fatal worker failures or deadlines terminate the enclave.
 `/health` means the host process is alive; `/ready` checks broker availability and
 observed worker liveness. Neither proves lazy model initialization or inference
 correctness. [Operations](docs/worker-operations.md) documents nested deadlines,
-production telemetry, proxy/probe configuration, rollout and rollback.
+telemetry, qualification, rollout and rollback.
 
 Actual worker correctness, resource sizing and Linux/Nitro qualification remain
 release gates requiring the real executable and approved biometric fixtures.

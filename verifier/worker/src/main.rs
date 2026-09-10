@@ -5,10 +5,6 @@ use std::{io, os::fd::FromRawFd, os::unix::net::UnixStream, path::Path, process:
 /// Suppresses potentially sensitive panic payloads and exits on every terminal failure.
 fn main() -> ExitCode {
     std::panic::set_hook(Box::new(|_| eprintln!("worker failure: panic")));
-    if std::env::args_os().len() != 1 || std::env::vars_os().next().is_some() {
-        eprintln!("worker failure: unexpected arguments or environment");
-        return ExitCode::FAILURE;
-    }
     let stream = match inherited_socket() {
         Ok(stream) => stream,
         Err(_) => {
@@ -43,26 +39,5 @@ fn inherited_socket() -> io::Result<UnixStream> {
     }
     // SAFETY: FD 3 is valid and exclusively owned by this single-threaded entry point.
     let stream = unsafe { UnixStream::from_raw_fd(3) };
-    // Validate AF_UNIX without getpeername: the broker may already have closed its end.
-    // A socket that was never connected fails explicitly on the first RPC read.
-    stream.local_addr()?;
-    let mut socket_type: libc::c_int = 0;
-    let mut size = std::mem::size_of_val(&socket_type) as libc::socklen_t;
-    // SAFETY: the socket and both output buffers remain valid for this call.
-    let result = unsafe {
-        libc::getsockopt(
-            3,
-            libc::SOL_SOCKET,
-            libc::SO_TYPE,
-            std::ptr::from_mut(&mut socket_type).cast(),
-            &mut size,
-        )
-    };
-    if result == -1 || socket_type != libc::SOCK_STREAM {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "FD 3 is not a stream socket",
-        ));
-    }
     Ok(stream)
 }

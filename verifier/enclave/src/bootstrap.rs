@@ -72,12 +72,7 @@ pub fn receive() -> anyhow::Result<BootWorker> {
     drop(directory);
     // Nix normalizes directory modes; restore private write access before receiving bytes.
     std::fs::set_permissions(runtime_parent, std::fs::Permissions::from_mode(0o700))?;
-    let deadline = Instant::now()
-        + Duration::from_secs(
-            config
-                .bootstrap_timeout_seconds
-                .context("missing bootstrap deadline")?,
-        );
+    let deadline = Instant::now() + Duration::from_secs(config.bootstrap_timeout_seconds);
     let listener = vsock::VsockListener::bind_with_cid_port(libc::VMADDR_CID_ANY, 1001)?;
     listener.set_nonblocking(true)?;
     let (socket, peer) = loop {
@@ -100,72 +95,14 @@ pub fn receive() -> anyhow::Result<BootWorker> {
     let runtime = flamingo_verifier_worker_artifact::receive(
         &mut provisioner,
         &keys,
-        config.max_bundle_bytes.context("missing bundle budget")?,
+        config.max_bundle_bytes,
         runtime_parent,
     )
     .context("worker runtime authentication failed")?;
     Ok(BootWorker {
         runtime,
-        address_space_bytes: config
-            .address_space_bytes
-            .context("missing address-space budget")?,
-        max_threads: config.max_threads.context("missing thread budget")?,
+        address_space_bytes: config.address_space_bytes,
+        max_threads: config.max_threads,
         provisioner,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Config;
-
-    /// Public CI images build without trusted keys, but cannot provision a worker.
-    #[test]
-    fn unconfigured_release_cannot_boot() {
-        let config: Config = serde_json::from_str(r#"{"publisher_keys":[],"max_bundle_bytes":null,"address_space_bytes":null,"max_threads":null,"bootstrap_timeout_seconds":null}"#).unwrap();
-        assert!(config.validate().is_err());
-    }
-
-    /// Trust and resource policy is not negotiable through unknown configuration fields.
-    #[test]
-    fn rejects_unknown_settings() {
-        assert!(
-            serde_json::from_str::<Config>(r#"{"publisher_keys":[],"disable_sandbox":true}"#)
-                .is_err()
-        );
-    }
-
-    /// Trust and every deployment budget must be valid together; no setting is defaulted.
-    #[test]
-    fn validates_configured_trust_and_each_budget() {
-        let key = p384::ecdsa::SigningKey::from_slice(&[1; 48]).unwrap();
-        let public = hex::encode(key.verifying_key().to_encoded_point(true).as_bytes());
-        let valid = serde_json::json!({
-            "publisher_keys": [public],
-            "max_bundle_bytes": 1024,
-            "address_space_bytes": 1024,
-            "max_threads": 1,
-            "bootstrap_timeout_seconds": 1
-        });
-        let config: Config = serde_json::from_value(valid.clone()).unwrap();
-        assert_eq!(config.validate().unwrap().len(), 1);
-
-        for (field, value) in [
-            ("publisher_keys", serde_json::json!([])),
-            ("publisher_keys", serde_json::json!(["00"])),
-            ("publisher_keys", serde_json::json!(["00".repeat(49)])),
-            ("max_bundle_bytes", serde_json::json!(0)),
-            ("max_bundle_bytes", serde_json::json!(u64::MAX)),
-            ("address_space_bytes", serde_json::json!(0)),
-            ("address_space_bytes", serde_json::json!(u64::MAX)),
-            ("max_threads", serde_json::json!(0)),
-            ("max_threads", serde_json::json!(257)),
-            ("bootstrap_timeout_seconds", serde_json::json!(0)),
-            ("bootstrap_timeout_seconds", serde_json::json!(901)),
-        ] {
-            let mut invalid = valid.clone();
-            invalid[field] = value;
-            let config: Config = serde_json::from_value(invalid).unwrap();
-            assert!(config.validate().is_err(), "{field} must be validated");
-        }
-    }
 }

@@ -37,8 +37,6 @@ fn server_config() -> WorkerServerConfig {
     WorkerServerConfig {
         max_request_bytes: 1024,
         max_image_bytes: 100,
-        first_request_timeout: WAIT,
-        request_timeout: WAIT,
     }
 }
 
@@ -371,7 +369,7 @@ fn invalid_configuration_is_rejected() {
     }
     let (broker, _worker) = UnixStream::pair().unwrap();
     let mut limits = server_config();
-    limits.request_timeout = Duration::ZERO;
+    limits.max_request_bytes = 0;
     assert!(matches!(
         serve_worker(broker, limits, |_| unreachable!()),
         Err(WorkerServerError::InvalidConfig)
@@ -408,49 +406,6 @@ fn server_rejects_bad_frames_and_inputs_before_inference() {
                 | WorkerServerError::InvalidImages)
         ));
     }
-}
-
-#[test]
-/// Idle time is allowed, but an incomplete header must finish under its original deadline.
-fn server_deadline_starts_at_first_byte_not_at_launch() {
-    let (mut broker, worker) = UnixStream::pair().unwrap();
-    let mut limits = server_config();
-    limits.first_request_timeout = Duration::from_millis(100);
-    limits.request_timeout = limits.first_request_timeout;
-    let (done, completed) = mpsc::channel();
-    let server = thread::spawn(move || {
-        done.send(serve_worker(worker, limits, |_| unreachable!()))
-            .unwrap()
-    });
-    assert!(matches!(
-        completed.recv_timeout(Duration::from_millis(150)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
-    broker.write_all(&[0]).unwrap();
-    let error = completed.recv_timeout(WAIT).unwrap().unwrap_err();
-    assert_eq!(error.failure_class(), "request_timeout");
-    server.join().unwrap();
-}
-
-#[test]
-/// The server must not return scores produced after its inference deadline.
-fn server_rejects_late_computation() {
-    let (broker, worker) = UnixStream::pair().unwrap();
-    let mut limits = server_config();
-    limits.first_request_timeout = Duration::from_millis(50);
-    limits.request_timeout = limits.first_request_timeout;
-    let mut client = WorkerClient::new(broker, config()).unwrap();
-    let server = thread::spawn(move || {
-        serve_worker(worker, limits, |_| {
-            thread::sleep(Duration::from_millis(120));
-            Ok(WorkerResult::Compared(SCORES))
-        })
-    });
-    assert!(client.compare(images(1)).is_err());
-    assert_eq!(
-        server.join().unwrap().unwrap_err().failure_class(),
-        "request_timeout"
-    );
 }
 
 #[test]

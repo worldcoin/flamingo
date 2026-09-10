@@ -133,11 +133,6 @@ impl EnclaveState {
     pub async fn signing_key_attestation(&self) -> Vec<u8> {
         self.attested_signing_key.document().await
     }
-
-    /// Health can use cached attestations only while both remain acceptable to clients.
-    pub async fn attestations_are_fresh(&self) -> bool {
-        self.attested_encryption_key.is_fresh().await && self.attested_signing_key.is_fresh().await
-    }
 }
 
 #[cfg(test)]

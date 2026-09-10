@@ -14,13 +14,13 @@ pub struct BootstrapConfig {
     /// SEC1-encoded P-384 publisher public keys in hex; no default trust anchor.
     pub publisher_keys: Vec<String>,
     /// Aggregate artifact budget, selected for the provisioned enclave's RAM.
-    pub max_bundle_bytes: Option<u64>,
+    pub max_bundle_bytes: u64,
     /// Worker virtual-memory ceiling, leaving room for the broker and kernel.
-    pub address_space_bytes: Option<u64>,
+    pub address_space_bytes: u64,
     /// Reserved worker UID's process/thread ceiling.
-    pub max_threads: Option<u32>,
+    pub max_threads: u32,
     /// Whole startup transfer budget, including waiting for the provisioner and acknowledgement.
-    pub bootstrap_timeout_seconds: Option<u64>,
+    pub bootstrap_timeout_seconds: u64,
 }
 
 impl BootstrapConfig {
@@ -31,18 +31,10 @@ impl BootstrapConfig {
     pub fn validate(&self) -> Result<Vec<VerifyingKey>, Error> {
         if self.publisher_keys.is_empty()
             || self.publisher_keys.len() > 8
-            || !self
-                .max_bundle_bytes
-                .is_some_and(|value| (1..=MAX_BUNDLE_BYTES).contains(&value))
-            || !self
-                .address_space_bytes
-                .is_some_and(|value| (1..=i64::MAX as u64).contains(&value))
-            || !self
-                .max_threads
-                .is_some_and(|value| (1..=256).contains(&value))
-            || !self
-                .bootstrap_timeout_seconds
-                .is_some_and(|value| (1..=900).contains(&value))
+            || !(1..=MAX_BUNDLE_BYTES).contains(&self.max_bundle_bytes)
+            || !(1..=i64::MAX as u64).contains(&self.address_space_bytes)
+            || !(1..=256).contains(&self.max_threads)
+            || !(1..=900).contains(&self.bootstrap_timeout_seconds)
         {
             return Err(Error::InvalidConfig);
         }
@@ -73,5 +65,52 @@ impl BootstrapConfig {
         }
 
         serde_json::from_slice(&bytes).map_err(|_| Error::InvalidConfig)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BootstrapConfig as Config;
+
+    /// Public CI images build without trusted keys, but cannot provision a worker.
+    #[test]
+    fn unconfigured_release_cannot_boot() {
+        let config: Config = serde_json::from_str(r#"{"publisher_keys":[],"max_bundle_bytes":0,"address_space_bytes":0,"max_threads":0,"bootstrap_timeout_seconds":0}"#).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    /// Trust and every deployment budget must be valid together; no setting is defaulted.
+    #[test]
+    fn validates_configured_trust_and_each_budget() {
+        let key = p384::ecdsa::SigningKey::from_slice(&[1; 48]).unwrap();
+        let public = hex::encode(key.verifying_key().to_encoded_point(true).as_bytes());
+        let valid = serde_json::json!({
+            "publisher_keys": [public],
+            "max_bundle_bytes": 1024,
+            "address_space_bytes": 1024,
+            "max_threads": 1,
+            "bootstrap_timeout_seconds": 1
+        });
+        let config: Config = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(config.validate().unwrap().len(), 1);
+
+        for (field, value) in [
+            ("publisher_keys", serde_json::json!([])),
+            ("publisher_keys", serde_json::json!(["00"])),
+            ("publisher_keys", serde_json::json!(["00".repeat(49)])),
+            ("max_bundle_bytes", serde_json::json!(0)),
+            ("max_bundle_bytes", serde_json::json!(u64::MAX)),
+            ("address_space_bytes", serde_json::json!(0)),
+            ("address_space_bytes", serde_json::json!(u64::MAX)),
+            ("max_threads", serde_json::json!(0)),
+            ("max_threads", serde_json::json!(257)),
+            ("bootstrap_timeout_seconds", serde_json::json!(0)),
+            ("bootstrap_timeout_seconds", serde_json::json!(901)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            let config: Config = serde_json::from_value(invalid).unwrap();
+            assert!(config.validate().is_err(), "{field} must be validated");
+        }
     }
 }

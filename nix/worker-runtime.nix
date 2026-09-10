@@ -13,7 +13,7 @@ pkgs.runCommand "verifier-worker-runtime-${worker.version}" { } ''
   cp ${models}/models/*.onnx "$out/models/"
   while IFS= read -r path; do
     if [ "$path" != "${worker}" ]; then
-      cp -a "$path" "$out/nix/store/"
+      cp -aL "$path" "$out/nix/store/"
     fi
   done < ${closure}/store-paths
   # Deployment must additionally ensure root ownership, including on single-user Nix hosts.

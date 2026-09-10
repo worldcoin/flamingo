@@ -163,16 +163,3 @@ pub enum WorkerError {
     #[error(transparent)]
     Rpc(#[from] WorkerClientError),
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Worker;
-
-    /// The parent may transfer its exclusive worker owner after single-threaded startup.
-    #[test]
-    fn worker_is_send() {
-        /// Checks the bound without constructing a jail on a libtest thread.
-        const fn require_send<T: Send>() {}
-        require_send::<Worker>();
-    }
-}

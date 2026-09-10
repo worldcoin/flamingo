@@ -1057,7 +1057,6 @@ dependencies = [
  "hex",
  "libc",
  "metrics",
- "p384",
  "pontifex",
  "rand 0.8.8",
  "rmp-serde",

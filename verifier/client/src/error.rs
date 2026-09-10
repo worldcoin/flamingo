@@ -32,11 +32,7 @@ pub enum Error {
 
     /// The response was not the JSON the endpoint is specified to return.
     #[error("response was not valid JSON: {0}")]
-    MalformedResponse(#[source] serde_json::Error),
-
-    /// The untrusted host exceeded the bounded JSON response envelope.
-    #[error("host response exceeded 65536 bytes")]
-    ResponseTooLarge,
+    MalformedResponse(#[source] reqwest::Error),
 
     /// An attestation document did not verify.
     #[error(transparent)]
