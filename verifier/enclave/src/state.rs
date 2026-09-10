@@ -6,7 +6,7 @@ use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_sealed_types::MATCH_CHANNEL_DOMAIN;
 use pontifex::{ChannelDomain, ChannelEnclave};
-use tokio::task::JoinHandle;
+use tokio::{sync::Semaphore, task::JoinHandle};
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
@@ -16,11 +16,18 @@ use crate::{
 
 /// Immutable state generated once during enclave boot.
 pub struct EnclaveState {
+    /// Opens requests sealed to this boot.
     channel: ChannelEnclave,
+    /// Signs accepted match claims.
     signing_key: SigningKey,
+    /// Cached attestation of the sealed-channel key.
     attested_encryption_key: AttestedKey,
+    /// Cached attestation of the statement key.
     attested_signing_key: AttestedKey,
+    /// Synchronous comparison boundary, called only by the admitted blocking task.
     face_engine: Arc<dyn FaceComparator>,
+    /// One admitted match, including detached blocking work after caller cancellation.
+    pub(crate) match_slot: Arc<Semaphore>,
 }
 
 impl EnclaveState {
@@ -70,6 +77,7 @@ impl EnclaveState {
             attested_encryption_key,
             attested_signing_key,
             face_engine,
+            match_slot: Arc::new(Semaphore::new(1)),
         })
     }
 

@@ -47,6 +47,11 @@
         // enclaveImages
         // {
           verifierModels = faceModels.package;
+          verifier-worker-runtime = import ./nix/worker-runtime.nix {
+            inherit pkgs;
+            worker = enclaveBins.verifier-worker;
+            models = faceModels.package;
+          };
         };
 
       faceModels = faceModels.metadata;

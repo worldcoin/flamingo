@@ -1,0 +1,22 @@
+[package]
+name = "flamingo-verifier-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "verifier-worker"
+path = "src/main.rs"
+
+[dependencies]
+face-engine.workspace = true
+flamingo-verifier-worker-protocol.workspace = true
+flamingo-verifier-worker-rpc.workspace = true
+image.workspace = true
+libc.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+base64.workspace = true

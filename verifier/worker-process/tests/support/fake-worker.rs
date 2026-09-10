@@ -98,6 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // SAFETY: This executable exclusively owns inherited FD 3.
     let socket = unsafe { UnixStream::from_raw_fd(3) };
+    assert!(socket.local_addr()?.is_unnamed());
     let mut raw_reply = socket.try_clone()?;
     let mut first = true;
     serve_worker(

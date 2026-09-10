@@ -31,9 +31,85 @@ worker restart, wait/reap loop, cleanup deadline, or background supervisor. The
 broker must not reap the worker elsewhere or keep running after dropping it.
 Spawn success is not readiness; idle exits are detected on the next comparison.
 
-Async integration must retain ownership and single-request admission through the
-blocking operation, even if its caller cancels. Minijail's Rust owner is not Send.
-Datadog export, readiness wiring and public-image reproducibility remain separate work.
+The match handler now admits one request before opening its ciphertext, rejecting
+concurrent requests with `NotReady` (host HTTP 503), without a queue. Decryption,
+comparison and signing run in `spawn_blocking`; its owned permit survives caller
+cancellation until all work finishes. A panic exits the broker even if the caller
+has disconnected. Unsupported LightGuard input is a sealed `ImageAnalysisFailed`,
+never a panic or fallback; thresholds outside [-1, 1], including NaN, are malformed.
+Health remains responsive while busy; it is not an idle-capacity probe.
+
+The in-process comparator is still the boot default. Wiring the sandboxed owner
+requires respecting Minijail's non-Send ownership and launching before threads/keys.
+Metrics `enclave_match.rejections{class=busy}` and `enclave_match.failures` distinguish
+admission from task failures. Datadog export, worker readiness and public-image
+reproducibility remain separate work; these counters currently have no exporter.
+The legacy in-process comparator still has no hard deadline: a hung call holds the
+slot indefinitely while health answers. Do not deploy this intermediate state as
+worker readiness or sandboxed inference; complete the RPC deadline/fatal-exit wiring
+first. Canary the final switch while watching admission rejections and HTTP 503s.
+
+## Worker artifact and startup
+
+`verifier/worker` owns the Face Engine implementation, embedded graph configs and
+`verifier-worker` executable. It stays in this repo for now. The protocol/RPC/launcher
+crates do not depend on it. The enclave temporarily uses a thin in-process adapter
+to the same implementation; switching live broker requests to RPC is separate work.
+
+- Entry point: no arguments, empty environment, connected Unix stream on FD 3.
+  Invalid startup exits nonzero. EOF between frames exits successfully; a partial
+  frame, timeout, backend error or panic exits nonzero. No handshake or restart.
+- Models load once, after the first structurally valid request, even if its image
+  bytes are undecodable. Missing/corrupt models are terminal, not `AnalysisFailed`.
+  Both loading and first inference consume the first request's budget.
+- Initial profile: 120 seconds for the first request, 10 seconds thereafter;
+  8 MiB per encoded image, 24 MiB + 1024 bytes per CBOR body, 1024 bytes per reply.
+  These are ceilings to qualify on Nitro, not measured latency guarantees.
+- JPEG/PNG/WebP only; at most 4096 pixels per axis and 8,388,608 pixels total.
+  Decode one image at a time. The decoder's 128 MiB allocation budget is best-effort;
+  the explicit sandbox address-space limit remains the hard process bound.
+- Malformed images and model-reported validation failures return `AnalysisFailed`.
+  Unexpected graph/backend failures, missing outputs and invalid scores are terminal.
+  Compute each embedding once and return two finite raw cosine scores in [-1, 1],
+  clamping only endpoint floating-point roundoff within 1e-6.
+  No embeddings, keys, PCP data, thresholds or signing operations cross this boundary.
+- Configs still implement the prototype's largest-face detection and GhostFaceNet
+  embeddings, **not** production quality/liveness/LightGuard checks.
+
+The current artifact is a **runtime directory**, not a self-contained ELF:
+`bin/verifier-worker`, `/models/{rgbnet,face_embedding_generator}.onnx`, and only the
+executable's Nix runtime closure at its original `/nix/store` paths. The executable
+opens models at fixed `/models` paths; no downloads, environment overrides or writable
+cache are used. Model revisions/hashes remain pinned in `nix/face-models.nix`.
+Treat the executable, configs, models and libraries as one immutable release unit.
+Future signed provisioning must authenticate the whole bundle, not just the ELF.
+
+Build on x86_64 Linux with Nix and private dependency access:
+
+```sh
+bash scripts/fetch-face-models.sh  # HUGGING_FACE_TOKEN needed only for uncached models
+nix build --no-update-lock-file .#verifier-worker-runtime
+```
+
+Use the result's canonical directory as `SandboxConfig.root` and open its
+`bin/verifier-worker` for `Worker::spawn`. Preserve root ownership, permissions and
+absolute library paths when copying it. Never add the host store, devices or secrets.
+
+Portable tests require no models. For an opt-in real-model RPC test, set
+`WORKER_MODEL_DIR` and `WORKER_FACE_FIXTURE` to local model and approved test-face paths:
+
+```sh
+cargo test --locked -p flamingo-verifier-worker --test model -- --ignored
+```
+
+For the actual runtime/policy smoke test, build
+`cargo build --locked -p flamingo-verifier-worker-process --example qualify-worker`.
+Run the example as root in an isolated Linux test environment, under
+`timeout --kill-after=5s 150s unshare --fork --pid --mount-proc --kill-child`, passing
+`RUNTIME_ROOT ADDRESS_SPACE_BYTES MAX_THREADS FACE_FIXTURE`. Budgets are deliberately
+explicit. It checks cold/warm same-image scores and recoverable rejection under the
+production policy. Use only synthetic/approved fixtures, never production biometrics.
+Passing this smoke test does not replace resource, syscall and pinned-Nitro qualification.
 
 ## Production sandbox
 
@@ -68,8 +144,8 @@ and reserve enclave RAM for the broker, page cache and kernel. `RLIMIT_AS` bound
 virtual mappings, not aggregate guest memory; `RLIMIT_NPROC` counts the reserved UID's
 threads. Trace cold loading and warm inference under this policy on the pinned Nitro
 image before rollout, including malformed images, exhaustion and forbidden syscalls.
-The real private worker is not yet packaged/integrated; production Face Engine and
-Pontifex are unchanged. Do not treat fixture success as model/Nitro qualification.
+The worker now has a local runtime bundle, but broker RPC integration and model/Nitro
+qualification remain outstanding. Do not treat fixture success as qualification.
 Policy/resource deaths currently surface as fatal RPC transport/timeout metrics;
 kernel audit diagnostics are still needed to distinguish the underlying cause.
 Roll out the public image, runtime closure and budgets together; rollback requires

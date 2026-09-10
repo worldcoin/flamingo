@@ -93,47 +93,7 @@ trap 'rm -rf "$work_dir"' EXIT
 # now, and the lock silently rewritten. The PCRs must follow the committed lock or nothing.
 if [[ "$workload" == "verifier" ]]; then
   echo "Fetching face models..."
-  models_json="$(nix eval --json --no-update-lock-file .#faceModels)"
-
-  for file in $(jq -r 'keys[]' <<<"$models_json"); do
-    store_path="$(jq -r --arg f "$file" '.[$f].storePath' <<<"$models_json")"
-    if nix path-info "$store_path" >/dev/null 2>&1; then
-      echo "  $file: already in the store"
-      continue
-    fi
-
-    if [[ -z "${HUGGING_FACE_TOKEN:-}" ]]; then
-      echo "[ERROR] $file is not in the store and HUGGING_FACE_TOKEN is unset." >&2
-      echo "        The token is only needed to fetch a model that is missing; rebuilding" >&2
-      echo "        a commit whose models are already in the store needs neither." >&2
-      exit 1
-    fi
-
-    url="$(jq -r --arg f "$file" '.[$f].url' <<<"$models_json")"
-    expected="$(jq -r --arg f "$file" '.[$f].hash' <<<"$models_json")"
-    echo "  $file: downloading"
-    # --fail so an HTML error page never gets hashed as if it were a model. The token goes
-    # to huggingface.co only; curl does not follow it across the redirect to the CDN, which
-    # carries its own signature. It arrives through --config so it never appears in argv,
-    # where anyone running `ps` on the build host could read it.
-    printf 'header = "Authorization: Bearer %s"\n' "$HUGGING_FACE_TOKEN" |
-      curl --proto '=https' --tlsv1.2 -sSfL \
-        --retry 3 --retry-all-errors --connect-timeout 10 --max-time 600 \
-        --config - \
-        -o "$work_dir/$file" "$url"
-
-    observed="$(nix hash file --type sha256 --base16 "$work_dir/$file")"
-    if [[ "$observed" != "$expected" ]]; then
-      echo "[ERROR] checksum mismatch for $file: expected $expected, got $observed" >&2
-      exit 1
-    fi
-
-    added="$(nix-store --add-fixed sha256 "$work_dir/$file")"
-    if [[ "$added" != "$store_path" ]]; then
-      echo "[ERROR] $file landed at $added, but the build expects $store_path" >&2
-      exit 1
-    fi
-  done
+  bash scripts/fetch-face-models.sh
 fi
 
 echo "Building reproducible $workload OCI image..."

@@ -1505,12 +1505,13 @@ name = "flamingo-verifier-enclave"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "face-engine",
  "flamingo-verifier-enclave-types",
  "flamingo-verifier-protocol",
  "flamingo-verifier-sealed-types",
+ "flamingo-verifier-worker",
+ "flamingo-verifier-worker-protocol",
  "hex",
- "image",
+ "metrics",
  "pontifex",
  "rand 0.8.8",
  "serde",
@@ -1575,6 +1576,19 @@ dependencies = [
  "serde",
  "serde_bytes",
  "zeroize",
+]
+
+[[package]]
+name = "flamingo-verifier-worker"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "face-engine",
+ "flamingo-verifier-worker-protocol",
+ "flamingo-verifier-worker-rpc",
+ "image",
+ "libc",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

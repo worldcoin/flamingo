@@ -114,4 +114,7 @@ in
   verifier-enclave = buildEnclaveBin {
     pname = "verifier-enclave";
   };
+  verifier-worker = buildEnclaveBin {
+    pname = "verifier-worker";
+  };
 }

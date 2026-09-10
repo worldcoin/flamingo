@@ -72,6 +72,8 @@ ppoll: 1
 ioctl: arg1 == FIONBIO
 setsockopt: arg1 == SOL_SOCKET && arg2 == SO_RCVTIMEO || arg1 == SOL_SOCKET && arg2 == SO_SNDTIMEO
 getsockopt: arg1 == SOL_SOCKET && arg2 == SO_ERROR || arg1 == SOL_SOCKET && arg2 == SO_TYPE
+# Entrypoint validates the inherited Unix socket, including when the broker already closed it.
+getsockname: arg0 == 3
 recvfrom: arg4 == 0 && arg5 == 0
 sendto: arg4 == 0 && arg5 == 0
 shutdown: 1

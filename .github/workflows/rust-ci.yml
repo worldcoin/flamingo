@@ -101,7 +101,7 @@ jobs:
           GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          for output in di-enclave verifier-enclave di-oci verifier-oci di-eif verifier-eif; do
+          for output in di-enclave verifier-enclave verifier-worker verifier-worker-runtime di-oci verifier-oci di-eif verifier-eif; do
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
