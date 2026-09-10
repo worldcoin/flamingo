@@ -73,10 +73,8 @@ impl SandboxConfig<'_> {
         jail.namespace_ipc();
         jail.namespace_cgroups();
         jail.set_remount_mode(libc::MS_PRIVATE);
-        // The pinned Nitro init chroots within initramfs without switching the mount
-        // namespace root. prepare_enclave_root supplies the mount point needed above.
-        // Minijail resets cwd to this chroot;
-        // closed FDs, zero capabilities and seccomp prevent escaping back to the old root.
+        // Init establishes the broker's mount root before launch. Minijail resets cwd;
+        // closed FDs, zero capabilities and seccomp confine the worker to its own root.
         jail.enter_chroot(&root)?;
         // Non-recursive bind excludes any host submounts (notably proc/dev/sys).
         jail.mount(&root, "/", "", libc::MS_BIND as usize)?;

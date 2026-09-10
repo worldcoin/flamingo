@@ -4,9 +4,7 @@
 use std::{fs::File, os::unix::fs::PermissionsExt, path::Path, process::Command, time::Duration};
 
 #[cfg(target_os = "linux")]
-use flamingo_verifier_worker_process::{
-    SandboxConfig, WORKER_UID, Worker, WorkerError, prepare_enclave_root,
-};
+use flamingo_verifier_worker_process::{SandboxConfig, WORKER_UID, Worker, WorkerError};
 #[cfg(target_os = "linux")]
 use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
 #[cfg(target_os = "linux")]
@@ -79,11 +77,25 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
     // SAFETY: fcntl returned a newly owned descriptor.
     let _unrelated_fd = unsafe { File::from_raw_fd(unrelated_fd) };
 
-    if case == "legacy-root" {
-        // Reproduce old Nitro init: chroot without switching the mount namespace root.
+    if case == "nitro-root" {
+        // Match the pinned AWS init's bind, move, chroot sequence.
         // Only the broker needs proc/dev; the nested worker must still see neither.
         use std::os::unix::ffi::OsStrExt;
         let outer_root = root.parent().unwrap();
+        let outer_path = std::ffi::CString::new(outer_root.as_os_str().as_bytes())?;
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    outer_path.as_ptr(),
+                    outer_path.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND,
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // Install test-only proc/dev mounts before switching root, while mount is available.
         std::fs::create_dir(outer_root.join("proc"))?;
         std::fs::create_dir(outer_root.join("dev"))?;
         File::create(outer_root.join("dev/null"))?;
@@ -96,27 +108,21 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
                     .success()
             );
         }
-        let outer_root = std::ffi::CString::new(outer_root.as_os_str().as_bytes())?;
-        assert_eq!(unsafe { libc::chroot(outer_root.as_ptr()) }, 0);
-        assert_eq!(unsafe { libc::chdir(c"/".as_ptr()) }, 0);
-        // A plain chroot is not a mount point: Minijail's propagation change fails.
+        assert_eq!(unsafe { libc::chdir(outer_path.as_ptr()) }, 0);
         assert_eq!(
             unsafe {
                 libc::mount(
-                    std::ptr::null(),
+                    c".".as_ptr(),
                     c"/".as_ptr(),
                     std::ptr::null(),
-                    libc::MS_REC | libc::MS_PRIVATE,
+                    libc::MS_MOVE,
                     std::ptr::null(),
                 )
             },
-            -1
+            0
         );
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::EINVAL)
-        );
-        prepare_enclave_root()?;
+        assert_eq!(unsafe { libc::chroot(c".".as_ptr()) }, 0);
+        assert_eq!(unsafe { libc::chdir(c"/".as_ptr()) }, 0);
         // Fail at the mount operation itself, before worker stderr is redirected.
         assert_eq!(
             unsafe {
@@ -129,7 +135,7 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
                 )
             },
             0,
-            "prepared root must support private mounts: {}",
+            "Nitro root must support private mounts: {}",
             std::io::Error::last_os_error()
         );
         assert_eq!(std::env::current_dir()?, Path::new("/"));
@@ -277,7 +283,7 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
 
-    if matches!(case, "recoverable" | "legacy-root") {
+    if matches!(case, "recoverable" | "nitro-root") {
         let mut invalid = images(1);
         invalid.credential_image.clear();
         assert!(matches!(
@@ -437,7 +443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (case, failure_class) in [
         ("recoverable", None),
-        ("legacy-root", None),
+        ("nitro-root", None),
         ("signed-runtime", Some("transport")),
         ("moved-owner", None),
         ("idle-exit", Some("transport")),

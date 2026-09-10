@@ -22,36 +22,6 @@ pub use sandbox::{SandboxConfig, WORKER_UID};
 #[link(name = "cap")]
 unsafe extern "C" {}
 
-/// Makes a legacy Nitro chroot usable by Minijail's private-mount setup.
-/// Call once during isolated enclave boot: this changes the caller's mount namespace.
-pub fn prepare_enclave_root() -> io::Result<()> {
-    // Preserve proc/dev and other boot mounts while making / itself a mount point.
-    // SAFETY: Both paths are static NUL-terminated strings; no pointers are retained.
-    let result = unsafe {
-        libc::mount(
-            c"/".as_ptr(),
-            c"/".as_ptr(),
-            std::ptr::null(),
-            libc::MS_BIND | libc::MS_REC,
-            std::ptr::null(),
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    // A bare / lookup retains the old root reference after an overmount. Walking
-    // /.. stays inside that root but crosses onto the new mount before chroot.
-    // SAFETY: Both paths are static and remain within the existing enclave root.
-    if unsafe { libc::chroot(c"/..".as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 /// Owns one worker for the broker's lifetime. Fatal comparisons terminate the broker.
 pub struct Worker {
     /// Validates each comparison and permanently closes IPC after a fatal error.

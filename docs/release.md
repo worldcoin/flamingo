@@ -114,6 +114,10 @@ the measurements from source and compare against `manifest.json`.
 
 ## Notes
 
+- Both EIFs pin AWS Nitro CLI v1.5.0's init binary in `nix/enclave-images.nix`, which switches
+  the mount root before launching the broker. Init changes require a Linux confinement test
+  and actual Nitro boot/shutdown validation. Record the new EIF measurements and use the
+  allow-list overlap above; retain the previous EIF and measurements for rollback.
 - `di/host` and `di/enclave` are skeletons that exit with a failure code. A `di/v*` tag exercises
   the release pipeline; it does not ship a working service.
 - Publisher keys and resource limits are measured public inputs. Rotating them changes the EIF
