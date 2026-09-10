@@ -17,18 +17,28 @@ flamingo-verifier-enclave-types.workspace = true
 flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 eddsa-babyjubjub.workspace = true
-flamingo-verifier-worker.workspace = true
 flamingo-verifier-worker-protocol.workspace = true
+flamingo-verifier-worker-rpc.workspace = true
+flamingo-verifier-worker-artifact.workspace = true
 hex.workspace = true
 metrics.workspace = true
 pontifex = { workspace = true, features = ["nsm", "server", "channel"] }
 rand.workspace = true
+rmp-serde.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["sync"] }
-tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "io-util"] }
+tokio-vsock.workspace = true
+# Pontifex emits wire payloads at DEBUG; production never compiles those events.
+tracing = { workspace = true, features = ["release_max_level_info"] }
 tracing-subscriber.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock.workspace = true
+libc.workspace = true
+flamingo-verifier-worker-process.workspace = true
+
 [dev-dependencies]
+p384.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -38,21 +38,22 @@
       };
       enclaveImages = import ./nix/enclave-images.nix {
         inherit system pkgs nitro-util enclaveBins;
-        verifierModels = faceModels.package;
+        workerBootstrapConfig = ./config/worker-bootstrap.json;
       };
     in
     {
-      packages.${system} =
-        enclaveBins
-        // enclaveImages
-        // {
-          verifierModels = faceModels.package;
-          verifier-worker-runtime = import ./nix/worker-runtime.nix {
-            inherit pkgs;
-            worker = enclaveBins.verifier-worker;
-            models = faceModels.package;
-          };
+      packages.${system} = builtins.removeAttrs enclaveBins [ "verifier-worker" ] // enclaveImages;
+
+      # Opt-in prototype outputs; public flake checks must never resolve private dependencies.
+      privatePackages.${system} = {
+        verifier-worker = enclaveBins.verifier-worker;
+        verifierModels = faceModels.package;
+        verifier-worker-runtime = import ./nix/worker-runtime.nix {
+          inherit pkgs;
+          worker = enclaveBins.verifier-worker;
+          models = faceModels.package;
         };
+      };
 
       faceModels = faceModels.metadata;
 

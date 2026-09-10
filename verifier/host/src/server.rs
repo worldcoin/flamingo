@@ -23,13 +23,35 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind API to {address}"))?;
 
-    tracing::info!(%address, "API listening");
-
     axum::serve(
         listener,
         routes::handler()
             .with_state(state)
-            .layer(TraceLayer::new_for_axum())
+            .layer(TraceLayer::new().with_make_span(|request| {
+                // Do not copy raw URLs, query strings, user-agent values or headers to traces.
+                let method = match *request.method() {
+                    axum::http::Method::GET => "GET",
+                    axum::http::Method::POST => "POST",
+                    _ => "OTHER",
+                };
+                let route = match request.uri().path() {
+                    "/health" => "/health",
+                    "/ready" => "/ready",
+                    "/v1/enclave-assignment" => "/v1/enclave-assignment",
+                    "/v1/matches" => "/v1/matches",
+                    _ => "unmatched",
+                };
+                tracing::info_span!(
+                    "http.request",
+                    http.request.method = method,
+                    http.route = route,
+                    http.response.status_code = tracing::field::Empty,
+                    http.status_code = tracing::field::Empty,
+                    otel.name = route,
+                    otel.kind = "server",
+                    otel.status_code = tracing::field::Empty,
+                )
+            }))
             .into_make_service(),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -64,7 +86,7 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        () = interrupt => tracing::info!("received Ctrl-C, draining"),
-        () = terminate => tracing::info!("received SIGTERM, draining"),
+        () = interrupt => {},
+        () = terminate => {},
     }
 }

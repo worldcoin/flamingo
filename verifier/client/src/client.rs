@@ -16,6 +16,9 @@ use crate::error::Error;
 /// Error code the host uses for a request that did not open.
 const REASSIGN_REQUIRED: &str = "reassign_required";
 
+/// Enough for a base64 attestation or padded sealed result, never unbounded host output.
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+
 /// An assignment whose attestation verified and whose encryption key is ready for sealing.
 #[derive(Debug, Clone)]
 pub struct VerifiedAssignment {
@@ -71,6 +74,8 @@ impl FlamingoVerifierClient {
         config: Config,
         http: reqwest::ClientBuilder,
     ) -> Result<Self, Error> {
+        config.validate()?;
+
         let http = http
             // Replays the ALB's affinity cookie, so the match reaches the enclave that was assigned.
             .cookie_store(true)
@@ -129,8 +134,9 @@ impl FlamingoVerifierClient {
             return Err(Error::Status(status.as_u16()));
         }
 
+        let body = Self::response_body(response).await?;
         let assignment: EnclaveAssignmentResponse =
-            response.json().await.map_err(Error::MalformedResponse)?;
+            serde_json::from_slice(&body).map_err(Error::MalformedResponse)?;
 
         let document = STANDARD
             .decode(&assignment.attestation)
@@ -215,12 +221,13 @@ impl FlamingoVerifierClient {
         let response = request.send().await.map_err(Error::Request)?;
 
         let status = response.status();
+        let body = Self::response_body(response).await?;
         if !status.is_success() {
-            let body = response.text().await.ok();
-            return Err(Self::api_error(status.as_u16(), body.as_deref()));
+            return Err(Self::api_error(status.as_u16(), &body));
         }
 
-        let body: MatchResponseBody = response.json().await.map_err(Error::MalformedResponse)?;
+        let body: MatchResponseBody =
+            serde_json::from_slice(&body).map_err(Error::MalformedResponse)?;
 
         let ciphertext = STANDARD
             .decode(body.response_ciphertext.trim())
@@ -257,11 +264,29 @@ impl FlamingoVerifierClient {
         Ok(result)
     }
 
+    /// Reads under reqwest's whole-request deadline with a bound independent of headers.
+    async fn response_body(mut response: reqwest::Response) -> Result<Vec<u8>, Error> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(Error::ResponseTooLarge);
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(Error::Request)? {
+            if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
+                return Err(Error::ResponseTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        Ok(body)
+    }
+
     /// Classifies a non-success response, reading the error envelope when there is one.
-    fn api_error(status: u16, body: Option<&str>) -> Error {
-        let Some(envelope) =
-            body.and_then(|body| serde_json::from_str::<ApiErrorResponse>(body).ok())
-        else {
+    fn api_error(status: u16, body: &[u8]) -> Error {
+        let Ok(envelope) = serde_json::from_slice::<ApiErrorResponse>(body) else {
             return Error::Status(status);
         };
 

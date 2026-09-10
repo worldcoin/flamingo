@@ -145,7 +145,98 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
                 .success()
         );
     }
-    let mut worker = Worker::spawn(&binary, sandbox(root), config(), fatal)?;
+    let verified_runtime = if case == "signed-runtime" {
+        use flamingo_verifier_worker_artifact::{Artifact, Manifest, Role, WORKER_PATH};
+        use p384::ecdsa::{Signature, SigningKey, signature::Signer};
+        use sha2::{Digest, Sha384};
+
+        let mut artifacts = Vec::new();
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    directories.push(entry.path());
+                    continue;
+                }
+                assert!(
+                    entry.file_type()?.is_file(),
+                    "fixture must not contain symlinks"
+                );
+                let path = entry.path();
+                let logical_path = path.strip_prefix(root)?.to_str().unwrap().to_owned();
+                let bytes = std::fs::read(&path)?;
+                artifacts.push(Artifact {
+                    role: if logical_path == WORKER_PATH {
+                        Role::Worker
+                    } else {
+                        Role::Library
+                    },
+                    logical_path,
+                    sha384: hex::encode(Sha384::digest(&bytes)),
+                    size: bytes.len() as u64,
+                });
+            }
+        }
+        artifacts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+        let manifest = serde_json::to_vec(&Manifest {
+            manifest_version: 1,
+            release_id: "signed-public-test-fixture".to_owned(),
+            artifacts,
+        })?;
+        // Test-only publisher secret; never included in the measured production trust file.
+        let signing_key = SigningKey::from_slice(&[0x42; 48]).expect("valid test publisher scalar");
+        let signature: Signature = signing_key.sign(&manifest);
+        let mut bundle = Vec::new();
+        flamingo_verifier_worker_artifact::package(
+            &mut bundle,
+            &manifest,
+            signature.to_der().as_bytes(),
+            root,
+        )?;
+        Some(flamingo_verifier_worker_artifact::receive(
+            &mut std::io::Cursor::new(bundle),
+            std::slice::from_ref(signing_key.verifying_key()),
+            1 << 30,
+            root.parent().unwrap(),
+        )?)
+    } else {
+        None
+    };
+    let executable = verified_runtime
+        .as_ref()
+        .map_or(&binary, |runtime| &runtime.binary);
+    let runtime_root = verified_runtime
+        .as_ref()
+        .map_or(root, |runtime| runtime.root.path());
+    let mut worker = Worker::spawn(executable, sandbox(runtime_root), config(), fatal)?;
+
+    if case == "signed-runtime" {
+        assert_eq!(
+            verified_runtime.as_ref().unwrap().release_id,
+            "signed-public-test-fixture"
+        );
+        worker.check_alive();
+        assert_eq!(worker.compare(images(1))?, scores);
+        assert!(matches!(
+            worker.compare(images(250)),
+            Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed))
+        ));
+        assert_eq!(worker.compare(images(2))?, scores);
+        return Ok(());
+    }
+
+    if case == "moved-owner" {
+        worker.check_alive();
+        std::thread::spawn(move || {
+            assert_eq!(worker.compare(images(1)).unwrap(), scores);
+            worker.check_alive();
+            assert_eq!(worker.compare(images(2)).unwrap(), scores);
+        })
+        .join()
+        .expect("worker ownership transfer failed");
+        return Ok(());
+    }
 
     if matches!(case, "recoverable" | "legacy-root") {
         let mut invalid = images(1);
@@ -208,6 +299,22 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
             scores
         );
     }
+    if case == "idle-exit" {
+        worker.check_alive();
+        let children_path = format!("/proc/self/task/{}/children", unsafe { libc::getpid() });
+        let pid = std::fs::read_to_string(children_path)?
+            .trim()
+            .parse::<i32>()?;
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+
+        // No comparison, handshake or reaper is needed to detect the idle worker's exit.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            worker.check_alive();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("idle worker exit was not terminal");
+    }
     if case == "kill-failure" {
         // A different unprivileged UID cannot kill the worker; SIGKILL fails with EPERM.
         // The fatal handler must still exit with the original timeout, not a cleanup error.
@@ -264,6 +371,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let temp = std::path::PathBuf::from(String::from_utf8(temp.stdout)?.trim());
     let root = temp.join("root");
     std::fs::create_dir(&root)?;
+    std::fs::create_dir(root.join("bin"))?;
+    std::fs::create_dir(root.join("lib"))?;
     std::fs::create_dir(root.join("proc"))?;
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))?;
@@ -281,9 +390,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(target.parent().unwrap())?;
         std::fs::copy(library, target)?;
     }
-    std::fs::write(root.join("fixture-data"), b"approved model data")?;
+    std::fs::copy(PEER, root.join("bin/verifier-worker"))?;
+    std::fs::write(root.join("lib/fixture-data"), b"approved model data")?;
     std::fs::set_permissions(
-        root.join("fixture-data"),
+        root.join("lib/fixture-data"),
         std::fs::Permissions::from_mode(0o644),
     )?;
     std::fs::write(temp.join("broker-secret"), b"must not be visible")?;
@@ -291,6 +401,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (case, failure_class) in [
         ("recoverable", None),
         ("legacy-root", None),
+        ("signed-runtime", None),
+        ("moved-owner", None),
+        ("idle-exit", Some("transport")),
         ("seccomp", Some("transport")),
         ("vsock", Some("transport")),
         ("fork", Some("transport")),

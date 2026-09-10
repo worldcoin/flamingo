@@ -9,11 +9,11 @@ use std::{
     fs::File,
     io,
     os::{fd::AsRawFd, unix::net::UnixStream},
+    sync::Arc,
 };
 
 use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
 use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClientError};
-use minijail::Minijail;
 
 mod sandbox;
 pub use sandbox::{SandboxConfig, WORKER_UID};
@@ -26,8 +26,6 @@ unsafe extern "C" {}
 pub struct Worker {
     /// Validates each comparison and permanently closes IPC after a fatal error.
     rpc: WorkerClient,
-    /// Keeps Minijail ownership on the bootstrap thread; Drop only frees its configuration.
-    _jail: Minijail,
     /// Never reaped here, so it cannot be reused before the broker exits.
     pid: libc::pid_t,
     /// Broker-owned process exit policy; must not unwind or wait for worker cleanup.
@@ -73,18 +71,19 @@ impl Worker {
             }
         }
 
-        Ok(Self {
-            rpc,
-            _jail: jail,
-            pid,
-            on_fatal,
-        })
+        // Minijail::drop only frees the parent's configuration; it neither signals nor
+        // waits for the child. The child has its own copy after fork. Keeping no Minijail
+        // pointer lets this exclusive worker owner move to a blocking comparison thread.
+        drop(jail);
+
+        Ok(Self { rpc, pid, on_fatal })
     }
 
     /// Returns only success or recoverable RPC errors. Fatal errors kill the worker and exit
     /// through the broker's handler; RPC telemetry already records the original failure.
     #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = self.pid))]
     pub fn compare(&mut self, request: CompareRequest) -> Result<ComparisonScores, WorkerError> {
+        self.check_alive();
         let result = self.rpc.compare(request);
         if let Some(error) = self.rpc.failure().cloned() {
             self.kill();
@@ -92,6 +91,36 @@ impl Worker {
         }
 
         result.map_err(WorkerError::Rpc)
+    }
+
+    /// Detects idle exits without reaping, signalling a healthy worker, or sending IPC.
+    /// A live process is not proof that its lazily initialized models are ready.
+    pub fn check_alive(&self) {
+        // SAFETY: Zero initializes siginfo_t, and waitid writes only this owned buffer.
+        // WNOWAIT preserves the child PID so Drop can never signal a reused process ID.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.pid as libc::id_t,
+                &mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        let error = if result != 0 {
+            Some(io::Error::last_os_error())
+        } else if unsafe { status.si_pid() } != 0 {
+            Some(io::Error::new(io::ErrorKind::BrokenPipe, "worker exited"))
+        } else {
+            None
+        };
+
+        if let Some(error) = error {
+            metrics::counter!("worker_process.failures", "class" => "liveness").increment(1);
+            tracing::error!(dependency = "biometric_worker", pid = self.pid, failure_class = "liveness", %error, "worker liveness check failed");
+            self.kill();
+            (self.on_fatal)(WorkerClientError::Transport(Arc::new(error)));
+        }
     }
 
     /// Requests namespace termination without waiting; guest teardown owns final cleanup.
@@ -133,4 +162,17 @@ pub enum WorkerError {
     /// Client setup or local input/analysis failure; comparison failures here are recoverable.
     #[error(transparent)]
     Rpc(#[from] WorkerClientError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Worker;
+
+    /// The parent may transfer its exclusive worker owner after single-threaded startup.
+    #[test]
+    fn worker_is_send() {
+        /// Checks the bound without constructing a jail on a libtest thread.
+        const fn require_send<T: Send>() {}
+        require_send::<Worker>();
+    }
 }

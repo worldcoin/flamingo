@@ -51,7 +51,6 @@ impl EnclaveState {
             },
         )?;
         let signing_key = SigningKey::generate();
-        tracing::info!("generated boot-scoped sealed channel and signing keys");
 
         // Serialized once here rather than on every attestation.
         let signing_public_key =
@@ -133,6 +132,11 @@ impl EnclaveState {
     /// The attestation document for the signing public key (last successful cache entry).
     pub async fn signing_key_attestation(&self) -> Vec<u8> {
         self.attested_signing_key.document().await
+    }
+
+    /// Health can use cached attestations only while both remain acceptable to clients.
+    pub async fn attestations_are_fresh(&self) -> bool {
+        self.attested_encryption_key.is_fresh().await && self.attested_signing_key.is_fresh().await
     }
 }
 

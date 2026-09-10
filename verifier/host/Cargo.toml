@@ -18,11 +18,13 @@ axum.default-features = true
 base64.workspace = true
 flamingo-verifier-api-types.workspace = true
 flamingo-verifier-enclave-types.workspace = true
+metrics.workspace = true
 pontifex = { workspace = true, features = ["client"] }
 serde.workspace = true
-telemetry-batteries = { workspace = true, features = ["axum"] }
+telemetry-batteries = { workspace = true, features = ["axum", "metrics-statsd"] }
 tokio.workspace = true
-tracing.workspace = true
+# Pontifex logs wire payloads at DEBUG; Datadog's log filter does not filter span events.
+tracing = { workspace = true, features = ["release_max_level_info"] }
 
 [dev-dependencies]
 async-trait.workspace = true

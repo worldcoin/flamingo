@@ -15,8 +15,8 @@ set -euo pipefail
 #   <workload>-enclave.eif   the enclave image
 #   <workload>-pcr.json      PCR measurements extracted from the EIF
 #
-# Env: HUGGING_FACE_TOKEN (verifier only, and only when a model is not in the store
-#      yet — read access to the model repositories).
+# Verifier releases require reviewed publisher keys and worker resource budgets in
+# config/worker-bootstrap.json. Public Nix builds may use the unconfigured, fail-closed file.
 
 # A new workload is an entry here plus a `<name>-eif` output in flake.nix.
 WORKLOADS=("verifier" "di")
@@ -70,32 +70,37 @@ if [[ ! " ${WORKLOADS[*]} " == *" $workload "* ]]; then
   exit 2
 fi
 
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [[ "$workload" == "verifier" ]]; then
+  if [[ "$(wc -c < config/worker-bootstrap.json)" -gt 65536 ]] || ! jq -e '
+    (.publisher_keys | type == "array" and length > 0) and
+    all(.max_bundle_bytes, .address_space_bytes, .max_threads, .bootstrap_timeout_seconds;
+      . != null)
+  ' config/worker-bootstrap.json >/dev/null; then
+    echo "[ERROR] Configure reviewed publisher keys and qualified worker budgets in config/worker-bootstrap.json before a verifier release build." >&2
+    echo "        For an unconfigured, fail-closed development image use nix build .#verifier-eif directly." >&2
+    exit 1
+  fi
+fi
+
 command -v nix >/dev/null || {
   echo "[ERROR] nix not found. The OCI image and EIF are built by flake.nix." >&2
   exit 1
 }
 
-repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
+if [[ "$workload" == "verifier" ]]; then
+  # Use the exact broker parser, curve validation and integer bounds, not a shell approximation.
+  nix run --no-update-lock-file .#worker-bundle -- validate-config config/worker-bootstrap.json
+fi
 
 mkdir -p "$out_dir"
 out_dir="$(cd "$out_dir" && pwd)"
 
-work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
-
-# Fetch the models outside Nix and add them to the store under the fixed-output hash
-# flake.nix declares, which leaves the fetch in the build already satisfied. The token
-# is used here and nowhere else, so it never reaches a derivation or the store.
-#
 # --no-update-lock-file on the flake calls below: an input added to flake.nix without a
 # matching `nix flake update` would otherwise be resolved to whatever upstream serves right
 # now, and the lock silently rewritten. The PCRs must follow the committed lock or nothing.
-if [[ "$workload" == "verifier" ]]; then
-  echo "Fetching face models..."
-  bash scripts/fetch-face-models.sh
-fi
-
 echo "Building reproducible $workload OCI image..."
 if ! oci_store=$(nix build ".#${workload}-oci" --no-update-lock-file --no-link --print-out-paths); then
   echo >&2

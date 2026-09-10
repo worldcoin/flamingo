@@ -1,184 +1,188 @@
-# Worker comparisons
+# Worker contract
 
-Blocking RPC over inherited Unix socket FD 3: four-byte big-endian length, then
-CBOR. One request (three encoded images) produces two scores or `AnalysisFailed`.
-No handshake, ready message, version, pipelining, retries or reconnect.
+DeepFace only. The public broker handles attestation, encryption, admission,
+thresholds and signing. One authenticated biometric executable handles images in
+Minijail; its models and configuration must be embedded. Other proof types and
+LightGuard are not implemented. There is no production placeholder or fallback.
 
-- `compare(&mut self, ...)` completes before another request starts.
-- The first request's deadline includes lazy initialization; idle time consumes nothing.
-- Encoded images, CBOR and replies are bounded; the adapter must bound decoded pixels.
-- Local input errors and `AnalysisFailed` preserve the connection. Transport errors,
-  timeouts, malformed replies and invalid scores permanently close it.
+## Comparisons and lifecycle
 
-## Process ownership
+The worker starts with no arguments, an empty environment, null stdio, and a
+connected Unix stream on FD 3. Each message is a four-byte big-endian length
+followed by CBOR. A request contains three encoded images; the response contains
+two finite raw cosine scores in [-1, 1], or `AnalysisFailed`.
 
-Linux-only `Worker::spawn(&File, SandboxConfig, WorkerClientConfig, on_fatal)` uses Minijail.
-Launch from a single-threaded bootstrap before creating broker keys.
-The worker gets null stdio, empty environment and FD 3 inside a new PID namespace.
-Minijail remaps/closes descriptors. A short `execveat` path applies seccomp before
-the executable's loader; upstream `run_fd_remap` instead uses `LD_PRELOAD`.
+- One synchronous request at a time. No handshake, ready message, protocol version,
+  request IDs, pipelining, retries or reconnect.
+- The first request has 120 seconds for lazy initialization and inference; later
+  requests have 10 seconds. Idle time consumes neither budget.
+- Limits: 8 MiB per encoded image, 24 MiB + 1024 bytes per request body, 1024 bytes
+  per reply. The actual worker must additionally bound decoded images and allocations.
+- Local input rejection and `AnalysisFailed` preserve the session. Missing models,
+  backend faults, malformed replies, invalid scores, EOF during a request and
+  deadlines are terminal. Clean EOF between requests permits worker exit.
+- Keys, embeddings, claims, thresholds and signing operations never cross FD 3.
 
-One worker lives for the broker's lifetime. A fatal comparison records the original
-RPC failure, requests SIGKILL, then invokes the broker-supplied
-`fn(WorkerClientError) -> !` handler. That handler must immediately exit the process
-(for example, `std::process::exit(1)`), not panic, stop only a task, or wait for
-runtime shutdown. Kill failures are reported but cannot prevent the fatal handler.
-The enclave init must terminate the guest when the broker exits; recovery provisions
-a fresh enclave and fresh keys. Verify this behavior on the pinned Nitro image.
+The broker authenticates and forks the worker during single-threaded bootstrap,
+before generating keys. It frees the parent's Minijail configuration after fork;
+the exclusive worker owner can then move to a blocking comparison thread.
 
-Drop also requests SIGKILL for normal broker shutdown or unwinding. There is no
-worker restart, wait/reap loop, cleanup deadline, or background supervisor. The
-broker must not reap the worker elsewhere or keep running after dropping it.
-Spawn success is not readiness; idle exits are detected on the next comparison.
+One match is admitted before decrypting its ciphertext. Concurrent matches receive
+`NotReady` / HTTP 503 without a queue. The owned admission permit survives caller
+cancellation until blocking work finishes. Panics terminate the broker even if the
+caller disconnected. Unsupported LightGuard input returns a sealed rejection;
+nonfinite thresholds or thresholds outside [0, 1] are malformed because signed
+match claims encode only nonnegative coefficients. Broker input-derived outcomes
+stay out of logs and host-exported metrics as well as the cleartext response.
 
-The match handler now admits one request before opening its ciphertext, rejecting
-concurrent requests with `NotReady` (host HTTP 503), without a queue. Decryption,
-comparison and signing run in `spawn_blocking`; its owned permit survives caller
-cancellation until all work finishes. A panic exits the broker even if the caller
-has disconnected. Unsupported LightGuard input is a sealed `ImageAnalysisFailed`,
-never a panic or fallback; thresholds outside [-1, 1], including NaN, are malformed.
-Health remains responsive while busy; it is not an idle-capacity probe.
+Readiness checks idle worker exits without sending IPC or reaping. While a match is
+in flight, its hard deadline supplies the failure bound. A fatal failure requests
+SIGKILL and immediately exits the broker, even if killing fails. Normal Drop also
+requests SIGKILL. No restart, reaping loop or background supervisor exists. Guest
+teardown owns final cleanup. The [source associated with the pinned AWS init][init-lifecycle]
+waits only for its direct broker child, then requests a reboot without waiting for
+remaining workers. Actual guest termination remains a Nitro release-qualification
+check. Recovery starts a fresh enclave with fresh keys.
 
-The in-process comparator is still the boot default. Wiring the sandboxed owner
-requires respecting Minijail's non-Send ownership and launching before threads/keys.
-Metrics `enclave_match.rejections{class=busy}` and `enclave_match.failures` distinguish
-admission from task failures. Datadog export, worker readiness and public-image
-reproducibility remain separate work; these counters currently have no exporter.
-The legacy in-process comparator still has no hard deadline: a hung call holds the
-slot indefinitely while health answers. Do not deploy this intermediate state as
-worker readiness or sandboxed inference; complete the RPC deadline/fatal-exit wiring
-first. Canary the final switch while watching admission rejections and HTTP 503s.
+[init-lifecycle]: https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap/blob/3f79674465f816eeffe4482e1240b792ff75d2d9/init/init.c#L437-L441
 
-## Worker artifact and startup
+## Authenticated runtime provisioning
 
-`verifier/worker` owns the Face Engine implementation, embedded graph configs and
-`verifier-worker` executable. It stays in this repo for now. The protocol/RPC/launcher
-crates do not depend on it. The enclave temporarily uses a thin in-process adapter
-to the same implementation; switching live broker requests to RPC is separate work.
+`/etc/flamingo/worker-bootstrap.json` is copied from
+[`config/worker-bootstrap.json`](../config/worker-bootstrap.json) into the measured
+public image. It contains P-384 SEC1 public keys encoded as hex, plus explicit
+bundle-size, address-space, thread and bootstrap-deadline budgets. Host environment
+variables cannot override it. Empty keys/null budgets allow a public development
+build but prevent serving; release scripts reject unconfigured policy. No test key
+is installed as production trust.
 
-- Entry point: no arguments, empty environment, connected Unix stream on FD 3.
-  Invalid startup exits nonzero. EOF between frames exits successfully; a partial
-  frame, timeout, backend error or panic exits nonzero. No handshake or restart.
-- Models load once, after the first structurally valid request, even if its image
-  bytes are undecodable. Missing/corrupt models are terminal, not `AnalysisFailed`.
-  Both loading and first inference consume the first request's budget.
-- Initial profile: 120 seconds for the first request, 10 seconds thereafter;
-  8 MiB per encoded image, 24 MiB + 1024 bytes per CBOR body, 1024 bytes per reply.
-  These are ceilings to qualify on Nitro, not measured latency guarantees.
-- JPEG/PNG/WebP only; at most 4096 pixels per axis and 8,388,608 pixels total.
-  Decode one image at a time. The decoder's 128 MiB allocation budget is best-effort;
-  the explicit sandbox address-space limit remains the hard process bound.
-- Malformed images and model-reported validation failures return `AnalysisFailed`.
-  Unexpected graph/backend failures, missing outputs and invalid scores are terminal.
-  Compute each embedding once and return two finite raw cosine scores in [-1, 1],
-  clamping only endpoint floating-point roundoff within 1e-6.
-  No embeddings, keys, PCP data, thresholds or signing operations cross this boundary.
-- Configs still implement the prototype's largest-face detection and GhostFaceNet
-  embeddings, **not** production quality/liveness/LightGuard checks.
+The parent host sends one bundle to vsock port 1001. Its wire format is:
 
-The current artifact is a **runtime directory**, not a self-contained ELF:
-`bin/verifier-worker`, `/models/{rgbnet,face_embedding_generator}.onnx`, and only the
-executable's Nix runtime closure at its original `/nix/store` paths. The executable
-opens models at fixed `/models` paths; no downloads, environment overrides or writable
-cache are used. Model revisions/hashes remain pinned in `nix/face-models.nix`.
-Treat the executable, configs, models and libraries as one immutable release unit.
-Future signed provisioning must authenticate the whole bundle, not just the ELF.
-
-Build on x86_64 Linux with Nix and private dependency access:
-
-```sh
-bash scripts/fetch-face-models.sh  # HUGGING_FACE_TOKEN needed only for uncached models
-nix build --no-update-lock-file .#verifier-worker-runtime
+```text
+u32 BE manifest length | exact JSON manifest bytes
+u32 BE signature length | P-384 ECDSA/SHA-384 signature in ASN.1 DER
+artifact bytes in manifest order | sender write-half EOF
 ```
 
-Use the result's canonical directory as `SandboxConfig.root` and open its
-`bin/verifier-worker` for `Worker::spawn`. Preserve root ownership, permissions and
-absolute library paths when copying it. Never add the host store, devices or secrets.
+The signature covers the exact JSON bytes, not reserialized JSON. The manifest has
+`manifest_version: 1`, a bounded diagnostic `release_id`, and `artifacts` entries
+with `logical_path`, `role`, lowercase hex `sha384`, and exact nonzero `size`.
+Roles are `worker`, `loader`, and `library`; the latter two contain the approved
+runtime closure. The only worker path is `bin/verifier-worker`; other files must be
+under `lib/`, `lib64/`, or `nix/store/`. Paths are restricted relative components;
+symlinks, devices, duplicate paths, file/directory conflicts, and external model or
+configuration roles are not accepted. Preserve required absolute library paths by
+staging their exact relative equivalents; do not copy the host's entire library tree.
 
-Portable tests require no models. For an opt-in real-model RPC test, set
-`WORKER_MODEL_DIR` and `WORKER_FACE_FIXTURE` to local model and approved test-face paths:
+The receiver bounds metadata before allocation, verifies the signature before
+extracting, enforces the configured aggregate budget, and streams each file into a
+fresh private root under `/worker-runtime` while checking its SHA-384. This real,
+root-owned image directory stays on the executable root filesystem: the pinned
+init [mounts `/tmp` with `noexec`][init-tmp], which also blocks execution through an
+open file descriptor. Bootstrap rejects non-executable staging mounts rather than
+relaxing mount policy. Partial files, hash mismatches,
+trailing bytes and unexpected ELF architecture fail the boot. No supplied code runs
+before verification and confinement. All accept/read/write/acknowledgement I/O
+shares one absolute startup deadline, including slow-drip and stalled peers.
+
+[init-tmp]: https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap/blob/3f79674465f816eeffe4482e1240b792ff75d2d9/init/init.c#L121-L123
+
+The broker sends one zero acknowledgement byte and closes the provisioning socket
+after authenticated launch and boot-key attestation. This is **not** a model
+readiness handshake or proof of successful inference. Normal service uses vsock
+port 1000. No transfer retry or worker substitution happens after a failed attempt.
+
+The public EIF/PCRs do not change when only the signed worker changes. Client trust
+currently accepts any valid bundle signed by the measured publisher key set; it
+does not pin a worker digest or enforce a monotonic release counter. Changing
+publisher keys or resource policy requires a new image/PCR rollout.
+
+### Package and send
+
+Build the public tool with `cargo build --locked --bin worker-bundle` or
+`nix build --no-update-lock-file .#worker-bundle`. Stage the real worker and approved
+runtime files under `ARTIFACT_ROOT`, then:
 
 ```sh
-cargo test --locked -p flamingo-verifier-worker --test model -- --ignored
+target/debug/worker-bundle manifest RELEASE_ID ARTIFACT_ROOT > manifest.json
+openssl dgst -sha384 -sign publisher.pem -out manifest.sig manifest.json
+target/debug/worker-bundle pack manifest.json manifest.sig ARTIFACT_ROOT worker.bundle
+# On the parent Linux host after starting the enclave; timeout must be 1..900 seconds:
+target/debug/worker-bundle send ENCLAVE_CID worker.bundle TIMEOUT_SECONDS
 ```
 
-For the actual runtime/policy smoke test, build
-`cargo build --locked -p flamingo-verifier-worker-process --example qualify-worker`.
-Run the example as root in an isolated Linux test environment, under
-`timeout --kill-after=5s 150s unshare --fork --pid --mount-proc --kill-child`, passing
-`RUNTIME_ROOT ADDRESS_SPACE_BYTES MAX_THREADS FACE_FIXTURE`. Budgets are deliberately
-explicit. It checks cold/warm same-image scores and recoverable rejection under the
-production policy. Use only synthetic/approved fixtures, never production biometrics.
-Passing this smoke test does not replace resource, syscall and pinned-Nitro qualification.
+Keep the publisher signing key offline/private and out of Git, images and the
+provisioner. Signing belongs to the approved publisher; the tool never creates or
+requests a signing key. Do not edit or reformat `manifest.json` after signing.
+Packaging verifies hashes and refuses to overwrite an existing output; it does not
+establish publisher trust. The enclave performs that signature verification.
 
 ## Production sandbox
 
-`worker-process/worker.policy` is embedded in the public launcher, not supplied by
-the worker. The same policy applies to the loader and every inference thread.
-The launcher requires x86_64 Linux with PID/mount/network/IPC/cgroup namespaces and seccomp
-`KILL_PROCESS` support (Linux 4.14+); missing features fail closed, without fallback.
+The public launcher embeds `worker-process/worker.policy`. Minijail installs it
+before executing the worker's ELF loader, not through `LD_PRELOAD`. The same filter
+applies to every thread. Missing namespace or whole-process seccomp termination
+support fails closed on x86_64 Linux.
 
-- A non-recursive, read-only `nosuid,nodev` bind of `SandboxConfig.root` becomes the
-  worker's root/cwd via `chroot`, inside a private-propagation mount namespace.
-  Host submounts are excluded, and no directory FDs survive to reach the old root.
-  No `/proc`, `/sys`, `/dev`, writable scratch space or broker secrets are provided.
-- UID/GID 65532 are reserved exclusively for this worker. Supplementary groups and
-  all capabilities are dropped; `no_new_privs` prevents privilege gains at exec.
-- Only pthread-style `clone` is allowed. `clone3` returns ENOSYS for libc fallback;
-  forks, new namespaces, sockets (including vsock), ptrace, process-memory syscalls,
-  device ioctls and pathname exec are forbidden. A violation kills **all** threads.
-- Memory mappings cannot be simultaneously writable/executable. Files open read-only.
-  Limits cannot be raised: explicit address-space and thread budgets, 64 FDs, and
-  zero core-dump, file-write and locked-memory allowances. RPC deadlines bound stuck
-  requests; there is no cumulative CPU-time limit that would kill a healthy old worker.
+- A nonrecursive, read-only `nosuid,nodev` bind of the verified runtime becomes the
+  worker's root/cwd in a private mount namespace. Host submounts are excluded.
+  There is no `/proc`, `/sys`, `/dev`, writable cache or access to broker secrets.
+- UID/GID 65532 are reserved for this worker. Supplementary groups and capabilities
+  are dropped, and `no_new_privs` prevents privilege gains. FD 3 is the only surviving
+  non-stdio descriptor; the executable descriptor closes on exec.
+- Only pthread-style creation is allowed; sockets/vsock, forks, new namespaces,
+  ptrace, process-memory access, device ioctls and pathname exec are forbidden.
+  A seccomp violation kills all worker threads. Writable/executable mappings and
+  file writes are denied.
+- Limits are explicit address space and threads, 64 FDs, and zero core-dump,
+  file-write and locked-memory allowances. `RLIMIT_AS` is not aggregate guest RAM;
+  reserve memory for the broker, loaded artifacts/page cache and kernel as well.
 
-The boot configuration must supply an authenticated, immutable executable and a
-dedicated root-owned runtime tree containing only its approved loader, shared-library
-closure, config and models. Keep the entire tree and its ancestors trusted/immutable
-through launch; never point it at the broker root, host `/lib`, or all of `/nix/store`.
-The launcher rejects `/`, non-directories and group/world-writable or non-root-owned
-roots; this is not an untrusted archive extractor or manifest verifier.
+The chroot/FD/capability combination supports the pinned Nitro initramfs layout;
+chroot alone is not the sandbox. See the [Chromium sandboxing guide](https://www.chromium.org/chromium-os/developer-library/guides/development/sandboxing/)
+for the layered-isolation approach. Never enable permissive policy logging, core
+dumps or production-biometric syscall traces to make qualification pass.
 
-There are intentionally no default memory/thread budgets: measure the packaged model
-and reserve enclave RAM for the broker, page cache and kernel. `RLIMIT_AS` bounds
-virtual mappings, not aggregate guest memory; `RLIMIT_NPROC` counts the reserved UID's
-threads. Trace cold loading and warm inference under this policy on the pinned Nitro
-image before rollout, including malformed images, exhaustion and forbidden syscalls.
-The worker now has a local runtime bundle, but broker RPC integration and model/Nitro
-qualification remain outstanding. Do not treat fixture success as qualification.
-Policy/resource deaths currently surface as fatal RPC transport/timeout metrics;
-kernel audit diagnostics are still needed to distinguish the underlying cause.
-Roll out the public image, runtime closure and budgets together; rollback requires
-a fresh enclave, never disabling the sandbox or restarting its worker in place.
+## Tests and repo-local prototype
 
-### Chromium guide cross-check
+Public tests require no models or private source. Run portable suites as documented
+in the [README](../README.md). [Rust CI](../.github/workflows/rust-ci.yml) separately
+builds the Linux process test executable and runs it as root under an outer deadline.
+Each broker case has its own PID namespace and timeout. The harness checks pre-main
+confinement, privilege/FD/resource boundaries, forbidden syscalls, idle exits and
+fatal shutdown using a test-only executable. A signed-runtime case also packages,
+authenticates and launches that same fixture through the production artifact API.
+The test executable and its publisher key never ship in the public image.
 
-The [Chromium sandboxing guide](https://www.chromium.org/chromium-os/developer-library/guides/development/sandboxing/)
-informs the UID/capability drop, namespaces, private mounts, argument-filtered seccomp
-and error-path testing. Deliberate platform differences:
+`verifier/worker` is a separate local workspace retaining the current detection and
+embedding prototype, not the full biometrics DeepFace pipeline. It embeds YAML but
+still opens `/models/{rgbnet,face_embedding_generator}.onnx`, so its runtime root is
+for prototype qualification only and is **not** the production provisioning bundle.
 
-- Apply seccomp **before** exec, including loader syscalls. The guide's preload
-  shortcut would execute the supplied loader before installing its filter.
-- The pinned Nitro CLI v1.2.3 init predates AWS's [root-switch fix](https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap/commit/203242d54e4f).
-  Its chrooted initramfs layout cannot support our previous `pivot_root` setup.
-  Use chroot plus FD/capability/syscall restrictions, not chroot alone; the Linux
-  harness also exercises a broker launched from this legacy root layout.
-- Landlock requires [Linux 5.13+](https://www.kernel.org/doc/html/latest/userspace-api/landlock.html#kernel-support),
-  so the pinned 4.14 kernel uses the minimal filesystem view instead. The Rust
-  Minijail binding lacks a UTS namespace setter; hostname reads/changes are denied
-  by seccomp. Add UTS isolation before granting any such syscalls.
-- Any audit/strace policy discovery must use synthetic data in an isolated debug
-  environment. Never enable Minijail's permissive `-L` mode or core dumps on a
-  production biometric worker. C/C++ CFI and target-userland syscall coverage must
-  be checked when packaging the real worker, not inferred from the public fixture.
+```sh
+CARGO_TARGET_DIR=target cargo test --locked --manifest-path verifier/worker/Cargo.toml
+# Private Git access is required for the prototype; models are not needed for unit tests.
+nix build --no-update-lock-file .#privatePackages.x86_64-linux.verifier-worker
 
-Tests: portable RPC tests run with Cargo. Build the Linux process integration
-executable with `cargo test -p flamingo-verifier-worker-process --all-features --no-run`,
-then run it as root under `timeout --kill-after=5s 60s` (as in Rust CI).
-It uses no libtest threads. Each broker test runs under `unshare` (util-linux) in
-its own PID namespace with a ten-second timeout; broker exit removes descendants.
-Only the normal-drop test waits for the child, to verify that SIGKILL was issued.
-The root harness uses `ldd` only on its own trusted test executable to stage a minimal
-runtime. It checks pre-main confinement, library/data reads, privileges, forbidden
-syscalls (including from a secondary thread), memory/FD/thread exhaustion and fatal
-broker shutdown. No permissive test-policy override exists.
+# Also requires model access; this output is never included in the public image.
+bash scripts/fetch-face-models.sh
+nix build --no-update-lock-file .#privatePackages.x86_64-linux.verifier-worker-runtime
+```
+
+The ignored real-model RPC test additionally needs `WORKER_MODEL_DIR` and an approved
+`WORKER_FACE_FIXTURE`:
+
+```sh
+CARGO_TARGET_DIR=target cargo test --locked --manifest-path verifier/worker/Cargo.toml --test model -- --ignored
+```
+
+For a real-runtime sandbox smoke test, build the `worker-process` `qualify-worker`
+example and run it as root under
+`timeout --kill-after=5s 150s unshare --fork --pid --mount-proc --kill-child --`, passing
+`RUNTIME_ROOT ADDRESS_SPACE_BYTES MAX_THREADS FACE_FIXTURE`. It checks cold/warm
+same-image scores and recoverable image rejection under the production policy.
+
+Real model correctness, approved publisher trust, measured budgets and execution on
+the pinned Linux/Nitro image remain release gates. Fixture success is not model
+qualification. [Operations](worker-operations.md) covers deadlines, health semantics,
+Datadog, canary rollout, rollback and the remaining kernel-diagnostics blind spot.

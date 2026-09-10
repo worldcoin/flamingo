@@ -19,4 +19,7 @@ mod matches;
 pub use error::Error;
 pub use health::HealthRequest;
 pub use keys::{GetEncryptionKeyRequest, KeyAttestation};
-pub use matches::{MatchRequest, MatchResponse};
+pub use matches::{
+    MAX_MATCH_CIPHERTEXT_BYTES, MAX_MATCH_HTTP_BODY_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MatchRequest,
+    MatchResponse,
+};

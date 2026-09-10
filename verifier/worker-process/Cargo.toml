@@ -18,6 +18,13 @@ thiserror.workspace = true
 tracing.workspace = true
 flamingo-verifier-worker-protocol.workspace = true
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+flamingo-verifier-worker-artifact.workspace = true
+hex.workspace = true
+p384.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
 [[bin]]
 name = "worker-process-test-peer"
 path = "tests/support/fake-worker.rs"

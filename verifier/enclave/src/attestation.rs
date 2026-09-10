@@ -17,6 +17,31 @@ pub const MAX_CACHED_AGE: Duration = Duration::from_mins(10);
 /// default `max_attestation_age_millis` (1h).
 pub const MAX_SERVABLE_AGE: Duration = Duration::from_hours(1);
 
+/// Bounds each refresh and the initial NSM connection plus boot-key attestations.
+pub const NSM_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Runs an NSM operation off the executor; a hung or panicking device call is terminal.
+/// Returning would leave a detached blocking task that can prevent runtime shutdown.
+pub async fn run_bounded<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
+    let result = tokio::time::timeout(
+        NSM_OPERATION_TIMEOUT,
+        tokio::task::spawn_blocking(operation),
+    )
+    .await;
+    let failure_class = match result {
+        Ok(Ok(value)) => return value,
+        Ok(Err(_)) => "panic",
+        Err(_) => "request_timeout",
+    };
+    metrics::counter!("enclave_attestation.failures", "class" => failure_class).increment(1);
+    tracing::error!(
+        dependency = "nitro_nsm",
+        failure_class,
+        "terminal NSM operation failure"
+    );
+    std::process::exit(1)
+}
+
 /// Produces documents attesting a raw signing key or a channel-key commitment.
 pub trait Attestor: Send + Sync {
     /// Attests `public_key` in the document's `public_key` field.
@@ -108,16 +133,15 @@ impl AttestedKey {
 
                 let attestor = Arc::clone(&attestor);
                 let key = public_key.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || attestor.attest_public_key(&key)).await;
+                let result = run_bounded(move || attestor.attest_public_key(&key)).await;
 
                 match result {
-                    Ok(Ok(document)) => {
+                    Ok(document) => {
                         let mut cached = cache.lock().await;
                         cached.document = document;
                         cached.attested_at = Instant::now();
                     }
-                    Ok(Err(error)) => {
+                    Err(error) => {
                         tracing::error!(?error, "background attestation refresh failed");
                         let age = cache.lock().await.attested_at.elapsed();
                         if age >= MAX_SERVABLE_AGE {
@@ -129,22 +153,30 @@ impl AttestedKey {
                             return;
                         }
                     }
-                    Err(error) => {
-                        // spawn_blocking task panicked
-                        tracing::error!(
-                            ?error,
-                            "background attestation spawn_blocking join failed"
-                        );
-                        return;
-                    }
                 }
             }
         })
     }
 
+    /// Cached attestations remain usable during brief NSM failures, never beyond the client limit.
+    pub async fn is_fresh(&self) -> bool {
+        self.cached_attestation.lock().await.attested_at.elapsed() < MAX_SERVABLE_AGE
+    }
+
     /// Returns the cached attestation document (may be older than `max_age` while a refresh runs).
     pub async fn document(&self) -> Vec<u8> {
-        self.cached_attestation.lock().await.document.clone()
+        let cached = self.cached_attestation.lock().await;
+        if cached.attested_at.elapsed() >= MAX_SERVABLE_AGE {
+            metrics::counter!("enclave_attestation.failures", "class" => "stale_cache")
+                .increment(1);
+            tracing::error!(
+                dependency = "nitro_nsm",
+                failure_class = "stale_cache",
+                "cached attestation expired"
+            );
+            std::process::exit(1);
+        }
+        cached.document.clone()
     }
 }
 
@@ -206,10 +238,17 @@ pub fn log_boot_measurements(document: &AttestationDoc) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
     use std::time::Duration;
 
-    use super::{AttestedKey, Attestor, MAX_SERVABLE_AGE};
+    use flamingo_verifier_enclave_types as enclave_types;
+    use tokio::sync::Notify;
+
+    use super::{AttestedKey, Attestor, MAX_SERVABLE_AGE, NSM_OPERATION_TIMEOUT, run_bounded};
     use crate::test_support::{CountingAttestor, FailsAfterSuccessesAttestor};
 
     fn key(attestor: Arc<dyn Attestor>, max_age: Duration) -> AttestedKey {
@@ -264,6 +303,8 @@ mod tests {
 
         tokio::task::yield_now().await;
         tokio::time::advance(MAX_SERVABLE_AGE).await;
+        // Do not auto-advance the new hard timeout before the blocking pool gets CPU time.
+        tokio::time::resume();
 
         // Awaiting the handle lets the runtime go idle, which is what drives the refresh loop's
         // blocking attest to completion. Spinning on `is_finished` instead kept the runtime busy
@@ -271,5 +312,91 @@ mod tests {
         refresh.await.expect("refresh task should not panic");
 
         assert!(attestor.calls() >= 2);
+    }
+
+    /// Successful calls and ordinary NSM rejection preserve their result under the deadline.
+    #[tokio::test]
+    async fn bounded_operation_preserves_results() {
+        assert_eq!(
+            run_bounded(|| Ok::<_, enclave_types::Error>(42)).await,
+            Ok(42)
+        );
+        assert_eq!(
+            run_bounded(|| Err::<(), _>(enclave_types::Error::AttestationFailed)).await,
+            Err(enclave_types::Error::AttestationFailed)
+        );
+    }
+
+    /// Boots successfully, then blocks the background device operation without consuming CPU.
+    struct BlockingAttestor {
+        /// Only the construction-time attestation succeeds.
+        calls: AtomicUsize,
+        /// Signals that the blocking operation really started.
+        entered: Arc<Notify>,
+        /// Held closed until the subprocess exits at the device deadline.
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Attestor for BlockingAttestor {
+        /// The fixture is used only to verify terminal timeout behavior, never inference.
+        fn attest_public_key(&self, public_key: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) != 0 {
+                self.entered.notify_one();
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            Ok(public_key.to_vec())
+        }
+    }
+
+    /// A hung refresh exits the process instead of waiting forever while dropping the runtime.
+    #[test]
+    fn hung_refresh_is_terminal_without_waiting_for_device() {
+        const CHILD_ENV: &str = "FLAMINGO_TEST_NSM_TIMEOUT";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                tokio::time::pause();
+                let entered = Arc::new(Notify::new());
+                let (_release, receiver) = mpsc::channel();
+                let attestor = Arc::new(BlockingAttestor {
+                    calls: AtomicUsize::new(0),
+                    entered: Arc::clone(&entered),
+                    release: Mutex::new(receiver),
+                });
+                let mut cached = key(attestor, Duration::from_secs(1));
+                let refresh = cached.start_refresh();
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_secs(1)).await;
+                entered.notified().await;
+                tokio::time::advance(NSM_OPERATION_TIMEOUT + Duration::from_millis(1)).await;
+                refresh.await.unwrap();
+            });
+            return;
+        }
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "attestation::tests::hung_refresh_is_terminal_without_waiting_for_device",
+            ])
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.code(), Some(1));
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("hung NSM operation survived its hard deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

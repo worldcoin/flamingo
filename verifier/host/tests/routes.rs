@@ -221,6 +221,30 @@ async fn matches_rejects_a_body_over_the_limit_with_an_envelope() {
     assert_eq!(body["allowRetry"], false);
 }
 
+/// HTTP framing headroom must not allow one extra decoded ciphertext byte into the enclave.
+#[tokio::test]
+async fn matches_enforces_the_decoded_ciphertext_boundary() {
+    for length in [
+        enclave_types::MAX_MATCH_CIPHERTEXT_BYTES,
+        enclave_types::MAX_MATCH_CIPHERTEXT_BYTES + 1,
+    ] {
+        let state = state_with(StubEnclaveClient {
+            match_result: Some(Ok(enclave_types::MatchResponse {
+                ciphertext: vec![9; 48],
+            })),
+            ..StubEnclaveClient::default()
+        });
+        let encoded = STANDARD.encode(vec![0; length]);
+        let (status, _) = send(state, match_request(&encoded)).await;
+        let expected = if length == enclave_types::MAX_MATCH_CIPHERTEXT_BYTES {
+            StatusCode::OK
+        } else {
+            StatusCode::PAYLOAD_TOO_LARGE
+        };
+        assert_eq!(status, expected);
+    }
+}
+
 #[tokio::test]
 async fn matches_maps_an_unopenable_request_to_conflict() {
     // Re-assign and re-seal: the client cannot tell this from a corrupt ciphertext, which is why
