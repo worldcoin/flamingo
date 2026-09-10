@@ -39,6 +39,16 @@ pub fn prepare_enclave_root() -> io::Result<()> {
     if result != 0 {
         return Err(io::Error::last_os_error());
     }
+
+    // A bare / lookup retains the old root reference after an overmount. Walking
+    // /.. stays inside that root but crosses onto the new mount before chroot.
+    // SAFETY: Both paths are static and remain within the existing enclave root.
+    if unsafe { libc::chroot(c"/..".as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 

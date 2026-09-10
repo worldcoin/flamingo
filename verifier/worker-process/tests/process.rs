@@ -116,9 +116,25 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::EINVAL)
         );
+        prepare_enclave_root()?;
+        // Fail at the mount operation itself, before worker stderr is redirected.
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    c"/".as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REC | libc::MS_PRIVATE,
+                    std::ptr::null(),
+                )
+            },
+            0,
+            "prepared root must support private mounts: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(std::env::current_dir()?, Path::new("/"));
         root = Path::new("/root");
     }
-    prepare_enclave_root()?;
 
     if case == "recoverable" {
         assert!(
