@@ -116,7 +116,7 @@ impl Worker {
         };
 
         if let Some(error) = error {
-            tracing::error!(dependency = "biometric_worker", pid = self.pid, failure_class = "liveness", %error, "worker liveness check failed");
+            tracing::error!(dependency = "biometric_worker", pid = self.pid, %error, "worker liveness check failed");
             self.kill();
             (self.on_fatal)(WorkerClientError::Transport(Arc::new(error)));
         }

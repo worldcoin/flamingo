@@ -73,10 +73,7 @@ mod sandboxed {
             }
 
             let Ok(mut worker) = self.worker.lock() else {
-                tracing::error!(
-                    failure_class = "worker_ownership",
-                    "exclusive worker ownership violated"
-                );
+                tracing::error!("exclusive worker ownership violated");
                 std::process::exit(1);
             };
             worker
@@ -94,7 +91,7 @@ mod sandboxed {
                     ) => FailureReason::MalformedInputs,
                     _ => {
                         tracing::error!(
-                            failure_class = "worker_failure",
+                            %error,
                             "unexpected worker comparison failure"
                         );
                         std::process::exit(1);
@@ -108,10 +105,7 @@ mod sandboxed {
                 Ok(worker) => worker.check_alive(),
                 Err(TryLockError::WouldBlock) => {}
                 Err(TryLockError::Poisoned(_)) => {
-                    tracing::error!(
-                        failure_class = "worker_ownership",
-                        "worker ownership poisoned"
-                    );
+                    tracing::error!("worker ownership poisoned");
                     std::process::exit(1);
                 }
             }

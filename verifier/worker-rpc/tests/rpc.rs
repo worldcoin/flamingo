@@ -426,10 +426,20 @@ fn model_failure_and_panic_close_connection() {
             client.compare(images(1)),
             Err(WorkerClientError::Transport(_))
         ));
+        let error = server.join().unwrap().unwrap_err();
         assert!(matches!(
-            server.join().unwrap(),
-            Err(WorkerServerError::Model(_) | WorkerServerError::ModelPanic)
+            error,
+            WorkerServerError::Model(_) | WorkerServerError::ModelPanic
         ));
+        assert_eq!(
+            error.to_string(),
+            if panic {
+                "worker model panicked"
+            } else {
+                "worker model failed"
+            },
+            "displayed errors must not expose model error or panic contents"
+        );
     }
 }
 

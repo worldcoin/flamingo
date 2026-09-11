@@ -52,7 +52,7 @@ fn images(id: u8) -> CompareRequest {
 #[cfg(target_os = "linux")]
 /// The broker owns process termination; expose the original error for the test supervisor.
 fn fatal(error: WorkerClientError) -> ! {
-    eprintln!("fatal_worker:{}", error.failure_class());
+    eprintln!("fatal_worker:{error}");
     std::process::exit(FATAL_EXIT);
 }
 
@@ -441,33 +441,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     std::fs::write(temp.join("broker-secret"), b"must not be visible")?;
 
-    for (case, failure_class) in [
+    for (case, expected_error) in [
         ("recoverable", None),
         ("nitro-root", None),
-        ("signed-runtime", Some("transport")),
+        ("signed-runtime", Some("worker socket I/O failed")),
         ("moved-owner", None),
-        ("idle-exit", Some("transport")),
-        ("seccomp", Some("transport")),
-        ("vsock", Some("transport")),
-        ("fork", Some("transport")),
-        ("thread-seccomp", Some("transport")),
-        ("ptrace", Some("transport")),
-        ("process-memory", Some("transport")),
-        ("setuid", Some("transport")),
-        ("namespace", Some("transport")),
-        ("filesystem-write", Some("transport")),
-        ("raise-limit", Some("transport")),
-        ("device-ioctl", Some("transport")),
-        ("path-exec", Some("transport")),
-        ("rwx-memory", Some("transport")),
-        ("chroot-escape", Some("transport")),
-        ("set-hostname", Some("transport")),
-        ("read-hostname", Some("transport")),
-        ("timeout", Some("request_timeout")),
-        ("cold-timeout", Some("request_timeout")),
-        ("kill-failure", Some("request_timeout")),
-        ("initialization", Some("transport")),
-        ("bad-executable", Some("transport")),
+        ("idle-exit", Some("worker socket I/O failed")),
+        ("seccomp", Some("worker socket I/O failed")),
+        ("vsock", Some("worker socket I/O failed")),
+        ("fork", Some("worker socket I/O failed")),
+        ("thread-seccomp", Some("worker socket I/O failed")),
+        ("ptrace", Some("worker socket I/O failed")),
+        ("process-memory", Some("worker socket I/O failed")),
+        ("setuid", Some("worker socket I/O failed")),
+        ("namespace", Some("worker socket I/O failed")),
+        ("filesystem-write", Some("worker socket I/O failed")),
+        ("raise-limit", Some("worker socket I/O failed")),
+        ("device-ioctl", Some("worker socket I/O failed")),
+        ("path-exec", Some("worker socket I/O failed")),
+        ("rwx-memory", Some("worker socket I/O failed")),
+        ("chroot-escape", Some("worker socket I/O failed")),
+        ("set-hostname", Some("worker socket I/O failed")),
+        ("read-hostname", Some("worker socket I/O failed")),
+        ("timeout", Some("worker comparison timed out")),
+        ("cold-timeout", Some("worker comparison timed out")),
+        ("kill-failure", Some("worker comparison timed out")),
+        ("initialization", Some("worker socket I/O failed")),
+        ("bad-executable", Some("worker socket I/O failed")),
     ] {
         let output = Command::new("timeout")
             .args([
@@ -487,12 +487,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.code(),
-            Some(failure_class.map_or(0, |_| FATAL_EXIT)),
+            Some(expected_error.map_or(0, |_| FATAL_EXIT)),
             "{case}: {stderr}"
         );
-        if let Some(class) = failure_class {
+        if let Some(error) = expected_error {
             assert!(
-                stderr.contains(&format!("fatal_worker:{class}")),
+                stderr.contains(&format!("fatal_worker:{error}")),
                 "{case}: {stderr}"
             );
         }

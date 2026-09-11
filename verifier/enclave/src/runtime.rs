@@ -24,7 +24,7 @@ pub(super) fn run() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     std::panic::set_hook(Box::new(|_| {
-        error!(failure_class = "panic", "enclave panicked");
+        error!("enclave panicked");
     }));
 
     rng::verify_nsm_hwrng_current().context("Nitro hardware RNG is not configured")?;
@@ -60,7 +60,7 @@ pub(super) fn run() -> anyhow::Result<()> {
 fn worker_failed(error: WorkerClientError) -> ! {
     error!(
         dependency = "biometric_worker",
-        failure_class = error.failure_class(),
+        %error,
         "terminal worker failure; exiting enclave"
     );
     std::process::exit(1)

@@ -15,17 +15,8 @@ fn main() -> ExitCode {
     match flamingo_verifier_worker::run_worker(stream, Path::new("/models")) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            // Only the low-cardinality class, never third-party errors or biometric data.
-            let os_error = match &error {
-                flamingo_verifier_worker_rpc::WorkerServerError::Transport(error) => {
-                    error.raw_os_error()
-                }
-                _ => None,
-            };
-            eprintln!(
-                "worker failure: {} (os_error={os_error:?})",
-                error.failure_class()
-            );
+            // Display omits third-party model errors and biometric data.
+            eprintln!("worker failure: {error}");
             ExitCode::FAILURE
         }
     }

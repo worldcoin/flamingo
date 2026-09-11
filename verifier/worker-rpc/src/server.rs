@@ -41,7 +41,7 @@ where
     if let Err(error) = &result {
         tracing::warn!(
             dependency = "biometric_model",
-            failure_class = error.failure_class(),
+            %error,
             "worker server stopped"
         );
     }
@@ -111,32 +111,10 @@ pub enum WorkerServerError {
     /// An encoded image was empty or too large.
     #[error("worker images violate byte limits")]
     InvalidImages,
-    /// The callback reported an infrastructure or initialization failure.
-    #[error("worker model failed: {0}")]
+    /// The callback failed; Display omits its potentially sensitive error contents.
+    #[error("worker model failed")]
     Model(#[source] Box<dyn Error + Send + Sync>),
     /// The callback panicked; its potentially sensitive panic payload is not retained.
     #[error("worker model panicked")]
     ModelPanic,
-}
-
-impl WorkerServerError {
-    /// Stable, low-cardinality telemetry label.
-    #[must_use]
-    pub fn failure_class(&self) -> &'static str {
-        match self {
-            Self::InvalidConfig => "invalid_config",
-            Self::Transport(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                "request_timeout"
-            }
-            Self::Transport(_) => "transport",
-            Self::Protocol(_) | Self::InvalidImages => "invalid_input",
-            Self::Model(_) => "model",
-            Self::ModelPanic => "model_panic",
-        }
-    }
 }

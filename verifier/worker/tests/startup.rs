@@ -129,7 +129,7 @@ fn executable_rejects_partial_frame() {
         .take(4096)
         .read_to_string(&mut diagnostics)
         .unwrap();
-    assert!(diagnostics.contains("transport"));
+    assert!(diagnostics.contains("worker socket I/O failed"));
 }
 
 /// Model initialization is inside the first request and never becomes AnalysisFailed.
@@ -157,7 +157,10 @@ fn missing_models_terminate_the_session() {
     assert!(client.compare(request.clone()).is_err());
     assert!(client.failure().is_some());
     let error = server.join().unwrap().unwrap_err();
-    assert_eq!(error.failure_class(), "model");
+    assert!(matches!(
+        error,
+        flamingo_verifier_worker_rpc::WorkerServerError::Model(_)
+    ));
     assert!(!matches!(
         client.compare(request),
         Err(WorkerClientError::AnalysisFailed)

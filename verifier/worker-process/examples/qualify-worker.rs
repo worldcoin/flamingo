@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(target_os = "linux")]
 /// A terminal RPC error always ends this broker lifetime; no retry or worker restart.
 fn fatal(error: flamingo_verifier_worker_rpc::WorkerClientError) -> ! {
-    eprintln!("worker qualification failed: {}", error.failure_class());
+    eprintln!("worker qualification failed: {error}");
     std::process::exit(1)
 }
 

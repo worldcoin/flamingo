@@ -119,7 +119,7 @@ impl WorkerClient {
         {
             self.failure = Some(error.clone());
             self.stream.take();
-            tracing::warn!(dependency = "biometric_worker", failure_class = error.failure_class(), %error, "worker connection failed");
+            tracing::warn!(dependency = "biometric_worker", %error, "worker connection failed");
         }
 
         result
@@ -188,20 +188,6 @@ pub enum WorkerClientError {
 }
 
 impl WorkerClientError {
-    /// Stable, low-cardinality diagnostic label.
-    #[must_use]
-    pub const fn failure_class(&self) -> &'static str {
-        match self {
-            Self::RequestEncoding(_) | Self::InvalidImages => "invalid_input",
-            Self::InvalidConfig => "invalid_config",
-            Self::Protocol(_) => "invalid_response",
-            Self::Transport(_) => "transport",
-            Self::RequestTimeout => "request_timeout",
-            Self::InvalidScore => "invalid_score",
-            Self::AnalysisFailed => "analysis_failed",
-        }
-    }
-
     /// Normalizes OS-specific socket timeout errors.
     fn transport(error: io::Error) -> Self {
         if matches!(

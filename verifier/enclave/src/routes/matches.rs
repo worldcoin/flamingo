@@ -56,16 +56,13 @@ pub async fn handler(
         }))
         .unwrap_or_else(|_| {
             // A detached task's panic cannot depend on its caller observing a JoinError.
-            tracing::error!(failure_class = "panic", "blocking match task panicked");
+            tracing::error!("blocking match task panicked");
             std::process::exit(1)
         })
     })
     .await
     .map_err(|_| {
-        tracing::error!(
-            failure_class = "task_cancelled",
-            "blocking match task cancelled"
-        );
+        tracing::error!("blocking match task cancelled");
         enclave_types::Error::Internal
     })?
 }
