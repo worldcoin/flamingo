@@ -32,10 +32,7 @@ pub async fn handler(
     // Admit one comparison before decryption or spawning blocking work.
     let permit = Arc::clone(&state.match_slot)
         .try_acquire_owned()
-        .map_err(|_| {
-            metrics::counter!("enclave_match.rejections", "class" => "busy").increment(1);
-            enclave_types::Error::NotReady
-        })?;
+        .map_err(|_| enclave_types::Error::NotReady)?;
 
     // A cached document, not an NSM call; never await while executing blocking work.
     let signing_key_attestation = state.signing_key_attestation().await;
@@ -59,14 +56,12 @@ pub async fn handler(
         }))
         .unwrap_or_else(|_| {
             // A detached task's panic cannot depend on its caller observing a JoinError.
-            metrics::counter!("enclave_match.failures", "class" => "panic").increment(1);
             tracing::error!(failure_class = "panic", "blocking match task panicked");
             std::process::exit(1)
         })
     })
     .await
     .map_err(|_| {
-        metrics::counter!("enclave_match.failures", "class" => "task_cancelled").increment(1);
         tracing::error!(
             failure_class = "task_cancelled",
             "blocking match task cancelled"

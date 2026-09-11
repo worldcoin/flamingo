@@ -45,8 +45,8 @@ before rollout. Match failures are not automatically retried.
 Configure host telemetry through telemetry-batteries. The default Axum layer
 records HTTP routes, response statuses and request spans. Monitor `/ready`
 failures, HTTP 5xx, latency and overload against the availability budget.
-Enclave-local worker metrics are not exported to the host. Transport errors alone
-cannot distinguish a worker crash, OOM or seccomp death; correlate with guest/kernel
+Worker and enclave failures use logs; host HTTP metrics provide the exported signal.
+Transport errors alone cannot distinguish a worker crash, OOM or seccomp death; correlate with guest/kernel
 diagnostics. Default spans include request paths, queries and user-agent values.
 Pontifex DEBUG events contain wire payloads; Datadog's log-level filter does not
 filter span events. Production telemetry must exclude those payload events.

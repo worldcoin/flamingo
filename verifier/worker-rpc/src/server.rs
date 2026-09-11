@@ -3,7 +3,6 @@ use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     panic::{AssertUnwindSafe, catch_unwind},
-    time::Instant,
 };
 
 use flamingo_verifier_worker_protocol::{
@@ -40,8 +39,6 @@ where
 
     let result = run(&mut stream, config, &mut comparator);
     if let Err(error) = &result {
-        metrics::counter!("worker_rpc.server_failures", "class" => error.failure_class())
-            .increment(1);
         tracing::warn!(
             dependency = "biometric_model",
             failure_class = error.failure_class(),
@@ -88,9 +85,7 @@ where
 
         let span = tracing::info_span!("worker.infer", dependency = "biometric_model");
         let _entered = span.enter();
-        let started = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| comparator(request)));
-        metrics::histogram!("worker_rpc.inference_seconds").record(started.elapsed().as_secs_f64());
         let response = result
             .map_err(|_| WorkerServerError::ModelPanic)?
             .map_err(WorkerServerError::Model)?;

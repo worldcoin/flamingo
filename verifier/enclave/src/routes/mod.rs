@@ -18,3 +18,16 @@ pub(crate) fn router(state: Arc<EnclaveState>) -> Router<Arc<EnclaveState>> {
         .route::<GetEncryptionKeyRequest, _, _>(encryption_key::handler)
         .route::<MatchRequest, _, _>(matches::handler)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::router;
+    use crate::test_support::{EchoAttestor, state_with};
+
+    #[test]
+    fn router_registers_enclave_operations() {
+        let _router = router(state_with(Arc::new(EchoAttestor)));
+    }
+}

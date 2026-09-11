@@ -105,25 +105,14 @@ impl WorkerClient {
         };
         let deadline = started + timeout;
         if !request.valid_image_sizes(self.config.max_image_bytes) {
-            metrics::counter!("worker_rpc.rejections", "class" => "invalid_input").increment(1);
             return Err(WorkerClientError::InvalidImages);
         }
-        let payload = encode_message(&request, self.config.max_request_bytes).map_err(|error| {
-            metrics::counter!("worker_rpc.rejections", "class" => "invalid_input").increment(1);
-            WorkerClientError::RequestEncoding(error)
-        })?;
+        let payload = encode_message(&request, self.config.max_request_bytes)
+            .map_err(WorkerClientError::RequestEncoding)?;
         drop(request);
 
-        let first_request = self.first_request;
         self.first_request = false;
         let result = self.exchange(&payload, deadline);
-        if first_request {
-            metrics::histogram!("worker_rpc.first_comparison_seconds")
-                .record(started.elapsed().as_secs_f64());
-        }
-        metrics::histogram!("worker_rpc.comparison_seconds")
-            .record(started.elapsed().as_secs_f64());
-        metrics::counter!("worker_rpc.comparisons", "result" => result.as_ref().err().map_or("success", WorkerClientError::failure_class)).increment(1);
 
         if let Err(error) = &result
             && !matches!(error, WorkerClientError::AnalysisFailed)
@@ -199,7 +188,7 @@ pub enum WorkerClientError {
 }
 
 impl WorkerClientError {
-    /// Stable, low-cardinality metric label.
+    /// Stable, low-cardinality diagnostic label.
     #[must_use]
     pub const fn failure_class(&self) -> &'static str {
         match self {

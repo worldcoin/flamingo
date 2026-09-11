@@ -1056,7 +1056,6 @@ dependencies = [
  "flamingo-verifier-worker-rpc",
  "hex",
  "libc",
- "metrics",
  "pontifex",
  "rand 0.8.8",
  "serde",
@@ -1149,7 +1148,6 @@ dependencies = [
  "flamingo-verifier-worker-rpc",
  "hex",
  "libc",
- "metrics",
  "minijail",
  "p384",
  "serde_json",
@@ -1173,7 +1171,6 @@ name = "flamingo-verifier-worker-rpc"
 version = "0.1.0"
 dependencies = [
  "flamingo-verifier-worker-protocol",
- "metrics",
  "thiserror 2.0.20",
  "tracing",
 ]

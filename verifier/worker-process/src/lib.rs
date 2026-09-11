@@ -80,7 +80,7 @@ impl Worker {
     }
 
     /// Returns only success or recoverable RPC errors. Fatal errors kill the worker and exit
-    /// through the broker's handler; RPC telemetry already records the original failure.
+    /// through the broker's handler; RPC logging already records the original failure.
     #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = self.pid))]
     pub fn compare(&mut self, request: CompareRequest) -> Result<ComparisonScores, WorkerError> {
         self.check_alive();
@@ -116,7 +116,6 @@ impl Worker {
         };
 
         if let Some(error) = error {
-            metrics::counter!("worker_process.failures", "class" => "liveness").increment(1);
             tracing::error!(dependency = "biometric_worker", pid = self.pid, failure_class = "liveness", %error, "worker liveness check failed");
             self.kill();
             (self.on_fatal)(WorkerClientError::Transport(Arc::new(error)));
@@ -130,7 +129,6 @@ impl Worker {
         if unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
-                metrics::counter!("worker_process.kill_failures").increment(1);
                 tracing::error!(dependency = "biometric_worker", pid = self.pid, %error, "worker kill failed");
             }
         }

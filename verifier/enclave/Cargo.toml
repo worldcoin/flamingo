@@ -21,7 +21,6 @@ flamingo-verifier-worker-protocol.workspace = true
 flamingo-verifier-worker-rpc.workspace = true
 flamingo-verifier-worker-artifact.workspace = true
 hex.workspace = true
-metrics.workspace = true
 pontifex = { workspace = true, features = ["nsm", "server", "channel"] }
 rand.workspace = true
 serde.workspace = true

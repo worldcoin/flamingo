@@ -8,6 +8,5 @@ publish = false
 
 [dependencies]
 flamingo-verifier-worker-protocol.workspace = true
-metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

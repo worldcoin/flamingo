@@ -58,7 +58,6 @@ pub(super) fn run() -> anyhow::Result<()> {
 
 /// A terminal worker cannot be replaced within an enclave boot; init tears down the guest.
 fn worker_failed(error: WorkerClientError) -> ! {
-    metrics::counter!("enclave_match.failures", "class" => "worker_terminal").increment(1);
     error!(
         dependency = "biometric_worker",
         failure_class = error.failure_class(),
