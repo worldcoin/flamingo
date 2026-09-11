@@ -29,7 +29,7 @@ pub async fn handler(
         return Err(enclave_types::Error::RequestNotOpened);
     }
 
-    // No queue of encrypted/decrypted images or blocking tasks behind a slow comparison.
+    // Admit one comparison before decryption or spawning blocking work.
     let permit = Arc::clone(&state.match_slot)
         .try_acquire_owned()
         .map_err(|_| {

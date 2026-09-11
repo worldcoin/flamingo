@@ -56,7 +56,6 @@ p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha38
 pontifex = { version = "2.0.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
 rand = "0.8"
-rmp-serde = "1.3"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
@@ -66,7 +65,6 @@ thiserror = "2"
 tempfile = "3.27"
 vsock = "0.5.4"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
-tokio-vsock = "0.7"
 tower = { version = "0.5", features = ["util"] }
 telemetry-batteries = { version = "0.4.1", default-features = false }
 tracing = "0.1"
