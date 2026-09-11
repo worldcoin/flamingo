@@ -34,16 +34,17 @@ bootstrap configuration before using `scripts/build-enclaves.sh`.
 `/health` checks host liveness; `/ready` checks enclave availability and observed
 worker liveness. Neither proves model readiness. Concurrent matches return 503;
 the enclave holds admission through blocking work even if the caller disconnects.
+The host accepts up to 12 MiB per JSON match body. It buffers concurrent uploads
+before enclave admission and does not impose an upload deadline.
 
 The broker's cold/warm comparison budgets are 120s/10s, the host match deadline is
 135s, and the client defaults to 150s. Control requests have a 2s host deadline.
-Uploads have a 5s deadline. Configure proxies and shutdown grace to accommodate the
-cold path before rollout. Match failures are not automatically retried.
+Configure proxy upload timeouts and shutdown grace to accommodate the cold path
+before rollout. Match failures are not automatically retried.
 
 Configure host telemetry through telemetry-batteries. The default Axum layer
-records HTTP routes, response statuses and request spans; admission exports
-`verifier.match.rejections`. Monitor `/ready` failures, HTTP 5xx, latency and overload
-against the availability budget.
+records HTTP routes, response statuses and request spans. Monitor `/ready`
+failures, HTTP 5xx, latency and overload against the availability budget.
 Enclave-local worker metrics are not exported to the host. Transport errors alone
 cannot distinguish a worker crash, OOM or seccomp death; correlate with guest/kernel
 diagnostics. Default spans include request paths, queries and user-agent values.

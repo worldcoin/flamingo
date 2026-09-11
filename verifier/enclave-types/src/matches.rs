@@ -7,8 +7,6 @@ use crate::Error;
 pub const MAX_MATCH_PLAINTEXT_BYTES: usize = 24 * 1024 * 1024 + 64 * 1024 + 1024;
 /// Pontifex 2 adds a 1216-byte response key, 7-byte header, 1120-byte KEM and 16-byte tag.
 pub const MAX_MATCH_CIPHERTEXT_BYTES: usize = MAX_MATCH_PLAINTEXT_BYTES + 2359;
-/// Base64 ciphertext plus a small fixed JSON envelope.
-pub const MAX_MATCH_HTTP_BODY_BYTES: usize = MAX_MATCH_CIPHERTEXT_BYTES.div_ceil(3) * 4 + 64;
 
 /// Requests a 3-way face match.
 #[derive(Debug, Clone, Serialize, Deserialize)]

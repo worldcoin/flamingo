@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use tokio::sync::Semaphore;
-
 use crate::{Environment, enclave::EnclaveClient};
 
 /// Dependencies shared by API request handlers.
@@ -9,8 +7,6 @@ use crate::{Environment, enclave::EnclaveClient};
 pub struct AppState {
     environment: Environment,
     enclave_client: Arc<dyn EnclaveClient>,
-    /// Bounds match uploads and forwarding before their bodies are allocated.
-    pub(crate) match_slot: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -20,7 +16,6 @@ impl AppState {
         Self {
             environment,
             enclave_client,
-            match_slot: Arc::new(Semaphore::new(1)),
         }
     }
 

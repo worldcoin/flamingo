@@ -1090,7 +1090,6 @@ dependencies = [
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",
  "http-body-util",
- "metrics",
  "pontifex",
  "serde",
  "serde_json",

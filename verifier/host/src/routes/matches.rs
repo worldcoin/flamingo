@@ -1,10 +1,4 @@
-use std::{sync::Arc, time::Duration};
-
-use axum::{
-    Json,
-    extract::{FromRequest, Request, State, rejection::JsonRejection},
-    http::StatusCode,
-};
+use axum::{Json, extract::State, extract::rejection::JsonRejection, http::StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flamingo_verifier_api_types::{MatchRequestBody, MatchResponseBody};
 use flamingo_verifier_enclave_types as enclave;
@@ -12,11 +6,8 @@ use flamingo_verifier_enclave_types as enclave;
 use crate::AppState;
 use crate::error::AppError;
 
-/// Base64 sealed images and metadata, including the fixed JSON envelope.
-pub const MAX_BODY_BYTES: usize = enclave::MAX_MATCH_HTTP_BODY_BYTES;
-
-/// Maximum time one uploader can occupy the match slot before forwarding.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5);
+/// Largest match body this route accepts, including the base64 JSON envelope.
+pub const MAX_BODY_BYTES: usize = 12 * 1024 * 1024;
 
 /// Relays a sealed match request to the enclave.
 ///
@@ -25,37 +16,9 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 /// Returns [`AppError`] if the body is rejected or the enclave rejects the request.
 pub async fn handler(
     State(state): State<AppState>,
-    request: Request,
+    body: Result<Json<MatchRequestBody>, JsonRejection>,
 ) -> Result<(StatusCode, Json<MatchResponseBody>), AppError> {
-    // Admission must precede JSON extraction: otherwise concurrent uploads allocate
-    // their complete bodies before the enclave's single-worker gate can shed them.
-    let _permit = Arc::clone(&state.match_slot)
-        .try_acquire_owned()
-        .map_err(|_| {
-            metrics::counter!("verifier.match.rejections", "class" => "busy").increment(1);
-            AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "enclave_not_ready",
-                "A match request is already being processed",
-                true,
-            )
-        })?;
-
-    let Json(body) = tokio::time::timeout(
-        UPLOAD_TIMEOUT,
-        Json::<MatchRequestBody>::from_request(request, &state),
-    )
-    .await
-    .map_err(|_| {
-        metrics::counter!("verifier.match.rejections", "class" => "upload_timeout").increment(1);
-        AppError::new(
-            StatusCode::REQUEST_TIMEOUT,
-            "request_timeout",
-            "The match request body was not received before the upload deadline",
-            false,
-        )
-    })?
-    .map_err(|rejection| rejected_body(&rejection))?;
+    let Json(body) = body.map_err(|rejection| rejected_body(&rejection))?;
 
     let ciphertext = STANDARD.decode(body.ciphertext.trim()).map_err(|_| {
         AppError::new(
@@ -65,15 +28,6 @@ pub async fn handler(
             false,
         )
     })?;
-
-    if ciphertext.len() > enclave::MAX_MATCH_CIPHERTEXT_BYTES {
-        return Err(AppError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request_too_large",
-            "The sealed match request was larger than this route accepts",
-            false,
-        ));
-    }
 
     let response = state
         .enclave_client()
