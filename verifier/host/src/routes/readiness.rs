@@ -7,7 +7,6 @@ use crate::AppState;
 pub async fn handler(State(state): State<AppState>) -> StatusCode {
     match state.enclave_client().health().await {
         Ok(()) => StatusCode::OK,
-        // The client records low-cardinality health metrics; a probe must not spam logs.
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,
     }
 }

@@ -40,13 +40,15 @@ The broker's cold/warm comparison budgets are 120s/10s, the host match deadline 
 Uploads have a 5s deadline. Configure proxies and shutdown grace to accommodate the
 cold path before rollout. Match failures are not automatically retried.
 
-Configure host telemetry through telemetry-batteries. Useful signals are
-`verifier.enclave.calls`, `verifier.enclave.call_seconds`,
-`verifier.enclave.ready` and `verifier.match.rejections`. Monitor readiness failures,
-missing samples, dependency timeouts and overload against the availability budget.
+Configure host telemetry through telemetry-batteries. The default Axum layer
+records HTTP routes, response statuses and request spans; admission exports
+`verifier.match.rejections`. Monitor `/ready` failures, HTTP 5xx, latency and overload
+against the availability budget.
 Enclave-local worker metrics are not exported to the host. Transport errors alone
 cannot distinguish a worker crash, OOM or seccomp death; correlate with guest/kernel
-diagnostics. Never enable payload logging for production inputs.
+diagnostics. Default spans include request paths, queries and user-agent values.
+Pontifex DEBUG events contain wire payloads; Datadog's log-level filter does not
+filter span events. Production telemetry must exclude those payload events.
 
 ## Qualification and rollout
 

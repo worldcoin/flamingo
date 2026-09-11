@@ -159,7 +159,7 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Busy admission is counted by the enclave client, not logged per call.
+        // Expected busy responses do not need a log per call.
         if self.status.is_server_error() && self.code != "enclave_not_ready" {
             tracing::error!(
                 code = self.code,

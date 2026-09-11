@@ -27,31 +27,7 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
         listener,
         routes::handler()
             .with_state(state)
-            .layer(TraceLayer::new().with_make_span(|request| {
-                // Do not copy raw URLs, query strings, user-agent values or headers to traces.
-                let method = match *request.method() {
-                    axum::http::Method::GET => "GET",
-                    axum::http::Method::POST => "POST",
-                    _ => "OTHER",
-                };
-                let route = match request.uri().path() {
-                    "/health" => "/health",
-                    "/ready" => "/ready",
-                    "/v1/enclave-assignment" => "/v1/enclave-assignment",
-                    "/v1/matches" => "/v1/matches",
-                    _ => "unmatched",
-                };
-                tracing::info_span!(
-                    "http.request",
-                    http.request.method = method,
-                    http.route = route,
-                    http.response.status_code = tracing::field::Empty,
-                    http.status_code = tracing::field::Empty,
-                    otel.name = route,
-                    otel.kind = "server",
-                    otel.status_code = tracing::field::Empty,
-                )
-            }))
+            .layer(TraceLayer::new_for_axum())
             .into_make_service(),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -88,5 +64,18 @@ async fn shutdown_signal() {
     tokio::select! {
         () = interrupt => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Compile-time level caps must not strip the default middleware's TRACE spans in release.
+    #[test]
+    fn default_http_span_is_enabled() {
+        tracing::subscriber::with_default(tracing_subscriber::Registry::default(), || {
+            let request = axum::http::Request::new(());
+            let span = telemetry_batteries::tracing::middleware::make_span_from_request(&request);
+            assert!(!span.is_disabled());
+        });
     }
 }

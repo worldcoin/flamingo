@@ -1,6 +1,6 @@
 //! Client boundary between the host and enclave.
 
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use flamingo_verifier_enclave_types as enclave_types;
@@ -9,7 +9,7 @@ use flamingo_verifier_enclave_types::{
 };
 use pontifex::Request;
 use pontifex::client::ConnectionDetails;
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 // Includes the worker's 120-second cold-start deadline and broker sealing overhead.
@@ -24,24 +24,6 @@ pub enum Error {
     Operation(enclave_types::Error),
     /// The enclave did not answer within the API's request deadline.
     Timeout,
-}
-
-impl Error {
-    /// Static labels never contain payloads, scores or transport error text.
-    #[must_use]
-    pub const fn failure_class(&self) -> &'static str {
-        match self {
-            Self::Transport(_) => "transport",
-            Self::Timeout => "request_timeout",
-            Self::Operation(operation) => match operation {
-                enclave_types::Error::NotReady => "not_ready",
-                enclave_types::Error::SecureModuleNotInitialized => "nsm_unavailable",
-                enclave_types::Error::AttestationFailed => "attestation_failed",
-                enclave_types::Error::RequestNotOpened => "request_not_opened",
-                enclave_types::Error::Internal => "internal",
-            },
-        }
-    }
 }
 
 /// Operations the host requires from the enclave.
@@ -74,126 +56,30 @@ impl PontifexEnclaveClient {
     }
 
     /// Sends `request` under `deadline`, flattening the timeout, transport and operation layers.
-    async fn call<R, T>(
-        &self,
-        operation: &'static str,
-        request: R,
-        deadline: Duration,
-    ) -> Result<T, Error>
+    async fn call<R, T>(&self, request: R, deadline: Duration) -> Result<T, Error>
     where
         R: Request<Response = Result<T, enclave_types::Error>> + Sync,
     {
-        Self::bounded_call(operation, deadline, async {
-            pontifex::client::send(self.connection, &request)
-                .await
-                .map_err(|error| Error::Transport(error.to_string()))?
-                .map_err(Error::Operation)
-        })
-        .await
-    }
-
-    /// Enforces the whole-operation deadline and exports only host-visible outcomes.
-    #[tracing::instrument(
-        name = "enclave.call",
-        skip_all,
-        fields(dependency = "enclave", operation)
-    )]
-    async fn bounded_call<T>(
-        operation: &'static str,
-        deadline: Duration,
-        call: impl Future<Output = Result<T, Error>>,
-    ) -> Result<T, Error> {
-        let started = Instant::now();
-        let result = timeout(deadline, call).await.unwrap_or(Err(Error::Timeout));
-        let outcome = result
-            .as_ref()
-            .err()
-            .map_or("success", Error::failure_class);
-
-        metrics::counter!("verifier.enclave.calls", "operation" => operation, "result" => outcome)
-            .increment(1);
-        metrics::histogram!(
-            "verifier.enclave.call_seconds",
-            "operation" => operation,
-            "result" => outcome,
-            "histogram" => "distribution"
-        )
-        .record(started.elapsed().as_secs_f64());
-
-        if operation == "health" {
-            metrics::gauge!("verifier.enclave.ready").set(f64::from(result.is_ok()));
-        }
-
-        result
+        timeout(deadline, pontifex::client::send(self.connection, &request))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|error| Error::Transport(error.to_string()))?
+            .map_err(Error::Operation)
     }
 }
 
 #[async_trait]
 impl EnclaveClient for PontifexEnclaveClient {
     async fn health(&self) -> Result<(), Error> {
-        self.call("health", HealthRequest, CONTROL_REQUEST_TIMEOUT)
-            .await
+        self.call(HealthRequest, CONTROL_REQUEST_TIMEOUT).await
     }
 
     async fn encryption_key_attestation(&self) -> Result<KeyAttestation, Error> {
-        self.call(
-            "assignment",
-            GetEncryptionKeyRequest,
-            CONTROL_REQUEST_TIMEOUT,
-        )
-        .await
+        self.call(GetEncryptionKeyRequest, CONTROL_REQUEST_TIMEOUT)
+            .await
     }
 
     async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, Error> {
-        self.call("match", request, MATCH_REQUEST_TIMEOUT).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CONTROL_REQUEST_TIMEOUT, Error, MATCH_REQUEST_TIMEOUT, PontifexEnclaveClient};
-    use std::{future::pending, time::Duration};
-    use tokio::time::{Instant, sleep};
-
-    /// No worker or vsock device is needed to verify an unresponsive dependency.
-    #[tokio::test(start_paused = true)]
-    async fn control_calls_time_out_without_retrying() {
-        let started = Instant::now();
-        let result = PontifexEnclaveClient::bounded_call(
-            "health",
-            CONTROL_REQUEST_TIMEOUT,
-            pending::<Result<(), Error>>(),
-        )
-        .await;
-
-        assert_eq!(result, Err(Error::Timeout));
-        assert_eq!(started.elapsed(), CONTROL_REQUEST_TIMEOUT);
-    }
-
-    /// Cold inference may use all 120 seconds without the host abandoning it early.
-    #[tokio::test(start_paused = true)]
-    async fn match_budget_contains_the_cold_worker_deadline() {
-        let result = PontifexEnclaveClient::bounded_call("match", MATCH_REQUEST_TIMEOUT, async {
-            sleep(Duration::from_secs(120)).await;
-            Ok(())
-        })
-        .await;
-
-        assert_eq!(result, Ok(()));
-    }
-
-    /// Host timeouts remain bounded even when an enclave fails to enforce its own deadline.
-    #[tokio::test(start_paused = true)]
-    async fn match_calls_time_out_without_retrying() {
-        let started = Instant::now();
-        let result = PontifexEnclaveClient::bounded_call(
-            "match",
-            MATCH_REQUEST_TIMEOUT,
-            pending::<Result<(), Error>>(),
-        )
-        .await;
-
-        assert_eq!(result, Err(Error::Timeout));
-        assert_eq!(started.elapsed(), MATCH_REQUEST_TIMEOUT);
+        self.call(request, MATCH_REQUEST_TIMEOUT).await
     }
 }

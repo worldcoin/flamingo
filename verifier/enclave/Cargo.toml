@@ -30,8 +30,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["sync", "io-util"] }
 tokio-vsock.workspace = true
-# Pontifex emits wire payloads at DEBUG; production never compiles those events.
-tracing = { workspace = true, features = ["release_max_level_info"] }
+tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
