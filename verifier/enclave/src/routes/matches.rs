@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
+};
 
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_enclave_types::{MatchRequest, MatchResponse};
 use flamingo_verifier_protocol::match_token::MatchClaims;
 use flamingo_verifier_sealed_types::{AttestedStatement, FailureReason, MatchInputs, MatchResult};
-use pontifex::Request;
 use sha2::{Digest, Sha256};
 
 use crate::{pcp, state::EnclaveState};
@@ -16,31 +18,53 @@ use crate::{pcp, state::EnclaveState};
 ///
 /// # Errors
 ///
-/// Returns [`enclave_types::Error`] for the only two things the host may see: a request that would not open
-/// (no channel exists, so nothing can be sealed) and an enclave fault. Every other failure is a
-/// sealed [`FailureReason`].
+/// Returns [`enclave_types::Error::NotReady`] when another match is admitted, before
+/// opening the request. Otherwise only opening failures and enclave faults are unsealed;
+/// every input-derived failure is a sealed [`FailureReason`].
 pub async fn handler(
     state: Arc<EnclaveState>,
     request: MatchRequest,
 ) -> Result<MatchResponse, enclave_types::Error> {
-    let (plaintext, sealer) = state.channel().open(&request.body).map_err(|error| {
-        tracing::warn!(
-            ?error,
-            route = MatchRequest::ROUTE_ID,
-            "failed to open sealed request"
-        );
-        enclave_types::Error::RequestNotOpened
-    })?;
+    if request.body.len() > enclave_types::MAX_MATCH_CIPHERTEXT_BYTES {
+        return Err(enclave_types::Error::RequestNotOpened);
+    }
 
-    // Read before `run`, which is sync. A clone of the cached document, not an attest.
+    // Admit one comparison before decryption or spawning blocking work.
+    let permit = Arc::clone(&state.match_slot)
+        .try_acquire_owned()
+        .map_err(|_| enclave_types::Error::NotReady)?;
+
+    // A cached document, not an NSM call; never await while executing blocking work.
     let signing_key_attestation = state.signing_key_attestation().await;
+    let span = tracing::Span::current();
 
-    // Past this point there is a channel to answer on, so every input-derived failure is sealed.
-    let result = run(&state, &plaintext, &signing_key_attestation)?;
+    tokio::task::spawn_blocking(move || {
+        // Cancelling the async caller must not admit a second request during this operation.
+        let _permit = permit;
+        let _entered = span.enter();
+        catch_unwind(AssertUnwindSafe(|| {
+            let (plaintext, sealer) = state
+                .channel()
+                .open(&request.body)
+                .map_err(|_| enclave_types::Error::RequestNotOpened)?;
 
-    Ok(MatchResponse {
-        ciphertext: seal(sealer, &result)?,
+            // Once opened, all input-derived failures stay inside the sealed response.
+            let result = run(&state, &plaintext, &signing_key_attestation)?;
+            Ok(MatchResponse {
+                ciphertext: seal(sealer, &result)?,
+            })
+        }))
+        .unwrap_or_else(|_| {
+            // A detached task's panic cannot depend on its caller observing a JoinError.
+            tracing::error!("blocking match task panicked");
+            std::process::exit(1)
+        })
     })
+    .await
+    .map_err(|_| {
+        tracing::error!("blocking match task cancelled");
+        enclave_types::Error::Internal
+    })?
 }
 
 /// Decodes the opened plaintext and runs the match.
@@ -54,16 +78,12 @@ fn run(
     plaintext: &[u8],
     signing_key_attestation: &[u8],
 ) -> Result<MatchResult, enclave_types::Error> {
-    let inputs = match MatchInputs::from_cbor(plaintext) {
-        Ok(inputs) => inputs,
-        Err(error) => {
-            tracing::warn!(
-                ?error,
-                route = MatchRequest::ROUTE_ID,
-                "unusable match payload"
-            );
-            return Ok(MatchResult::Failed(FailureReason::MalformedInputs));
-        }
+    if plaintext.len() > enclave_types::MAX_MATCH_PLAINTEXT_BYTES {
+        return Ok(MatchResult::Failed(FailureReason::MalformedInputs));
+    }
+
+    let Ok(inputs) = MatchInputs::from_cbor(plaintext) else {
+        return Ok(MatchResult::Failed(FailureReason::MalformedInputs));
     };
 
     match evaluate(state, &inputs) {
@@ -77,34 +97,33 @@ fn run(
 }
 
 /// Evaluates the opened inputs. Every failure here is a fact about the plaintext, so it is sealed.
-///
-/// # Panics
-///
-/// Panics if the inputs carry a `LightGuard` image. The flow behind it does not exist yet, and
-/// there is no sensible fallback: silently running the vanilla comparison would answer a
-/// `LightGuard` request with a statement that never saw the second frame.
 fn evaluate(state: &EnclaveState, inputs: &MatchInputs) -> Result<MatchClaims, FailureReason> {
-    // TODO: Add LightGuard here. A second liveness frame selects the challenge-response spoof
-    // detection the biometrics team owns; everything below is vanilla mode. Until that pipeline
-    // lands, the enclave must not answer such a request at all — see the panic note above.
+    if inputs.hashes_json.len() > 64 * 1024
+        || [
+            &inputs.credential_image,
+            &inputs.live_image,
+            &inputs.challenge_image,
+        ]
+        .iter()
+        .any(|image| image.len() > crate::face_engine::MAX_IMAGE_BYTES)
+    {
+        return Err(FailureReason::MalformedInputs);
+    }
+
+    // Unsupported input is a sealed rejection, never a vanilla fallback or broker panic.
     if inputs.light_guard_image.is_some() {
-        unimplemented!("LightGuard matching over the second liveness image");
+        return Err(FailureReason::ImageAnalysisFailed);
+    }
+    // Claims encode a nonnegative coefficient. Negative thresholds could otherwise admit
+    // an unrepresentable score and leak the outcome through an unsealed signing failure.
+    if !(0.0..=1.0).contains(&inputs.match_threshold) {
+        return Err(FailureReason::MalformedInputs);
     }
 
     // Binds the credential image to the hash its PCP commits. A commitment, not proof of
     // enrollment — nothing here checks who issued the PCP.
     let credential_claim =
-        match pcp::bind_credential_claim(&inputs.credential_image, &inputs.hashes_json) {
-            Ok(claim) => claim,
-            Err(reason) => {
-                tracing::warn!(
-                    ?reason,
-                    route = MatchRequest::ROUTE_ID,
-                    "pcp binding failed"
-                );
-                return Err(reason);
-            }
-        };
+        pcp::bind_credential_claim(&inputs.credential_image, &inputs.hashes_json)?;
 
     let scores = state.face_engine().compare_reference_to_probes(
         &inputs.credential_image,
@@ -115,11 +134,7 @@ fn evaluate(state: &EnclaveState, inputs: &MatchInputs) -> Result<MatchClaims, F
     if scores.live_similarity < inputs.match_threshold
         || scores.challenge_similarity < inputs.match_threshold
     {
-        // Scores stay out of the log: they measure a person, and the log has no sealed channel.
-        tracing::warn!(
-            route = MatchRequest::ROUTE_ID,
-            "match scored below threshold"
-        );
+        // Even the outcome stays out of logs and metrics: neither is a sealed channel.
         return Err(FailureReason::MatchBelowThreshold);
     }
 
@@ -161,7 +176,10 @@ fn seal(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        time::Duration,
+    };
 
     use flamingo_verifier_enclave_types as enclave_types;
     use flamingo_verifier_enclave_types::MatchRequest;
@@ -170,6 +188,7 @@ mod tests {
     use flamingo_verifier_sealed_types::{FailureReason, MatchInputs, MatchResult};
     use pontifex::{ChannelConsumer, ChannelDomain, ResponseOpener};
     use sha2::{Digest, Sha256};
+    use tokio::{sync::Notify, time::timeout};
 
     use super::handler;
     use crate::{
@@ -239,11 +258,273 @@ mod tests {
         }
     }
 
-    fn state_with(face_engine: MockFaceEngine) -> Arc<EnclaveState> {
+    /// Builds an enclave using only a test comparator and attestor.
+    fn state_with(face_engine: impl FaceComparator + 'static) -> Arc<EnclaveState> {
         Arc::new(
             EnclaveState::generate(Arc::new(EchoAttestor), Arc::new(face_engine))
                 .expect("boot state should generate"),
         )
+    }
+
+    /// Holds one comparison until the test allows it to finish.
+    struct BlockingFaceEngine {
+        /// Signals after admission and synchronous execution have started.
+        entered: Arc<Notify>,
+        /// A bounded wait that cannot strand the test runtime on assertion failure.
+        release: Mutex<mpsc::Receiver<()>>,
+        /// Exercises terminal panic handling without any model dependencies.
+        panic: bool,
+    }
+
+    impl FaceComparator for BlockingFaceEngine {
+        /// Blocks off the async executor, optionally panicking after caller cancellation.
+        fn compare_reference_to_probes(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: &[u8],
+        ) -> Result<ComparisonScores, FailureReason> {
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| FailureReason::ImageAnalysisFailed)?;
+            assert!(!self.panic, "test comparator panic");
+
+            Ok(ComparisonScores {
+                live_similarity: 0.9,
+                challenge_similarity: 0.9,
+            })
+        }
+    }
+
+    /// Disconnects never release admission while a comparison is still running.
+    #[tokio::test]
+    async fn cancellation_keeps_single_admission_and_leaves_health_responsive() {
+        let entered = Arc::new(Notify::new());
+        let (release, receiver) = mpsc::sync_channel(1);
+        let state = state_with(BlockingFaceEngine {
+            entered: Arc::clone(&entered),
+            release: Mutex::new(receiver),
+            panic: false,
+        });
+        let (_, request) = request_for(&state, &inputs(CREDENTIAL, 0.5));
+        let first = tokio::spawn(handler(Arc::clone(&state), request));
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("comparison must start off the current-thread runtime");
+
+        // The one-thread async runtime remains responsive during the blocking comparison.
+        timeout(
+            Duration::from_secs(1),
+            crate::routes::health::handler(
+                Arc::clone(&state),
+                flamingo_verifier_enclave_types::HealthRequest,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        for cancelled in [false, true] {
+            if cancelled {
+                first.abort();
+            }
+            // Admission must happen before opening even malformed ciphertext.
+            assert_eq!(
+                handler(Arc::clone(&state), MatchRequest { body: vec![] })
+                    .await
+                    .err(),
+                Some(enclave_types::Error::NotReady)
+            );
+        }
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert_eq!(state.match_slot.available_permits(), 0);
+
+        release.send(()).unwrap();
+        let permit = timeout(
+            Duration::from_secs(2),
+            Arc::clone(&state.match_slot).acquire_owned(),
+        )
+        .await
+        .expect("completed work must release admission")
+        .unwrap();
+        drop(permit);
+
+        release.send(()).unwrap();
+        let (_, request) = request_for(&state, &inputs(CREDENTIAL, 0.5));
+        handler(Arc::clone(&state), request).await.unwrap();
+        assert_eq!(state.match_slot.available_permits(), 1);
+    }
+
+    /// Rejections and opening failures must not permanently consume the only slot.
+    #[tokio::test]
+    async fn normal_errors_release_admission() {
+        let state = state_with(MockFaceEngine::failing(FailureReason::ImageAnalysisFailed));
+        assert_eq!(
+            handler(Arc::clone(&state), MatchRequest { body: vec![] })
+                .await
+                .err(),
+            Some(enclave_types::Error::RequestNotOpened)
+        );
+        for _ in 0..2 {
+            let (_, request) = request_for(&state, &inputs(CREDENTIAL, 0.5));
+            handler(Arc::clone(&state), request).await.unwrap();
+            assert_eq!(state.match_slot.available_permits(), 1);
+        }
+    }
+
+    /// Unsupported flow selection and invalid thresholds never reach the comparator.
+    #[tokio::test]
+    async fn unsupported_and_invalid_inputs_are_sealed_rejections() {
+        let state = state_with(crate::test_support::UnusedFaceEngine);
+        let mut light_guard = inputs(CREDENTIAL, 0.5);
+        light_guard.light_guard_image = Some(vec![1]);
+        let mut cases = vec![(light_guard, FailureReason::ImageAnalysisFailed)];
+        for threshold in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.01,
+            -1.01,
+            1.01,
+        ] {
+            cases.push((
+                inputs(CREDENTIAL, threshold),
+                FailureReason::MalformedInputs,
+            ));
+        }
+        let mut oversized_metadata = inputs(CREDENTIAL, 0.5);
+        oversized_metadata.hashes_json = vec![0; 64 * 1024 + 1];
+        cases.push((oversized_metadata, FailureReason::MalformedInputs));
+        let mut oversized_image = inputs(CREDENTIAL, 0.5);
+        oversized_image.challenge_image = vec![0; crate::face_engine::MAX_IMAGE_BYTES + 1];
+        cases.push((oversized_image, FailureReason::MalformedInputs));
+        for (inputs, reason) in cases {
+            let (opener, request) = request_for(&state, &inputs);
+            let response = handler(Arc::clone(&state), request).await.unwrap();
+            let plaintext = opener.open_from_enclave(&response.ciphertext).unwrap();
+            assert_eq!(
+                MatchResult::from_padded_cbor(&plaintext).unwrap(),
+                MatchResult::Failed(reason)
+            );
+            assert_eq!(state.match_slot.available_permits(), 1);
+        }
+    }
+
+    /// Outer and decrypted payload limits are enforced without invoking biometric code.
+    #[tokio::test]
+    async fn rejects_oversized_payloads_before_processing() {
+        let state = state_with(crate::test_support::UnusedFaceEngine);
+        assert_eq!(
+            handler(
+                Arc::clone(&state),
+                MatchRequest {
+                    body: vec![0; enclave_types::MAX_MATCH_CIPHERTEXT_BYTES + 1],
+                },
+            )
+            .await,
+            Err(enclave_types::Error::RequestNotOpened)
+        );
+        assert_eq!(state.match_slot.available_permits(), 1);
+        assert_eq!(
+            super::run(
+                &state,
+                &vec![0; enclave_types::MAX_MATCH_PLAINTEXT_BYTES + 1],
+                &[],
+            ),
+            Ok(MatchResult::Failed(FailureReason::MalformedInputs))
+        );
+    }
+
+    /// The host must not learn sealed rejection reasons from an enclave log sink.
+    #[test]
+    fn input_derived_outcomes_emit_no_events() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::prelude::*;
+
+        /// Records event counts without retaining any potentially sensitive fields.
+        struct Events(
+            /// Number of recorded events in this test's scope.
+            Arc<AtomicUsize>,
+        );
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+            /// Counts every enabled event in this thread's test subscriber.
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let state = state_with(MockFaceEngine::scoring(0.1, 0.1));
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(Events(Arc::clone(&count)));
+        let mut bad_pcp = inputs(CREDENTIAL, 0.5);
+        bad_pcp.hashes_json = b"invalid-json".to_vec();
+        tracing::subscriber::with_default(subscriber, || {
+            for plaintext in [
+                b"invalid-cbor".to_vec(),
+                bad_pcp.to_cbor().unwrap().to_vec(),
+                inputs(CREDENTIAL, 0.5).to_cbor().unwrap().to_vec(),
+            ] {
+                assert!(matches!(
+                    super::run(&state, &plaintext, &[]),
+                    Ok(MatchResult::Failed(_))
+                ));
+            }
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    /// A panic after disconnect must exit the broker, not silently free its admission slot.
+    #[test]
+    fn detached_match_panic_is_terminal() {
+        const CHILD_ENV: &str = "FLAMINGO_TEST_DETACHED_MATCH_PANIC";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let entered = Arc::new(Notify::new());
+                let (release, receiver) = mpsc::sync_channel(1);
+                let state = state_with(BlockingFaceEngine {
+                    entered: Arc::clone(&entered),
+                    release: Mutex::new(receiver),
+                    panic: true,
+                });
+                let (_, request) = request_for(&state, &inputs(CREDENTIAL, 0.5));
+                let task = tokio::spawn(handler(Arc::clone(&state), request));
+                timeout(Duration::from_secs(2), entered.notified())
+                    .await
+                    .unwrap();
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                release.send(()).unwrap();
+                // If panic handling is broken, the child returns normally and fails the parent.
+                let _permit = timeout(
+                    Duration::from_secs(2),
+                    Arc::clone(&state.match_slot).acquire_owned(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            });
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "routes::matches::tests::detached_match_panic_is_terminal",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(1));
     }
 
     fn hashes_json_for(image: &[u8]) -> Vec<u8> {
@@ -273,6 +554,12 @@ mod tests {
         let (sealed, opener) = requester
             .seal_to_enclave(&plaintext)
             .expect("sealing should succeed");
+
+        assert_eq!(
+            sealed.len() - plaintext.len(),
+            enclave_types::MAX_MATCH_CIPHERTEXT_BYTES - enclave_types::MAX_MATCH_PLAINTEXT_BYTES,
+            "request limits must account for the current channel envelope",
+        );
 
         (opener, MatchRequest { body: sealed })
     }
@@ -306,14 +593,14 @@ mod tests {
         // The statement verifies under the key this boot attests, and commits to every input.
         let statement = match_token::verify(&attested.token, signer.signing_public_key())
             .expect("statement should verify");
-        assert_eq!(statement.live_image_hash, Sha256::digest(LIVE).as_slice());
+        assert_eq!(statement.live_image_hash, &Sha256::digest(LIVE)[..]);
         assert_eq!(
             statement.credential_claim,
-            Sha256::digest(&inputs.hashes_json).as_slice()
+            &Sha256::digest(&inputs.hashes_json)[..]
         );
         assert_eq!(
             statement.challenger_image_hash,
-            Sha256::digest(CHALLENGE).as_slice()
+            &Sha256::digest(CHALLENGE)[..]
         );
     }
 
@@ -387,7 +674,7 @@ mod tests {
             !response
                 .ciphertext
                 .windows(claim.len())
-                .any(|window| window == claim.as_slice())
+                .any(|window| window == &claim[..])
         );
     }
 
@@ -479,7 +766,7 @@ mod tests {
 
         assert_eq!(
             statement.challenger_image_hash,
-            Sha256::digest(OTHER_CHALLENGE).as_slice()
+            &Sha256::digest(OTHER_CHALLENGE)[..]
         );
     }
 

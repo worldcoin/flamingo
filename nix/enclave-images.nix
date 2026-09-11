@@ -3,11 +3,17 @@
   pkgs,
   nitro-util,
   enclaveBins,
-  verifierModels,
+  workerBootstrapConfig,
 }:
 let
   nitroLib = nitro-util.lib.${system};
   nitroBlobs = nitroLib.blobs.x86_64;
+  # aws-nitro-util still pins v1.2.3; v1.5.0 fixes init's mount-root setup.
+  enclaveInit = pkgs.fetchurl {
+    name = "nitro-init-1.5.0";
+    url = "https://raw.githubusercontent.com/aws/aws-nitro-enclaves-cli/2950b3699d81ad304df2458915688a552734833d/blobs/x86_64/init";
+    hash = "sha256-dV5lC3Mnd7eYy57CQ+5AK+9IJveJzwGh5FO7ckIHwAU=";
+  };
 
   buildEnclaveImage =
     {
@@ -29,8 +35,12 @@ let
         pathsToLink = [
           "/bin"
           "/etc"
-          "/models"
         ];
+        # Nitro mounts /tmp noexec. Keep staging on the executable root filesystem,
+        # not a Nix store symlink; bootstrap restores its private mode after Nix normalization.
+        postBuild = pkgs.lib.optionalString (workload == "verifier") ''
+          mkdir -p "$out/worker-runtime"
+        '';
       };
 
       dockerArchive = pkgs.dockerTools.buildLayeredImage {
@@ -41,7 +51,7 @@ let
         config = {
           Entrypoint = [ "/bin/${pname}" ];
           Env = [
-            "RUST_LOG=info"
+            "RUST_LOG=warn"
             "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
           ];
         };
@@ -66,12 +76,14 @@ let
         kernel = nitroBlobs.kernel;
         kernelConfig = nitroBlobs.kernelConfig;
         nsmKo = nitroBlobs.nsmKo;
-        init = nitroBlobs.init;
+        init = pkgs.runCommand "nitro-init-1.5.0" { } ''
+          install -m755 ${enclaveInit} "$out"
+        '';
         copyToRoot = root;
         copyToRootWithClosure = true;
         entrypoint = "/bin/${pname}";
         env = ''
-          RUST_LOG=info
+          RUST_LOG=warn
           SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
         '';
       };
@@ -88,7 +100,13 @@ let
   verifier = buildEnclaveImage {
     workload = "verifier";
     pname = "verifier-enclave";
-    extraRoot = [ verifierModels ];
+    extraRoot = [
+      (pkgs.runCommand "verifier-bootstrap-config" { } ''
+        mkdir -p "$out/etc/flamingo"
+        cp ${workerBootstrapConfig} "$out/etc/flamingo/worker-bootstrap.json"
+        chmod 0444 "$out/etc/flamingo/worker-bootstrap.json"
+      '')
+    ];
   };
 in
 {
