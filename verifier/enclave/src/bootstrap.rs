@@ -1,10 +1,8 @@
 //! Single-threaded authenticated runtime provisioning before broker keys or serving threads.
 
-#[cfg(target_os = "linux")]
 use anyhow::{Context, bail};
 pub use flamingo_verifier_worker_artifact::BootstrapConfig as Config;
 
-#[cfg(target_os = "linux")]
 /// Owns the verified runtime and the unacknowledged startup transfer.
 pub struct BootWorker {
     /// All runtime bytes have been verified against the measured publisher key set.
@@ -17,7 +15,6 @@ pub struct BootWorker {
     provisioner: flamingo_verifier_worker_artifact::transport::DeadlineStream<vsock::VsockStream>,
 }
 
-#[cfg(target_os = "linux")]
 impl BootWorker {
     /// Acknowledges verified launch/key setup, not successful model inference.
     ///
@@ -33,7 +30,6 @@ impl BootWorker {
     }
 }
 
-#[cfg(target_os = "linux")]
 /// Accepts exactly one bounded bundle from the parent host, then permanently closes bootstrap.
 ///
 /// # Errors
