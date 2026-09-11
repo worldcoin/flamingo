@@ -24,6 +24,10 @@ lib.genAttrs
     in
     {
       default = pkgs.mkShell {
+        buildInputs = lib.optionals pkgs.stdenv.isLinux [
+          pkgs.minijail
+          pkgs.libcap
+        ];
         packages = with pkgs; [
           (rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml"))
           clang

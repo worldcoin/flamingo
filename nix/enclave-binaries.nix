@@ -66,6 +66,19 @@ let
   commonArgs = {
     strictDeps = true;
 
+    # Crane resolves the public workspace while preparing dependencies, including the
+    # Linux-only worker process. Prefer Nix's Minijail instead of its Cargo fallback,
+    # which expects the complete upstream repository around the vendored Rust crates.
+    nativeBuildInputs = with pkgs; [
+      clang
+      pkg-config
+    ];
+    buildInputs = with pkgs; [
+      minijail
+      libcap
+    ];
+    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
     # LLVM's LICM scalar promotion orders work by pointer value, so rustc (1.97 and 1.98
     # both) emits different code for the same input under different address-space layouts —
     # the same commit measured different PCRs on different machines. Nix disables ASLR in

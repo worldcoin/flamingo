@@ -1,0 +1,36 @@
+[package]
+name = "flamingo-verifier-worker-process"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+test-worker = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+flamingo-verifier-worker-rpc.workspace = true
+libc.workspace = true
+minijail.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+flamingo-verifier-worker-protocol.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+flamingo-verifier-worker-artifact.workspace = true
+hex.workspace = true
+p384.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[[bin]]
+name = "worker-process-test-peer"
+path = "tests/support/fake-worker.rs"
+required-features = ["test-worker"]
+test = false
+
+[[test]]
+name = "process"
+required-features = ["test-worker"]
+harness = false
