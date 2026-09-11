@@ -1,26 +1,14 @@
 name: Setup Rust
-description: Rust toolchain, cargo cache and private-dependency credentials.
-
-inputs:
-  app-id:
-    description: biometric-engines GitHub App client id.
-    required: false
-    default: ""
-  private-key:
-    description: biometric-engines GitHub App private key.
-    required: false
-    default: ""
+description: Rust toolchain, cargo cache and public workspace build dependencies.
 
 runs:
   using: composite
   steps:
-    - id: token
-      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-      with:
-        client-id: ${{ inputs.app-id }}
-        private-key: ${{ inputs.private-key }}
-        owner: worldcoin
-        repositories: biometric-engines
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libcap-dev clang pkg-config
 
     - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
       with:
@@ -28,11 +16,3 @@ runs:
         components: clippy, rustfmt
 
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-
-    - shell: bash
-      env:
-        TOKEN: ${{ steps.token.outputs.token }}
-      run: |
-        git config --global \
-          url."https://x-access-token:${TOKEN}@github.com/worldcoin/biometric-engines".insteadOf \
-          "https://github.com/worldcoin/biometric-engines"

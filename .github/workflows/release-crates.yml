@@ -35,34 +35,11 @@ jobs:
         with:
           toolchain: 1.97.0
 
-      - name: Mint biometric-engines token
-        id: biometric-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
-          owner: worldcoin
-          repositories: biometric-engines
-          permission-contents: read
-
-      - name: Authorize git for biometric-engines
-        run: |
-          set -euo pipefail
-          for url in https://github.com/worldcoin/biometric-engines https://github.com/worldcoin/biometric-engines.git; do
-            git config --global --replace-all credential."$url".helper ''
-            # shellcheck disable=SC2016 # Expand the token only when git requests credentials.
-            git config --global --add credential."$url".helper \
-              '!f() { if [ "$1" = get ]; then printf "username=x-access-token\npassword=%s\n" "${GH_APP_TOKEN:?Missing biometric-engines token}"; fi; }; f'
-          done
-
-      - name: Check private dependencies
+      - name: Check public dependencies
         timeout-minutes: 10
-        env:
-          GH_APP_TOKEN: ${{ steps.biometric-token.outputs.token }}
         run: cargo fetch --locked
 
       - name: Run release-plz
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_APP_TOKEN: ${{ steps.biometric-token.outputs.token }}

@@ -41,9 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup-rust
-        with:
-          app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
+      - name: Public dependency boundary
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/public-metadata.json"
+          jq -e 'all(.packages[]; .name != "flamingo-verifier-worker" and .name != "face-engine" and ((.source // "") | contains("biometric-engines") | not))' "$RUNNER_TEMP/public-metadata.json"
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -56,48 +57,33 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup-rust
-        with:
-          app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - name: tests
-        run: cargo test --locked --workspace --all-features --verbose
+        run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-worker-process --verbose
+      - name: Minijail process tests
+        run: |
+          cargo test --locked -p flamingo-verifier-worker-process --all-features --no-run \
+            --message-format=json > target/worker-test-artifacts.json
+          test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "process") | .executable // empty' target/worker-test-artifacts.json)
+          test -n "$test_binary"
+          sudo timeout --kill-after=5s 60s "$test_binary"
 
-  # Evaluate every Nix output without spending the 90-minute EIF build.
+  # Public outputs must evaluate and build without private Git or model credentials.
   flake:
     name: Flake eval
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
-          owner: worldcoin
-          repositories: biometric-engines
-      # crane fetches the private dependency with `builtins.fetchGit`, which uses the host's git
-      # credentials. A helper rather than `insteadOf`, whose behaviour depends on Nix's git backend.
-      - name: Authorize git for biometric-engines
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          # shellcheck disable=SC2016  # the helper must expand GH_APP_TOKEN when git runs it.
-          git config --global credential."https://github.com".helper \
-            '!f() { echo username=x-access-token; echo "password=${GH_APP_TOKEN}"; }; f'
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       # --no-update-lock-file: otherwise a new flake.nix input resolves against upstream right
       # now and the lock is quietly rewritten.
       - name: Evaluate the enclave image and converter derivations
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          for output in di-enclave verifier-enclave di-oci verifier-oci di-eif verifier-eif; do
+          for output in di-enclave verifier-enclave worker-bundle di-oci verifier-oci di-eif verifier-eif; do
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
-      # Build the small DI image so evaluation-only errors do not slip through.
       - name: Build the di enclave image
         run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.di-oci

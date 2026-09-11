@@ -12,8 +12,8 @@ use pontifex::client::ConnectionDetails;
 use tokio::time::timeout;
 
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-// Match requests can carry large payloads and require expensive computation.
-const MATCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// Includes the worker's 120-second cold-start deadline and broker sealing overhead.
+const MATCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(135);
 
 /// Failures while calling an enclave operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,7 @@ pub trait EnclaveClient: Send + Sync {
 /// Pontifex-backed enclave client.
 #[derive(Debug, Clone, Copy)]
 pub struct PontifexEnclaveClient {
+    /// Fixed enclave address; each request uses its own bounded connection.
     connection: ConnectionDetails,
 }
 

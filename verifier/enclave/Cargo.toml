@@ -17,17 +17,23 @@ flamingo-verifier-enclave-types.workspace = true
 flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 eddsa-babyjubjub.workspace = true
-face-engine.workspace = true
+flamingo-verifier-worker-protocol.workspace = true
+flamingo-verifier-worker-rpc.workspace = true
+flamingo-verifier-worker-artifact.workspace = true
 hex.workspace = true
-image.workspace = true
 pontifex = { workspace = true, features = ["nsm", "server", "channel"] }
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock.workspace = true
+libc.workspace = true
+flamingo-verifier-worker-process.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

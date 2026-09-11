@@ -25,7 +25,7 @@ let
 
   # A derivation cannot hold the token these repositories need without putting it in the
   # store, and `impureEnvVars` reads the builder's environment, not the caller's. So
-  # scripts/build-enclaves.sh curls each file and adds it to the store under this exact
+  # scripts/fetch-face-models.sh curls each file and adds it to the store under this exact
   # fixed-output hash, leaving the fetch already satisfied.
   fetchModel =
     file: source:
@@ -47,7 +47,7 @@ in
 {
   inherit package;
 
-  # Where scripts/build-enclaves.sh reads the model URLs and store paths from, so the source of
+  # Where scripts/fetch-face-models.sh reads the model URLs and store paths from, so the source of
   # truth for a revision stays in one place.
   metadata = lib.mapAttrs (file: source: {
     url = modelUrl file source;
