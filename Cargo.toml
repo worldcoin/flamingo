@@ -11,6 +11,8 @@ members = [
     "di/enclave",
     "verifier/worker-rpc",
     "verifier/worker-protocol",
+    "verifier/worker-process",
+    "verifier/worker-artifact",
     "di/host",
 ]
 resolver = "3"
@@ -43,6 +45,13 @@ face-engine = { git = "https://github.com/worldcoin/biometric-engines", rev = "f
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 flamingo-verifier-worker-protocol = { path = "verifier/worker-protocol" }
 flamingo-verifier-worker-rpc = { path = "verifier/worker-rpc" }
+flamingo-verifier-worker-process = { path = "verifier/worker-process" }
+flamingo-verifier-worker-artifact = { path = "verifier/worker-artifact" }
+libc = "0.2"
+minijail = { git = "https://github.com/google/minijail", rev = "b0b5dc6997956cdc027295ade5e425c416f30d33" }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
+tempfile = "3.27"
+vsock = "0.5.4"
 hex-literal = "1.1"
 http-body-util = "0.1"
 image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
