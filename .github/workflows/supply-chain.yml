@@ -32,9 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup-rust
-        with:
-          app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           # Pinned to the version deny.toml was authored against; its schema is version-coupled.

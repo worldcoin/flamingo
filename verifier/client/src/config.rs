@@ -22,7 +22,7 @@ const fn default_connect_timeout_millis() -> u64 {
 }
 
 const fn default_request_timeout_millis() -> u64 {
-    60_000
+    150_000
 }
 
 /// Configuration to interact with a Flamingo Verifier host.
@@ -335,7 +335,7 @@ mod tests {
         );
 
         let decoded = Config::from_json(&json.to_string()).expect("config should parse");
-        assert_eq!(decoded.request_timeout(), Duration::from_mins(1));
+        assert_eq!(decoded.request_timeout(), Duration::from_secs(150));
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
 }
