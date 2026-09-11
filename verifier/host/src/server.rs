@@ -23,8 +23,6 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind API to {address}"))?;
 
-    tracing::info!(%address, "API listening");
-
     axum::serve(
         listener,
         routes::handler()
@@ -64,7 +62,20 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        () = interrupt => tracing::info!("received Ctrl-C, draining"),
-        () = terminate => tracing::info!("received SIGTERM, draining"),
+        () = interrupt => {},
+        () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Compile-time level caps must not strip the default middleware's TRACE spans in release.
+    #[test]
+    fn default_http_span_is_enabled() {
+        tracing::subscriber::with_default(tracing_subscriber::Registry::default(), || {
+            let request = axum::http::Request::new(());
+            let span = telemetry_batteries::tracing::middleware::make_span_from_request(&request);
+            assert!(!span.is_disabled());
+        });
     }
 }

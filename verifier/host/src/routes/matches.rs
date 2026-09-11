@@ -6,7 +6,7 @@ use flamingo_verifier_enclave_types as enclave;
 use crate::AppState;
 use crate::error::AppError;
 
-/// Largest match body this route accepts. 12 MiB to allow for images in payload.
+/// Largest match body this route accepts, including the base64 JSON envelope.
 pub const MAX_BODY_BYTES: usize = 12 * 1024 * 1024;
 
 /// Relays a sealed match request to the enclave.
@@ -65,6 +65,6 @@ fn rejected_body(rejection: &JsonRejection) -> AppError {
         )
     };
 
-    AppError::new(status, code, message, false)
-        .with_detail(format!("{}; limit={MAX_BODY_BYTES}", rejection.body_text()))
+    // Serde diagnostics can echo attacker-provided values, including ciphertext.
+    AppError::new(status, code, message, false).with_detail(format!("limit={MAX_BODY_BYTES}"))
 }

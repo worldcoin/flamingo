@@ -1,0 +1,26 @@
+[package]
+name = "flamingo-verifier-worker"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.94.1"
+license = "MIT"
+publish = false
+
+# Keep private inference dependencies outside public workspace resolution and vendoring.
+[workspace]
+resolver = "3"
+
+[[bin]]
+name = "verifier-worker"
+path = "src/main.rs"
+
+[dependencies]
+face-engine = { git = "https://github.com/worldcoin/biometric-engines", rev = "face-engine-v2.16.0", default-features = false, features = ["tract"] }
+flamingo-verifier-worker-protocol = { path = "../worker-protocol" }
+flamingo-verifier-worker-rpc = { path = "../worker-rpc" }
+image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
+libc = "0.2"
+thiserror = "2"
+
+[dev-dependencies]
+base64 = "0.22"
