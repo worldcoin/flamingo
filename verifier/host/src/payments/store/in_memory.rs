@@ -4,24 +4,18 @@
 //! the same counters. Good enough to develop against, and the reason the trait exists.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::sync::{Mutex, PoisonError};
 
 use alloy_primitives::B256;
 use async_trait::async_trait;
 
-use super::{PaymentStore, StoreError, Version, Versioned};
+use super::{PaymentStore, StoreError};
 use crate::payments::ledger::EpochLedger;
 
-/// In-process channels and epochs behind one lock.
+/// In-process epoch ledgers behind one lock.
 #[derive(Debug, Default)]
 pub struct InMemoryStore {
-    state: Mutex<State>,
-}
-
-#[derive(Debug, Default)]
-struct State {
-    epochs: HashMap<(B256, u64), Versioned<EpochLedger>>,
+    epochs: Mutex<HashMap<(B256, u64), (EpochLedger, u64)>>,
 }
 
 impl InMemoryStore {
@@ -35,8 +29,8 @@ impl InMemoryStore {
     ///
     /// Every critical section here is a map operation that cannot panic partway, so a poisoned
     /// lock would mean refusing all payment traffic over an unrelated bug.
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn epochs(&self) -> std::sync::MutexGuard<'_, HashMap<(B256, u64), (EpochLedger, u64)>> {
+        self.epochs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -50,74 +44,58 @@ impl PaymentStore for InMemoryStore {
         &self,
         channel_id: B256,
         epoch: u64,
-    ) -> Result<Versioned<EpochLedger>, StoreError> {
-        let stored = self.state().epochs.get(&(channel_id, epoch)).cloned();
-
+    ) -> Result<(EpochLedger, u64), StoreError> {
         // An epoch nobody has written yet reads as empty at version 0, so a first writer and a
         // later one take the same path.
-        Ok(stored.unwrap_or_else(|| Versioned {
-            value: EpochLedger::default(),
-            version: 0,
-        }))
+        Ok(self
+            .epochs()
+            .get(&(channel_id, epoch))
+            .cloned()
+            .unwrap_or_default())
     }
 
-    // The lint cannot see that `slot` borrows out of the guard, so the guard cannot be dropped
-    // before the write it guards.
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "the borrow out of the guard outlives the guard in the lint's model"
-    )]
     async fn store_epoch(
         &self,
         channel_id: B256,
         epoch: u64,
         ledger: &EpochLedger,
-        expected: Version,
-    ) -> Result<Version, StoreError> {
-        let mut state = self.state();
-        let slot = state.epochs.entry((channel_id, epoch));
-
-        let stored = match &slot {
-            Entry::Occupied(entry) => entry.get().version,
-            Entry::Vacant(_) => 0,
-        };
+        expected: u64,
+    ) -> Result<(), StoreError> {
+        let mut epochs = self.epochs();
+        let stored = epochs.get(&(channel_id, epoch)).map_or(0, |(_, v)| *v);
 
         // The conditional write: a caller holding an older version has already been overtaken.
         if stored != expected {
             return Err(StoreError::Conflict);
         }
 
-        let version = expected + 1;
-        slot.insert_entry(Versioned {
-            value: ledger.clone(),
-            version,
-        });
+        epochs.insert((channel_id, epoch), (ledger.clone(), expected + 1));
 
-        Ok(version)
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::b256;
+    use alloy_primitives::{B256, b256};
 
     use super::{InMemoryStore, PaymentStore, StoreError};
     use crate::payments::ledger::EpochLedger;
 
-    const CHANNEL: alloy_primitives::B256 =
+    const CHANNEL: B256 =
         b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
 
     #[tokio::test]
     async fn an_unwritten_epoch_reads_as_empty_at_version_zero() {
         let store = InMemoryStore::new();
 
-        let stored = store
+        let (ledger, version) = store
             .load_epoch(CHANNEL, 7)
             .await
             .expect("the in-memory store always answers");
 
-        assert_eq!(stored.version, 0);
-        assert_eq!(stored.value, EpochLedger::default());
+        assert_eq!(version, 0);
+        assert_eq!(ledger, EpochLedger::default());
     }
 
     /// The primitive the ledger's retry is built on: a write only lands on the version it read.
@@ -126,18 +104,13 @@ mod tests {
         let store = InMemoryStore::new();
         let ledger = EpochLedger::default();
 
-        let version = store
-            .store_epoch(CHANNEL, 7, &ledger, 0)
-            .await
-            .expect("the first write starts from version zero");
-        assert_eq!(version, 1);
-
+        assert_eq!(store.store_epoch(CHANNEL, 7, &ledger, 0).await, Ok(()));
         assert_eq!(
             store.store_epoch(CHANNEL, 7, &ledger, 0).await,
             Err(StoreError::Conflict),
             "a second writer holding the old version must lose"
         );
-        assert_eq!(store.store_epoch(CHANNEL, 7, &ledger, version).await, Ok(2));
+        assert_eq!(store.store_epoch(CHANNEL, 7, &ledger, 1).await, Ok(()));
     }
 
     #[tokio::test]

@@ -15,10 +15,10 @@ use alloy_sol_types::Eip712Domain;
 pub use eip712::SignatureError;
 pub use escrow::{ChannelSettings, EscrowError, EscrowReader, RpcEscrowReader};
 pub use ledger::{
-    AdmitRequest, CapacityProof, EpochLedger, LedgerError, PaymentAuthorization, PaymentLedger,
-    ReserveOutcome,
+    AdmitRequest, CapacityProof, EpochLedger, LedgerError, MAX_LANES_PER_EPOCH,
+    PaymentAuthorization, PaymentLedger, RESERVATION_LIFETIME_SECS, ReserveOutcome,
 };
-pub use store::{InMemoryStore, PaymentStore, StoreError, Version, Versioned};
+pub use store::{InMemoryStore, PaymentStore, StoreError};
 
 /// Payment settings this host runs with.
 ///
@@ -28,8 +28,6 @@ pub use store::{InMemoryStore, PaymentStore, StoreError, Version, Versioned};
 pub struct PaymentConfig {
     domain: Eip712Domain,
     collector: Address,
-    max_request_lifetime_secs: u64,
-    max_pending_per_epoch: usize,
     payment_required: bool,
 }
 
@@ -40,15 +38,11 @@ impl PaymentConfig {
         chain_id: u64,
         fee_escrow: Address,
         collector: Address,
-        max_request_lifetime_secs: u64,
-        max_pending_per_epoch: usize,
         payment_required: bool,
     ) -> Self {
         Self {
             domain: eip712::domain(chain_id, fee_escrow),
             collector,
-            max_request_lifetime_secs,
-            max_pending_per_epoch,
             payment_required,
         }
     }
@@ -63,21 +57,6 @@ impl PaymentConfig {
     #[must_use]
     pub const fn collector(&self) -> Address {
         self.collector
-    }
-
-    /// How long a reservation is held before another request may take the counter.
-    #[must_use]
-    pub const fn max_request_lifetime_secs(&self) -> u64 {
-        self.max_request_lifetime_secs
-    }
-
-    /// How many reservations one channel may hold open in one epoch.
-    ///
-    /// A reservation costs a lane that is never reclaimed within the epoch, so an unbounded
-    /// caller could grow this host's memory without ever paying for anything.
-    #[must_use]
-    pub const fn max_pending_per_epoch(&self) -> usize {
-        self.max_pending_per_epoch
     }
 
     /// Whether a match without a payment is refused. The kill switch for metering.

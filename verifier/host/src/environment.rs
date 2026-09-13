@@ -11,10 +11,6 @@ use crate::payments::escrow::rpc::EscrowConfig;
 
 /// World Chain Sepolia, where the fee escrow is deployed for development.
 const DEFAULT_FEE_ESCROW_CHAIN_ID: u64 = 4801;
-/// How long a reservation is held before another request may take the counter.
-const DEFAULT_MAX_REQUEST_LIFETIME_SECS: u64 = 600;
-/// How many reservations one channel may hold open in one epoch.
-const DEFAULT_MAX_PENDING_PER_EPOCH: usize = 10_000;
 /// Deadline for one fee escrow call, retry included.
 const DEFAULT_ESCROW_TIMEOUT_MS: u64 = 2_000;
 /// How long a capacity read stays good.
@@ -86,14 +82,6 @@ impl Environment {
             Self::optional_u64("FEE_ESCROW_CHAIN_ID", DEFAULT_FEE_ESCROW_CHAIN_ID),
             Self::optional_address("FEE_ESCROW_ADDRESS", Address::ZERO),
             Self::required_address("FEE_COLLECTOR_ADDRESS"),
-            Self::optional_u64(
-                "PAYMENT_MAX_REQUEST_LIFETIME_SECS",
-                DEFAULT_MAX_REQUEST_LIFETIME_SECS,
-            ),
-            Self::optional_usize(
-                "PAYMENT_MAX_PENDING_PER_EPOCH",
-                DEFAULT_MAX_PENDING_PER_EPOCH,
-            ),
             Self::optional_bool("PAYMENT_REQUIRED", false),
         )
     }
@@ -148,10 +136,6 @@ impl Environment {
     }
 
     fn optional_u64(name: &str, default: u64) -> u64 {
-        Self::optional(name, default)
-    }
-
-    fn optional_usize(name: &str, default: usize) -> usize {
         Self::optional(name, default)
     }
 

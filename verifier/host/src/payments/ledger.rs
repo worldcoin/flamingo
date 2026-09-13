@@ -1,10 +1,10 @@
 //! The rules a channel nonce obeys: reserved once, admitted once.
 //!
-//! Every rule is a pure function over [`EpochLedger`]. [`PaymentLedger`] is the part that talks
-//! to a [`PaymentStore`] and an [`EscrowReader`], so swapping either cannot change what a nonce
-//! means. Channel settings and capacity come from the chain; nothing registers a channel here.
+//! A lane is its last authorization and a deadline. Everything else the rules need follows from
+//! those two fields: the next counter is `latest + 1`, and the units spent in an epoch are the
+//! sum of the lanes' counters. [`PaymentLedger`] is the part that talks to a [`PaymentStore`]
+//! and an [`EscrowReader`], so swapping either cannot change what a nonce means.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,8 +13,16 @@ use flamingo_verifier_api_types::ChannelNonce;
 use serde::{Deserialize, Serialize};
 
 use super::escrow::{ChannelSettings, EscrowError, EscrowReader};
-use super::store::{PaymentStore, StoreError, Versioned};
+use super::store::{PaymentStore, StoreError};
 use super::{PaymentConfig, eip712};
+
+/// How long a reservation is held before its lane may be handed to someone else.
+pub const RESERVATION_LIFETIME_SECS: u64 = 600;
+/// How many lanes one channel may open in one epoch.
+///
+/// A lane is never reclaimed within an epoch, so without this an unbounded caller could grow a
+/// host's memory by reserving and walking away.
+pub const MAX_LANES_PER_EPOCH: usize = 10_000;
 
 /// How many times a write may lose the race before the caller is told to retry.
 const MAX_WRITE_ATTEMPTS: u32 = 5;
@@ -50,16 +58,13 @@ pub struct ReserveOutcome {
     pub lane: u32,
     /// Counter reserved on that lane.
     pub counter: u64,
-    /// Unix seconds after which the reservation may be reissued to another request.
+    /// Unix seconds after which the lane may be handed to another request.
     pub expires_by: u64,
     /// The authorization for `counter - 1` on this lane, or `None` at counter 1.
     pub previous: Option<PaymentAuthorization>,
 }
 
 /// A bearer authorization presented to spend one verification.
-///
-/// It carries no `request_id`: the signature covers the channel, epoch and nonce alone, so the
-/// holder of a reissued counter and the holder it superseded present identical bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmitRequest {
     /// Channel the payment spends from.
@@ -109,10 +114,10 @@ pub enum LedgerError {
     /// The channel has already spent its capacity for this epoch.
     #[error("channel capacity is exhausted for this epoch")]
     CapacityExhausted(Box<CapacityProof>),
-    /// Too many reservations are already outstanding for this epoch.
-    #[error("too many reservations are pending for this epoch")]
+    /// Every lane is taken and the epoch may not open another.
+    #[error("too many reservations are outstanding for this epoch")]
     TooManyPending,
-    /// No live reservation matches this lane and counter.
+    /// No lane holds a live reservation for this counter.
     #[error("no reservation matches this lane and counter")]
     UnknownReservation,
     /// The reservation expired before the payment arrived.
@@ -126,107 +131,61 @@ pub enum LedgerError {
     AlreadyAdmitted,
 }
 
-/// A reserved counter waiting to be spent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct Reservation {
-    counter: u64,
-    request_id: B256,
-    expires_by: u64,
-}
-
-impl Reservation {
-    /// A reservation past its expiry may be reissued, and can no longer be admitted.
-    const fn is_live(&self, now: u64) -> bool {
-        now <= self.expires_by
-    }
-}
-
-/// One lane of a channel's nonce space: a strictly increasing counter with at most one
-/// reservation outstanding.
+/// One lane of a channel's nonce space.
 ///
-/// Invariant: when `pending` is `Some`, its counter is `latest.counter + 1`, or 1 when the lane
-/// has nothing admitted. Counters are never skipped, so the escrow can settle a lane from its
-/// last authorization alone. A lane frees on admission or at `expires_by`, and nowhere else.
+/// Counters are dense from 1, so `latest` is both the last authorization and the count of units
+/// this lane has spent. A lane is free when `pending_until` is unset or past.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Lane {
     latest: Option<PaymentAuthorization>,
-    pending: Option<Reservation>,
+    pending_until: Option<u64>,
 }
 
 impl Lane {
-    /// The counter a new reservation on this lane takes.
+    /// The counter this lane hands out next.
     const fn next_counter(&self) -> u64 {
         match &self.latest {
-            Some(authorization) => authorization.counter + 1,
+            Some(latest) => latest.counter + 1,
             None => 1,
         }
     }
 
-    /// Whether `counter` has already been spent.
-    ///
-    /// Counters are admitted in order and `latest` only moves forward, so anything at or below
-    /// it is a replay.
-    const fn is_admitted(&self, counter: u64) -> bool {
-        match &self.latest {
-            Some(latest) => latest.counter >= counter,
-            None => false,
+    /// Whether the lane may be handed to a new request.
+    const fn is_free(&self, now: u64) -> bool {
+        match self.pending_until {
+            Some(until) => until < now,
+            None => true,
         }
     }
-}
-
-/// Where a `request_id` was placed, so a retry lands on the same counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct RequestSlot {
-    lane: u32,
-    counter: u64,
-    expires_by: u64,
 }
 
 /// One channel's state within one epoch.
 ///
 /// A plain value: a persistent store round-trips it, and every rule below is a method on it that
-/// takes the clock, the settings and the capacity as arguments rather than reaching for any.
+/// takes the clock and the capacity as arguments rather than reaching for either.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochLedger {
     lanes: Vec<Lane>,
-    by_request_id: HashMap<B256, RequestSlot>,
-    admitted_units: u64,
 }
 
 impl EpochLedger {
-    /// Reserves the next counter on some lane for `request_id`.
-    ///
-    /// Idempotent in `request_id`: a retry returns the counter the first call granted, so a
-    /// client that times out and retries cannot burn a counter it will never use.
+    /// Reserves the next counter on the first free lane, opening one if every lane is busy.
     ///
     /// # Errors
     ///
-    /// Returns [`LedgerError`] when the channel's capacity is spent or too many reservations are
-    /// already outstanding for this epoch.
+    /// Returns [`LedgerError`] when capacity is spent or the epoch is at its lane ceiling.
     pub(crate) fn apply_reserve(
         &mut self,
-        config: &PaymentConfig,
         capacity: u64,
         epoch: u64,
-        request_id: B256,
         now: u64,
     ) -> Result<ReserveOutcome, LedgerError> {
-        if let Some(slot) = self.by_request_id.get(&request_id).copied() {
-            return Ok(ReserveOutcome {
-                lane: slot.lane,
-                counter: slot.counter,
-                expires_by: slot.expires_by,
-                previous: self.previous_on(slot.lane),
-            });
-        }
-
-        let live_pending = self.live_pending(now);
-
-        // What is already spent plus what could still be spent. Handing out a counter past this
-        // would promise a verification the escrow will not pay for.
+        // What is spent plus what could still be spent. Handing out a counter past this would
+        // promise a verification the escrow will not pay for.
+        let outstanding = self.lanes.iter().filter(|lane| !lane.is_free(now)).count();
         let committed = self
-            .admitted_units
-            .saturating_add(live_pending.try_into().unwrap_or(u64::MAX));
+            .admitted_units()
+            .saturating_add(outstanding.try_into().unwrap_or(u64::MAX));
 
         if committed >= capacity {
             return Err(LedgerError::CapacityExhausted(Box::new(
@@ -234,46 +193,37 @@ impl EpochLedger {
             )));
         }
 
-        if live_pending >= config.max_pending_per_epoch() {
-            return Err(LedgerError::TooManyPending);
-        }
+        // Lowest free lane first, so lanes stay dense and the escrow settles the fewest of them.
+        let index = match self.lanes.iter().position(|lane| lane.is_free(now)) {
+            Some(index) => index,
+            None => {
+                if self.lanes.len() >= MAX_LANES_PER_EPOCH {
+                    return Err(LedgerError::TooManyPending);
+                }
 
-        let lane = self.open_lane(now)?;
-        let index = usize::try_from(lane).unwrap_or(usize::MAX);
+                self.lanes.push(Lane::default());
+                self.lanes.len() - 1
+            }
+        };
+
+        let lane = u32::try_from(index).map_err(|_| LedgerError::TooManyPending)?;
+        let expires_by = now.saturating_add(RESERVATION_LIFETIME_SECS);
+
         let Some(slot) = self.lanes.get_mut(index) else {
             return Err(LedgerError::TooManyPending);
         };
 
-        let counter = slot.next_counter();
-        let expires_by = now.saturating_add(config.max_request_lifetime_secs());
-
-        slot.pending = Some(Reservation {
-            counter,
-            request_id,
-            expires_by,
-        });
-        self.by_request_id.insert(
-            request_id,
-            RequestSlot {
-                lane,
-                counter,
-                expires_by,
-            },
-        );
+        slot.pending_until = Some(expires_by);
 
         Ok(ReserveOutcome {
             lane,
-            counter,
+            counter: slot.next_counter(),
             expires_by,
-            previous: self.previous_on(lane),
+            previous: slot.latest,
         })
     }
 
     /// Spends a payment on one verification.
-    ///
-    /// The checks run in the order the spec gives them, so a caller learns the most specific
-    /// true thing about its request: which reservation it named, then whether that nonce is
-    /// already gone, then whether it may spend it at all.
     ///
     /// `signer` is the address recovered from the signature, computed by the caller so this
     /// stays free of both the clock and the curve.
@@ -297,25 +247,27 @@ impl EpochLedger {
             .get(index)
             .ok_or(LedgerError::UnknownReservation)?;
 
-        if lane.is_admitted(counter) {
+        // A counter at or below the lane's latest was spent already. Checked before the deadline
+        // so a replay reads as a replay rather than as an expiry: admission clears the deadline.
+        if counter < lane.next_counter() {
             return Err(LedgerError::AlreadyAdmitted);
         }
 
-        let pending = lane.pending.ok_or(LedgerError::UnknownReservation)?;
-
-        if pending.counter != counter {
+        if counter != lane.next_counter() {
             return Err(LedgerError::UnknownReservation);
         }
 
-        if !pending.is_live(now) {
-            return Err(LedgerError::ReservationExpired);
+        match lane.pending_until {
+            None => return Err(LedgerError::UnknownReservation),
+            Some(until) if until < now => return Err(LedgerError::ReservationExpired),
+            Some(_) => {}
         }
 
         if signer.map_err(|_| LedgerError::InvalidSignature)? != settings.spend_key {
             return Err(LedgerError::InvalidSignature);
         }
 
-        if self.admitted_units >= capacity {
+        if self.admitted_units() >= capacity {
             return Err(LedgerError::CapacityExhausted(Box::new(
                 self.capacity_proof(request.epoch, capacity),
             )));
@@ -330,88 +282,35 @@ impl EpochLedger {
             counter,
             signature: request.signature,
         });
-        lane.pending = None;
-
-        self.by_request_id.remove(&pending.request_id);
-        self.admitted_units = self.admitted_units.saturating_add(1);
+        lane.pending_until = None;
 
         Ok(())
     }
 
-    /// Reservations that can still be admitted. Expired ones are excluded: they are reclaimable
-    /// and can never be admitted, so counting them would strand the epoch at its capacity.
-    fn live_pending(&self, now: u64) -> usize {
+    /// Units spent in this epoch. Counters are dense, so each lane has spent its latest counter.
+    fn admitted_units(&self) -> u64 {
         self.lanes
             .iter()
-            .filter(|lane| lane.pending.is_some_and(|pending| pending.is_live(now)))
-            .count()
+            .filter_map(|lane| lane.latest)
+            .fold(0u64, |total, latest| total.saturating_add(latest.counter))
     }
 
     /// The evidence behind a capacity refusal.
     fn capacity_proof(&self, epoch: u64, capacity: u64) -> CapacityProof {
         CapacityProof {
             epoch,
-            admitted_units: self.admitted_units,
+            admitted_units: self.admitted_units(),
             capacity,
             authorizations: self.lanes.iter().filter_map(|lane| lane.latest).collect(),
         }
-    }
-
-    /// The last authorization on `lane`, which the escrow needs to settle the next one.
-    fn previous_on(&self, lane: u32) -> Option<PaymentAuthorization> {
-        let index = usize::try_from(lane).ok()?;
-
-        self.lanes.get(index)?.latest
-    }
-
-    /// Returns the lane a new reservation should take, reclaiming an expired one if there is one.
-    ///
-    /// Lowest index first in both passes, so lanes stay dense and the escrow settles the fewest
-    /// of them.
-    fn open_lane(&mut self, now: u64) -> Result<u32, LedgerError> {
-        if let Some(index) = self.lanes.iter().position(|lane| lane.pending.is_none()) {
-            return index.try_into().map_err(|_| LedgerError::TooManyPending);
-        }
-
-        let expired = self
-            .lanes
-            .iter()
-            .position(|lane| lane.pending.is_some_and(|pending| !pending.is_live(now)));
-
-        if let Some(index) = expired {
-            let lane = self
-                .lanes
-                .get_mut(index)
-                .ok_or(LedgerError::UnknownReservation)?;
-
-            // Same counter, new request: the expired holder loses its claim on the request id,
-            // though its signature over the nonce would still be honoured if it presents one.
-            if let Some(reclaimed) = lane.pending.take() {
-                self.by_request_id.remove(&reclaimed.request_id);
-            }
-
-            return index.try_into().map_err(|_| LedgerError::TooManyPending);
-        }
-
-        let index: u32 = self
-            .lanes
-            .len()
-            .try_into()
-            .map_err(|_| LedgerError::TooManyPending)?;
-
-        self.lanes.push(Lane::default());
-
-        Ok(index)
     }
 }
 
 /// Hands out channel nonces and spends the payments that come back.
 ///
-/// Each operation reads the escrow, loads the epoch, takes a pure step, and writes the epoch
-/// back conditionally. A write that loses the race is retried from a fresh read a bounded number
-/// of times; past that the caller is told the store is unavailable rather than left with a lost
-/// update. Every escrow or store failure refuses the request: this host does not spend a channel
-/// it cannot check.
+/// Each operation reads the escrow, loads the epoch, takes a pure step, and writes the epoch back
+/// conditionally. Every escrow or store failure refuses the request: this host does not spend a
+/// channel it cannot check.
 pub struct PaymentLedger {
     config: PaymentConfig,
     store: Arc<dyn PaymentStore>,
@@ -456,17 +355,16 @@ impl PaymentLedger {
         Ok(())
     }
 
-    /// Reserves the next counter on some lane of `channel_id` for `request_id`.
+    /// Reserves the next counter on some lane of `channel_id`.
     ///
     /// # Errors
     ///
     /// Returns [`LedgerError`] when the channel is unknown or settles elsewhere, the epoch is not
-    /// open, capacity is spent, too many reservations are outstanding, or a dependency failed.
+    /// open, capacity is spent, the epoch is at its lane ceiling, or a dependency failed.
     pub async fn reserve(
         &self,
         channel_id: B256,
         epoch: u64,
-        request_id: B256,
         now: u64,
     ) -> Result<ReserveOutcome, LedgerError> {
         let settings = self.settings(channel_id).await?;
@@ -481,7 +379,7 @@ impl PaymentLedger {
         let capacity = self.escrow.capacity(channel_id, epoch).await?;
 
         self.mutate(channel_id, epoch, |ledger| {
-            ledger.apply_reserve(&self.config, capacity, epoch, request_id, now)
+            ledger.apply_reserve(capacity, epoch, now)
         })
         .await
     }
@@ -546,16 +444,15 @@ impl PaymentLedger {
         F: Fn(&mut EpochLedger) -> Result<T, LedgerError>,
     {
         for attempt in 0..MAX_WRITE_ATTEMPTS {
-            let Versioned { mut value, version } = self.store.load_epoch(channel_id, epoch).await?;
-
-            let outcome = apply(&mut value)?;
+            let (mut ledger, version) = self.store.load_epoch(channel_id, epoch).await?;
+            let outcome = apply(&mut ledger)?;
 
             match self
                 .store
-                .store_epoch(channel_id, epoch, &value, version)
+                .store_epoch(channel_id, epoch, &ledger, version)
                 .await
             {
-                Ok(_) => return Ok(outcome),
+                Ok(()) => return Ok(outcome),
                 Err(StoreError::Conflict) => {
                     tracing::warn!(
                         attempt,

@@ -16,8 +16,8 @@ use common::{
 };
 use flamingo_verifier_api_types::ChannelNonce;
 use flamingo_verifier_host::AppState;
-use flamingo_verifier_host::payments::eip712;
 use flamingo_verifier_host::payments::escrow::ChannelSettings;
+use flamingo_verifier_host::payments::{MAX_LANES_PER_EPOCH, eip712};
 use flamingo_verifier_host::routes;
 use http_body_util::BodyExt as _;
 use k256::ecdsa::SigningKey;
@@ -31,10 +31,6 @@ const OTHER_COLLECTOR: Address =
     alloy_primitives::address!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
 const OTHER_SPEND_KEY: Address =
     alloy_primitives::address!("0xabababababababababababababababababababab");
-const FIRST_REQUEST: B256 =
-    b256!("0x0101010101010101010101010101010101010101010101010101010101010101");
-const SECOND_REQUEST: B256 =
-    b256!("0x0202020202020202020202020202020202020202020202020202020202020202");
 
 const EPOCH_LENGTH: u64 = 3_600;
 
@@ -158,15 +154,15 @@ fn payment(epoch: u64, lane: u32, counter: u64) -> Value {
     })
 }
 
-async fn reserve_for(state: &AppState, epoch: u64, request_id: B256) -> (StatusCode, Value) {
-    let body = json!({ "epoch": epoch, "request_id": request_id });
+async fn reserve_for(state: &AppState, epoch: u64) -> (StatusCode, Value) {
+    let body = json!({ "epoch": epoch });
     let uri = format!("/v1/channels/{CHANNEL}/nonces");
 
     send(state, json_request(Method::POST, &uri, &body)).await
 }
 
-async fn reserve(state: &AppState, request_id: B256) -> (StatusCode, Value) {
-    reserve_for(state, current_epoch(), request_id).await
+async fn reserve(state: &AppState) -> (StatusCode, Value) {
+    reserve_for(state, current_epoch()).await
 }
 
 /// A stub enclave that answers every match with the same sealed bytes.
@@ -195,7 +191,7 @@ async fn a_paid_nonce_becomes_the_next_reservations_previous() {
     let state = state_with_escrow(answering_enclave(), escrow_with(10));
     let epoch = current_epoch();
 
-    let (status, body) = reserve(&state, FIRST_REQUEST).await;
+    let (status, body) = reserve(&state).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["lane"], 0);
     assert_eq!(body["counter"], 1);
@@ -204,7 +200,7 @@ async fn a_paid_nonce_becomes_the_next_reservations_previous() {
     let (status, _) = run_match(&state, Some(payment(epoch, 0, 1))).await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, body) = reserve(&state, SECOND_REQUEST).await;
+    let (status, body) = reserve(&state).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["lane"], 0, "an admitted lane is free again");
     assert_eq!(body["counter"], 2);
@@ -219,8 +215,8 @@ async fn a_paid_nonce_becomes_the_next_reservations_previous() {
 async fn retrying_a_reservation_returns_the_same_counter() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
 
-    let (_, first) = reserve(&state, FIRST_REQUEST).await;
-    let (status, retry) = reserve(&state, FIRST_REQUEST).await;
+    let (_, first) = reserve(&state).await;
+    let (status, retry) = reserve(&state).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(first, retry);
@@ -231,8 +227,8 @@ async fn retrying_a_reservation_returns_the_same_counter() {
 async fn a_concurrent_reservation_opens_a_new_lane() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
 
-    let (_, first) = reserve(&state, FIRST_REQUEST).await;
-    let (_, second) = reserve(&state, SECOND_REQUEST).await;
+    let (_, first) = reserve(&state).await;
+    let (_, second) = reserve(&state).await;
 
     assert_eq!(
         (first["lane"].as_u64(), first["counter"].as_u64()),
@@ -248,7 +244,7 @@ async fn a_concurrent_reservation_opens_a_new_lane() {
 async fn an_unknown_channel_is_not_found() {
     let state = state_with(StubEnclaveClient::default());
 
-    let (status, body) = reserve(&state, FIRST_REQUEST).await;
+    let (status, body) = reserve(&state).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "unknown_channel");
@@ -262,7 +258,7 @@ async fn a_channel_settling_to_another_collector_is_refused() {
         .with_capacity(CHANNEL, current_epoch(), 10);
     let state = state_with_escrow(answering_enclave(), escrow);
 
-    let (status, body) = reserve(&state, FIRST_REQUEST).await;
+    let (status, body) = reserve(&state).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "wrong_collector");
 
@@ -277,7 +273,7 @@ async fn a_channel_settling_to_another_collector_is_refused() {
 async fn an_unavailable_escrow_refuses_and_reserves_nothing() {
     let state = state_with_escrow(answering_enclave(), FakeEscrowReader::unavailable());
 
-    let (status, body) = reserve(&state, FIRST_REQUEST).await;
+    let (status, body) = reserve(&state).await;
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "escrow_unavailable");
@@ -286,7 +282,7 @@ async fn an_unavailable_escrow_refuses_and_reserves_nothing() {
     // The escrow comes back with the channel absent, which is what a stored reservation would
     // have to survive. Nothing was written, so the retry starts from counter 1.
     let state = state_with_escrow(answering_enclave(), escrow_with(10));
-    let (status, body) = reserve(&state, FIRST_REQUEST).await;
+    let (status, body) = reserve(&state).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["counter"], 1);
 }
@@ -296,7 +292,7 @@ async fn an_epoch_that_is_not_current_or_next_is_refused() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
     let current = current_epoch();
 
-    let (status, _) = reserve_for(&state, current + 1, FIRST_REQUEST).await;
+    let (status, _) = reserve_for(&state, current + 1).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -304,7 +300,7 @@ async fn an_epoch_that_is_not_current_or_next_is_refused() {
     );
 
     for epoch in [current.saturating_sub(1), current + 2] {
-        let (status, body) = reserve_for(&state, epoch, SECOND_REQUEST).await;
+        let (status, body) = reserve_for(&state, epoch).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST, "for epoch {epoch}");
         assert_eq!(body["error"]["code"], "invalid_epoch");
@@ -318,7 +314,7 @@ async fn a_channel_id_that_is_not_32_bytes_of_prefixed_hex_is_rejected() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
 
     for channel_id in ["0x11", &"11".repeat(32), "0xzz"] {
-        let body = json!({ "epoch": current_epoch(), "request_id": FIRST_REQUEST });
+        let body = json!({ "epoch": current_epoch() });
         let uri = format!("/v1/channels/{channel_id}/nonces");
 
         let (status, body) = send(&state, json_request(Method::POST, &uri, &body)).await;
@@ -335,13 +331,13 @@ async fn a_capacity_refusal_shows_the_authorizations_behind_it() {
     let state = state_with_escrow(answering_enclave(), escrow_with(1));
     let epoch = current_epoch();
 
-    let (status, _) = reserve(&state, FIRST_REQUEST).await;
+    let (status, _) = reserve(&state).await;
     assert_eq!(status, StatusCode::OK);
 
     let (status, _) = run_match(&state, Some(payment(epoch, 0, 1))).await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, body) = reserve(&state, SECOND_REQUEST).await;
+    let (status, body) = reserve(&state).await;
 
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "capacity_exhausted");
@@ -369,14 +365,12 @@ async fn a_capacity_refusal_shows_the_authorizations_behind_it() {
 async fn too_many_pending_reservations_ask_the_caller_to_retry() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(u64::MAX));
 
-    for tag in 0..u8::try_from(payment_config().max_pending_per_epoch())
-        .expect("the test bound should be small")
-    {
-        let (status, _) = reserve(&state, B256::repeat_byte(tag)).await;
+    for _ in 0..MAX_LANES_PER_EPOCH {
+        let (status, _) = reserve(&state).await;
         assert_eq!(status, StatusCode::OK);
     }
 
-    let (status, body) = reserve(&state, B256::repeat_byte(0xff)).await;
+    let (status, body) = reserve(&state).await;
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body["error"]["code"], "too_many_pending");
@@ -388,11 +382,7 @@ async fn a_body_over_the_payment_limit_is_rejected_with_an_envelope() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
 
     let padding = "a".repeat(routes::MAX_PAYMENT_BODY_BYTES + 1);
-    let body = json!({
-        "epoch": current_epoch(),
-        "request_id": FIRST_REQUEST,
-        "padding": padding,
-    });
+    let body = json!({ "epoch": current_epoch(), "padding": padding });
     let uri = format!("/v1/channels/{CHANNEL}/nonces");
 
     let (status, body) = send(&state, json_request(Method::POST, &uri, &body)).await;
@@ -404,7 +394,7 @@ async fn a_body_over_the_payment_limit_is_rejected_with_an_envelope() {
 #[tokio::test]
 async fn a_match_with_a_valid_payment_is_admitted_and_relayed() {
     let state = state_with_escrow(answering_enclave(), escrow_with(10));
-    reserve(&state, FIRST_REQUEST).await;
+    reserve(&state).await;
 
     let (status, body) = run_match(&state, Some(payment(current_epoch(), 0, 1))).await;
 
@@ -417,7 +407,7 @@ async fn a_match_with_a_valid_payment_is_admitted_and_relayed() {
 #[tokio::test]
 async fn the_same_payment_cannot_buy_a_second_match() {
     let state = state_with_escrow(answering_enclave(), escrow_with(10));
-    reserve(&state, FIRST_REQUEST).await;
+    reserve(&state).await;
 
     let (status, _) = run_match(&state, Some(payment(current_epoch(), 0, 1))).await;
     assert_eq!(status, StatusCode::OK);
@@ -436,7 +426,7 @@ async fn a_match_paid_for_with_another_key_is_refused() {
         .with_capacity(CHANNEL, current_epoch(), 10);
     let state = state_with_escrow(answering_enclave(), escrow);
 
-    reserve(&state, FIRST_REQUEST).await;
+    reserve(&state).await;
 
     let (status, body) = run_match(&state, Some(payment(current_epoch(), 0, 1))).await;
 
@@ -447,7 +437,7 @@ async fn a_match_paid_for_with_another_key_is_refused() {
 #[tokio::test]
 async fn a_payment_for_a_nonce_that_was_never_reserved_is_refused() {
     let state = state_with_escrow(answering_enclave(), escrow_with(10));
-    reserve(&state, FIRST_REQUEST).await;
+    reserve(&state).await;
 
     for (lane, counter) in [(4, 1), (0, 9)] {
         let (status, body) = run_match(&state, Some(payment(current_epoch(), lane, counter))).await;

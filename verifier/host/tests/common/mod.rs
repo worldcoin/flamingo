@@ -187,5 +187,5 @@ pub fn payment_config() -> PaymentConfig {
 
 /// The same defaults, with metering on or off.
 pub fn payment_config_with(payment_required: bool) -> PaymentConfig {
-    PaymentConfig::new(4801, Address::ZERO, COLLECTOR, 600, 16, payment_required)
+    PaymentConfig::new(4801, Address::ZERO, COLLECTOR, payment_required)
 }

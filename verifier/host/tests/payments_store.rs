@@ -20,7 +20,7 @@ use flamingo_verifier_api_types::ChannelNonce;
 use flamingo_verifier_host::AppState;
 use flamingo_verifier_host::payments::escrow::ChannelSettings;
 use flamingo_verifier_host::payments::{
-    EpochLedger, InMemoryStore, PaymentStore, StoreError, Version, Versioned, eip712,
+    EpochLedger, InMemoryStore, PaymentStore, StoreError, eip712,
 };
 use flamingo_verifier_host::routes;
 use http_body_util::BodyExt as _;
@@ -64,7 +64,7 @@ impl PaymentStore for ConflictingStore {
         &self,
         channel_id: B256,
         epoch: u64,
-    ) -> Result<Versioned<EpochLedger>, StoreError> {
+    ) -> Result<(EpochLedger, u64), StoreError> {
         self.inner.load_epoch(channel_id, epoch).await
     }
 
@@ -73,8 +73,8 @@ impl PaymentStore for ConflictingStore {
         channel_id: B256,
         epoch: u64,
         ledger: &EpochLedger,
-        expected: Version,
-    ) -> Result<Version, StoreError> {
+        expected: u64,
+    ) -> Result<(), StoreError> {
         let owed = self.remaining_conflicts.load(Ordering::SeqCst);
 
         if owed > 0 {
@@ -109,7 +109,7 @@ impl PaymentStore for UnavailableStore {
         &self,
         _channel_id: B256,
         _epoch: u64,
-    ) -> Result<Versioned<EpochLedger>, StoreError> {
+    ) -> Result<(EpochLedger, u64), StoreError> {
         Err(StoreError::Unavailable("table is throttled".to_owned()))
     }
 
@@ -118,8 +118,8 @@ impl PaymentStore for UnavailableStore {
         _channel_id: B256,
         _epoch: u64,
         _ledger: &EpochLedger,
-        _expected: Version,
-    ) -> Result<Version, StoreError> {
+        _expected: u64,
+    ) -> Result<(), StoreError> {
         Err(StoreError::Unavailable("table is throttled".to_owned()))
     }
 }
@@ -224,7 +224,7 @@ fn spend_key() -> Address {
 }
 
 async fn reserve(state: &AppState) -> (StatusCode, Value) {
-    let body = json!({ "epoch": current_epoch(), "request_id": FIRST_REQUEST });
+    let body = json!({ "epoch": current_epoch() });
     let uri = format!("/v1/channels/{CHANNEL}/nonces");
 
     send(state, json_request(Method::POST, &uri, &body)).await

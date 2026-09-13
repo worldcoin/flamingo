@@ -13,18 +13,6 @@ use super::ledger::EpochLedger;
 
 pub use in_memory::InMemoryStore;
 
-/// Monotonic version of one stored epoch. A fresh epoch reads as version 0.
-pub type Version = u64;
-
-/// A stored value and the version it was read at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Versioned<T> {
-    /// The value as stored.
-    pub value: T,
-    /// The version to pass back as `expected` when writing it again.
-    pub version: Version,
-}
-
 /// Why the store could not answer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
@@ -40,16 +28,15 @@ pub enum StoreError {
 ///
 /// Channels are not stored: they live in the fee escrow, and this host only ever reads them.
 ///
-/// [`Self::store_epoch`] is the concurrency primitive: it writes only if the stored version is
-/// still the one the caller read. `DynamoDB` satisfies this with a conditional write on a version
-/// attribute (`attribute_not_exists(version) OR version = :expected`), and the ledger turns a
-/// [`StoreError::Conflict`] into a bounded retry rather than a lost update.
+/// [`Self::store_epoch`] is the concurrency primitive. It writes only if the stored version is
+/// still the one the caller read, which DynamoDB satisfies with a conditional write on a version
+/// attribute (`attribute_not_exists(version) OR version = :expected`).
 #[async_trait]
 pub trait PaymentStore: Send + Sync {
     /// Whether the store can serve traffic. Reported by the readiness probe.
     async fn ready(&self) -> bool;
 
-    /// Reads one epoch, or an empty ledger at version 0 when it has never been written.
+    /// Reads one epoch with its version, or an empty ledger at version 0 when never written.
     ///
     /// # Errors
     ///
@@ -58,9 +45,9 @@ pub trait PaymentStore: Send + Sync {
         &self,
         channel_id: B256,
         epoch: u64,
-    ) -> Result<Versioned<EpochLedger>, StoreError>;
+    ) -> Result<(EpochLedger, u64), StoreError>;
 
-    /// Writes one epoch if its stored version is still `expected`, returning the new version.
+    /// Writes one epoch if its stored version is still `expected`.
     ///
     /// # Errors
     ///
@@ -71,6 +58,6 @@ pub trait PaymentStore: Send + Sync {
         channel_id: B256,
         epoch: u64,
         ledger: &EpochLedger,
-        expected: Version,
-    ) -> Result<Version, StoreError>;
+        expected: u64,
+    ) -> Result<(), StoreError>;
 }

@@ -36,7 +36,7 @@ pub async fn reserve(
 
     let outcome = state
         .payments()
-        .reserve(channel_id, body.epoch, body.request_id, now())
+        .reserve(channel_id, body.epoch, now())
         .await
         .map_err(|error| refused(&error, channel_id, body.epoch, None))?;
 
