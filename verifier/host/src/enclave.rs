@@ -82,3 +82,110 @@ impl EnclaveClient for PontifexEnclaveClient {
         self.call(request, MATCH_REQUEST_TIMEOUT).await
     }
 }
+
+/// A stand-in enclave for running the host on a laptop.
+///
+/// Compiled only under the `mock-enclave` feature, which the release profile refuses, so it
+/// cannot reach an environment where a caller might mistake its answers for attested ones.
+#[cfg(feature = "mock-enclave")]
+pub mod mock {
+    use async_trait::async_trait;
+    use flamingo_verifier_enclave_types::{KeyAttestation, MatchRequest, MatchResponse};
+    use sha2::{Digest as _, Sha256};
+
+    use super::{EnclaveClient, Error};
+
+    /// The document a mock assignment returns. Not an attestation, and shaped so nothing
+    /// mistakes it for one.
+    const MOCK_ATTESTATION: &[u8] = b"flamingo-mock-enclave-attestation";
+    /// Length of the encryption key the real enclave returns, so a client sees the same shape.
+    const PUBLIC_KEY_BYTES: usize = 1216;
+
+    /// An [`EnclaveClient`] that answers from a hash instead of an enclave.
+    ///
+    /// Deterministic on purpose: the same sealed body always comes back as the same ciphertext,
+    /// so a harness can assert a round trip without running Nitro.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct MockEnclaveClient;
+
+    impl MockEnclaveClient {
+        /// Creates the mock client.
+        #[must_use]
+        pub const fn new() -> Self {
+            Self
+        }
+    }
+
+    #[async_trait]
+    impl EnclaveClient for MockEnclaveClient {
+        async fn health(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn encryption_key_attestation(&self) -> Result<KeyAttestation, Error> {
+            Ok(KeyAttestation {
+                document: MOCK_ATTESTATION.to_vec(),
+                public_key: vec![0xab; PUBLIC_KEY_BYTES],
+            })
+        }
+
+        async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, Error> {
+            Ok(MatchResponse {
+                ciphertext: Sha256::digest(&request.body).to_vec(),
+            })
+        }
+    }
+}
+
+#[cfg(all(test, feature = "mock-enclave"))]
+mod mock_tests {
+    use flamingo_verifier_enclave_types::MatchRequest;
+    use sha2::{Digest as _, Sha256};
+
+    use super::EnclaveClient;
+    use super::mock::MockEnclaveClient;
+
+    /// A harness asserts a round trip, so the answer has to be a function of the request and
+    /// nothing else.
+    #[tokio::test]
+    async fn a_mock_match_is_the_hash_of_its_request() {
+        let client = MockEnclaveClient::new();
+        let request = || MatchRequest {
+            body: b"sealed".to_vec(),
+        };
+
+        let first = client
+            .run_match(request())
+            .await
+            .expect("the mock always answers");
+        let second = client
+            .run_match(request())
+            .await
+            .expect("the mock always answers");
+
+        assert_eq!(first.ciphertext, second.ciphertext);
+        assert_eq!(first.ciphertext, Sha256::digest(b"sealed").to_vec());
+
+        let other = client
+            .run_match(MatchRequest {
+                body: b"elsewhere".to_vec(),
+            })
+            .await
+            .expect("the mock always answers");
+        assert_ne!(first.ciphertext, other.ciphertext);
+    }
+
+    #[tokio::test]
+    async fn the_mock_serves_a_key_shaped_like_the_real_one() {
+        let attestation = MockEnclaveClient::new()
+            .encryption_key_attestation()
+            .await
+            .expect("the mock always answers");
+
+        assert_eq!(attestation.public_key.len(), 1216);
+        assert!(
+            !attestation.document.is_empty(),
+            "a client should have something to reject"
+        );
+    }
+}

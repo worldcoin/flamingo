@@ -207,6 +207,63 @@ It hangs off the match route alone. Assignment sends no body and the health rout
 allowing multi-megabyte requests there would widen the service's ingress for nothing. Over-limit
 bodies come back as `413 request_too_large` in the usual envelope rather than as a bare status.
 
+## Local end-to-end
+
+The host runs on a laptop with a mock enclave in place of Nitro. The mock answers a match with
+`sha256` of the sealed body, so a harness can assert a round trip, and it attests nothing. The
+`mock-enclave` feature is off by default and a release build refuses to compile it.
+
+```bash
+ENCLAVE_MODE=mock \
+PAYMENT_REQUIRED=true \
+FEE_ESCROW_RPC_URL=http://127.0.0.1:8545 \
+FEE_ESCROW_CHAIN_ID=31337 \
+FEE_ESCROW_ADDRESS=<proxy> \
+FEE_COLLECTOR_ADDRESS=<collector> \
+PORT=8000 \
+cargo run -p flamingo-verifier-host --features mock-enclave
+```
+
+`ENCLAVE_MODE=mock` without the feature fails at startup rather than falling back to the real
+client. `FEE_COLLECTOR_ADDRESS` is required in every mode: it is the address a channel must name
+as its collector before this host will spend it.
+
+Reserve a nonce. `epoch` must be the channel's current epoch or the next one, and `request_id` is
+yours to choose — repeating it returns the same counter rather than burning a second one.
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8000/v1/channels/$CHANNEL_ID/nonces" \
+  -H 'content-type: application/json' \
+  -d '{"epoch":7,"request_id":"0x0101010101010101010101010101010101010101010101010101010101010101"}'
+```
+
+```json
+{ "lane": 0, "counter": 1, "expires_by": 1700000600, "previous": null }
+```
+
+Then spend it. `channel_nonce` is the `uint96` the lane and counter pack into, and `signature` is
+the channel spend key's EIP-712 signature over `(channelId, epoch, channelNonce)`.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/v1/matches \
+  -H 'content-type: application/json' \
+  -d '{
+    "ciphertext": "<base64 sealed request>",
+    "payment": {
+      "channel_id": "'"$CHANNEL_ID"'",
+      "epoch": 7,
+      "channel_nonce": "0x1",
+      "signature": "0x<65 bytes>"
+    }
+  }'
+```
+
+The payment is a bearer token for one verification. Replaying it answers `409 already_admitted`
+rather than the earlier result, which is not cached. Omitting `payment` while `PAYMENT_REQUIRED`
+is true answers `402 payment_required`; with it false the match relays as it always did.
+
+The wire types are `verifier/api-types/src/payments.rs` and `verifier/api-types/src/matches.rs`.
+
 ## Nitro-enabled development host
 
 Use an Amazon Linux 2023 EC2 instance type that supports Nitro Enclaves and launch it with
