@@ -47,6 +47,15 @@ pub async fn reserve(
         .await
         .map_err(|error| refused(&error, channel_id, body.epoch, None))?;
 
+    tracing::info!(
+        channel_id = %channel_id,
+        epoch = body.epoch,
+        lane = outcome.lane,
+        counter = outcome.counter,
+        expires_by = outcome.expires_by,
+        "nonce reserved"
+    );
+
     Ok(Json(ReserveNonceResponseBody {
         lane: outcome.lane,
         counter: outcome.counter,
@@ -102,7 +111,17 @@ pub(super) async fn admit(state: &AppState, payment: Option<&Payment>) -> Result
                     payment.channel_nonce.counter(),
                 )),
             )
-        })
+        })?;
+
+    tracing::info!(
+        channel_id = %payment.channel_id,
+        epoch = payment.epoch,
+        lane = payment.channel_nonce.lane(),
+        counter = payment.channel_nonce.counter(),
+        "payment admitted"
+    );
+
+    Ok(())
 }
 
 /// Maps a ledger refusal, carrying the channel and nonce into the log the error already writes.
