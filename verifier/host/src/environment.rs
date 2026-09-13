@@ -4,7 +4,7 @@ use std::env;
 
 use std::time::Duration;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 
 use crate::payments::PaymentConfig;
 use crate::payments::escrow::rpc::EscrowConfig;
@@ -74,15 +74,18 @@ impl Environment {
     ///
     /// # Panics
     ///
-    /// Panics when `FEE_COLLECTOR_ADDRESS` is unset, or any payment variable is set but cannot
-    /// be parsed. Failing at boot beats discovering a wrong escrow at the first payment.
+    /// Panics when `FEE_COLLECTOR_ADDRESS`, `FEE_TOKEN_ADDRESS` or `FEE_MIN_PRICE_PER_UNIT` is
+    /// unset, or any payment variable is set but cannot be parsed. Failing at boot beats
+    /// discovering a wrong escrow, or a price of one wei, at the first payment.
     #[must_use]
     pub fn payments(&self) -> PaymentConfig {
         PaymentConfig::new(
-            Self::optional_u64("FEE_ESCROW_CHAIN_ID", DEFAULT_FEE_ESCROW_CHAIN_ID),
-            Self::optional_address("FEE_ESCROW_ADDRESS", Address::ZERO),
+            Self::optional("FEE_ESCROW_CHAIN_ID", DEFAULT_FEE_ESCROW_CHAIN_ID),
+            Self::optional("FEE_ESCROW_ADDRESS", Address::ZERO),
             Self::required_address("FEE_COLLECTOR_ADDRESS"),
-            Self::optional_bool("PAYMENT_REQUIRED", false),
+            Self::required_address("FEE_TOKEN_ADDRESS"),
+            Self::required_u256("FEE_MIN_PRICE_PER_UNIT"),
+            Self::optional("PAYMENT_REQUIRED", false),
         )
     }
 
@@ -95,13 +98,13 @@ impl Environment {
     pub fn escrow(&self) -> EscrowConfig {
         EscrowConfig {
             rpc_url: Self::required("FEE_ESCROW_RPC_URL"),
-            address: Self::optional_address("FEE_ESCROW_ADDRESS", Address::ZERO),
-            chain_id: Self::optional_u64("FEE_ESCROW_CHAIN_ID", DEFAULT_FEE_ESCROW_CHAIN_ID),
-            timeout: Duration::from_millis(Self::optional_u64(
+            address: Self::optional("FEE_ESCROW_ADDRESS", Address::ZERO),
+            chain_id: Self::optional("FEE_ESCROW_CHAIN_ID", DEFAULT_FEE_ESCROW_CHAIN_ID),
+            timeout: Duration::from_millis(Self::optional(
                 "FEE_ESCROW_RPC_TIMEOUT_MS",
                 DEFAULT_ESCROW_TIMEOUT_MS,
             )),
-            capacity_ttl: Duration::from_millis(Self::optional_u64(
+            capacity_ttl: Duration::from_millis(Self::optional(
                 "FEE_ESCROW_CAPACITY_TTL_MS",
                 DEFAULT_CAPACITY_TTL_MS,
             )),
@@ -135,22 +138,17 @@ impl Environment {
         })
     }
 
-    fn optional_u64(name: &str, default: u64) -> u64 {
-        Self::optional(name, default)
-    }
-
-    fn optional_bool(name: &str, default: bool) -> bool {
-        Self::optional(name, default)
-    }
-
-    fn optional_address(name: &str, default: Address) -> Address {
-        Self::optional(name, default)
-    }
-
     fn required_address(name: &str) -> Address {
         Self::required(name)
             .trim()
             .parse()
             .unwrap_or_else(|_| panic!("{name} environment variable is not a hex address"))
+    }
+
+    fn required_u256(name: &str) -> U256 {
+        Self::required(name)
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} environment variable is not a uint256"))
     }
 }

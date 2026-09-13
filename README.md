@@ -220,21 +220,28 @@ FEE_ESCROW_RPC_URL=http://127.0.0.1:8545 \
 FEE_ESCROW_CHAIN_ID=31337 \
 FEE_ESCROW_ADDRESS=<proxy> \
 FEE_COLLECTOR_ADDRESS=<collector> \
+FEE_TOKEN_ADDRESS=<token> \
+FEE_MIN_PRICE_PER_UNIT=1000 \
 PORT=8000 \
 cargo run -p flamingo-verifier-host --features mock-enclave
 ```
 
 `ENCLAVE_MODE=mock` without the feature fails at startup rather than falling back to the real
-client. `FEE_COLLECTOR_ADDRESS` is required in every mode: it is the address a channel must name
-as its collector before this host will spend it.
+client. The three fee variables are required in every mode and are all checked against the
+channel the escrow reports: a channel must name this collector, pay in this token, and price a
+verification at or above this floor. Naming the collector alone is not enough, because whoever
+opened the channel chose its token and price.
 
-Reserve a nonce. `epoch` must be the channel's current epoch or the next one, and `request_id` is
-yours to choose — repeating it returns the same counter rather than burning a second one.
+Reserve a nonce. `epoch` must be the channel's current epoch or the next one. The body is signed
+by the channel's spend key over `NonceReservation(bytes32 channelId,uint64 epoch,uint64 issuedAt)`
+in the same EIP-712 domain as a payment, because a reservation holds capacity for its lifetime
+and an unsigned one would let anyone starve a channel they do not fund. `issued_at` must sit
+within 60 seconds of the verifier's clock.
 
 ```bash
 curl -sS -X POST "http://127.0.0.1:8000/v1/channels/$CHANNEL_ID/nonces" \
   -H 'content-type: application/json' \
-  -d '{"epoch":7,"request_id":"0x0101010101010101010101010101010101010101010101010101010101010101"}'
+  -d '{"epoch":7,"issued_at":1700000000,"signature":"0x<65 bytes>"}'
 ```
 
 ```json
@@ -261,6 +268,11 @@ curl -sS -X POST http://127.0.0.1:8000/v1/matches \
 The payment is a bearer token for one verification. Replaying it answers `409 already_admitted`
 rather than the earlier result, which is not cached. Omitting `payment` while `PAYMENT_REQUIRED`
 is true answers `402 payment_required`; with it false the match relays as it always did.
+
+Two refusals carry evidence in `error.details`. `409 capacity_exhausted` means the epoch's units
+are spent and lists the highest authorization per lane, so a relying party can check the
+arithmetic itself. `429 capacity_reserved` means its own outstanding reservations are in the way
+and carries `retry_after`, the moment the earliest lane comes back.
 
 The wire types are `verifier/api-types/src/payments.rs` and `verifier/api-types/src/matches.rs`.
 

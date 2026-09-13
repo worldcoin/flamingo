@@ -5,19 +5,19 @@
 
 mod common;
 
-use alloy_primitives::{Address, B256, FixedBytes, b256};
+use alloy_primitives::{Address, B256, FixedBytes, U256, b256};
 use alloy_sol_types::Eip712Domain;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use common::{
-    COLLECTOR, FakeEscrowReader, StubEnclaveClient, payment_config, state_requiring_payment,
-    state_with, state_with_escrow,
+    COLLECTOR, FEE_TOKEN, FakeEscrowReader, MIN_PRICE_PER_UNIT, StubEnclaveClient,
+    state_requiring_payment, state_with, state_with_escrow,
 };
 use flamingo_verifier_api_types::ChannelNonce;
 use flamingo_verifier_host::AppState;
+use flamingo_verifier_host::payments::eip712;
 use flamingo_verifier_host::payments::escrow::ChannelSettings;
-use flamingo_verifier_host::payments::{MAX_LANES_PER_EPOCH, eip712};
 use flamingo_verifier_host::routes;
 use http_body_util::BodyExt as _;
 use k256::ecdsa::SigningKey;
@@ -29,8 +29,6 @@ const OTHER_CHANNEL: B256 =
     b256!("0x2222222222222222222222222222222222222222222222222222222222222222");
 const OTHER_COLLECTOR: Address =
     alloy_primitives::address!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
-const OTHER_SPEND_KEY: Address =
-    alloy_primitives::address!("0xabababababababababababababababababababab");
 
 const EPOCH_LENGTH: u64 = 3_600;
 
@@ -132,8 +130,19 @@ fn settings(spend_key: Address, collector: Address) -> ChannelSettings {
     ChannelSettings {
         spend_key,
         collector,
+        token: FEE_TOKEN,
+        price_per_unit: U256::from(MIN_PRICE_PER_UNIT),
         epoch_zero: epoch_zero(),
         epoch_length: EPOCH_LENGTH,
+    }
+}
+
+/// The same channel on terms this host does not sell at.
+fn settings_with_terms(token: Address, price_per_unit: u64) -> ChannelSettings {
+    ChannelSettings {
+        token,
+        price_per_unit: U256::from(price_per_unit),
+        ..settings(spend_key(), COLLECTOR)
     }
 }
 
@@ -154,11 +163,31 @@ fn payment(epoch: u64, lane: u32, counter: u64) -> Value {
     })
 }
 
-async fn reserve_for(state: &AppState, epoch: u64) -> (StatusCode, Value) {
-    let body = json!({ "epoch": epoch });
+/// Signs a reservation for `epoch` as the channel's spend key would.
+fn reservation_signature(epoch: u64, issued_at: u64) -> FixedBytes<65> {
+    sign(&eip712::reservation_digest(
+        &domain(),
+        CHANNEL,
+        epoch,
+        issued_at,
+    ))
+}
+
+async fn reserve_body(state: &AppState, body: &Value) -> (StatusCode, Value) {
     let uri = format!("/v1/channels/{CHANNEL}/nonces");
 
-    send(state, json_request(Method::POST, &uri, &body)).await
+    send(state, json_request(Method::POST, &uri, body)).await
+}
+
+async fn reserve_for(state: &AppState, epoch: u64) -> (StatusCode, Value) {
+    let issued_at = now();
+    let body = json!({
+        "epoch": epoch,
+        "issued_at": issued_at,
+        "signature": reservation_signature(epoch, issued_at),
+    });
+
+    reserve_body(state, &body).await
 }
 
 async fn reserve(state: &AppState) -> (StatusCode, Value) {
@@ -209,17 +238,6 @@ async fn a_paid_nonce_becomes_the_next_reservations_previous() {
         body["previous"]["signature"],
         authorize(CHANNEL, epoch, 0, 1).to_string()
     );
-}
-
-#[tokio::test]
-async fn retrying_a_reservation_returns_the_same_counter() {
-    let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
-
-    let (_, first) = reserve(&state).await;
-    let (status, retry) = reserve(&state).await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(first, retry);
 }
 
 /// A second caller arriving while the first is still out cannot share its lane.
@@ -314,7 +332,12 @@ async fn a_channel_id_that_is_not_32_bytes_of_prefixed_hex_is_rejected() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
 
     for channel_id in ["0x11", &"11".repeat(32), "0xzz"] {
-        let body = json!({ "epoch": current_epoch() });
+        let issued_at = now();
+        let body = json!({
+            "epoch": current_epoch(),
+            "issued_at": issued_at,
+            "signature": reservation_signature(current_epoch(), issued_at),
+        });
         let uri = format!("/v1/channels/{channel_id}/nonces");
 
         let (status, body) = send(&state, json_request(Method::POST, &uri, &body)).await;
@@ -360,32 +383,20 @@ async fn a_capacity_refusal_shows_the_authorizations_behind_it() {
     );
 }
 
-/// The bound is a backpressure signal, not a refusal: a reservation expiring frees a counter.
-#[tokio::test]
-async fn too_many_pending_reservations_ask_the_caller_to_retry() {
-    let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(u64::MAX));
-
-    for _ in 0..MAX_LANES_PER_EPOCH {
-        let (status, _) = reserve(&state).await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
-    let (status, body) = reserve(&state).await;
-
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(body["error"]["code"], "too_many_pending");
-    assert_eq!(body["allowRetry"], true);
-}
-
 #[tokio::test]
 async fn a_body_over_the_payment_limit_is_rejected_with_an_envelope() {
     let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
 
     let padding = "a".repeat(routes::MAX_PAYMENT_BODY_BYTES + 1);
-    let body = json!({ "epoch": current_epoch(), "padding": padding });
-    let uri = format!("/v1/channels/{CHANNEL}/nonces");
+    let issued_at = now();
+    let body = json!({
+        "epoch": current_epoch(),
+        "issued_at": issued_at,
+        "signature": reservation_signature(current_epoch(), issued_at),
+        "padding": padding,
+    });
 
-    let (status, body) = send(&state, json_request(Method::POST, &uri, &body)).await;
+    let (status, body) = reserve_body(&state, &body).await;
 
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(body["error"]["code"], "request_too_large");
@@ -418,20 +429,102 @@ async fn the_same_payment_cannot_buy_a_second_match() {
     assert_eq!(body["error"]["code"], "already_admitted");
 }
 
-/// A signature that recovers some other address is not this channel's, whoever signed it.
+/// A signature that recovers some other address is not this channel's, whoever signed it. Signed
+/// here over the next counter, so it is valid bytes for a nonce this payment does not name.
 #[tokio::test]
 async fn a_match_paid_for_with_another_key_is_refused() {
-    let escrow = FakeEscrowReader::new()
-        .with_channel(CHANNEL, settings(OTHER_SPEND_KEY, COLLECTOR))
-        .with_capacity(CHANNEL, current_epoch(), 10);
-    let state = state_with_escrow(answering_enclave(), escrow);
+    let state = state_with_escrow(answering_enclave(), escrow_with(10));
+    let epoch = current_epoch();
 
     reserve(&state).await;
 
-    let (status, body) = run_match(&state, Some(payment(current_epoch(), 0, 1))).await;
+    let stray = json!({
+        "channel_id": CHANNEL,
+        "epoch": epoch,
+        "channel_nonce": ChannelNonce::new(0, 1),
+        "signature": authorize(CHANNEL, epoch, 0, 2),
+    });
+    let (status, body) = run_match(&state, Some(stray)).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"]["code"], "invalid_signature");
+}
+
+/// Naming this host as collector does not set the terms: the channel's own token and price are
+/// checked too, at both routes.
+#[tokio::test]
+async fn a_channel_on_terms_this_host_rejects_is_refused() {
+    let wrong_token = alloy_primitives::address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let epoch = current_epoch();
+
+    for terms in [
+        settings_with_terms(wrong_token, MIN_PRICE_PER_UNIT),
+        settings_with_terms(FEE_TOKEN, 1),
+    ] {
+        let escrow = FakeEscrowReader::new()
+            .with_channel(CHANNEL, terms)
+            .with_capacity(CHANNEL, epoch, 10);
+        let state = state_with_escrow(answering_enclave(), escrow);
+
+        let (status, body) = reserve(&state).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "channel_terms_rejected");
+
+        let (status, body) = run_match(&state, Some(payment(epoch, 0, 1))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "channel_terms_rejected");
+    }
+}
+
+/// A reservation holds capacity, so an unsigned one would let anyone starve a channel.
+#[tokio::test]
+async fn an_unsigned_or_stale_reservation_is_refused() {
+    let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(10));
+    let epoch = current_epoch();
+    let issued_at = now();
+
+    let unsigned = json!({
+        "epoch": epoch,
+        "issued_at": issued_at,
+        "signature": FixedBytes::<65>::repeat_byte(0x11),
+    });
+    let (status, body) = reserve_body(&state, &unsigned).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "invalid_signature");
+
+    // Valid bytes, but issued far enough back that a captured one is not a reusable ticket.
+    let stale_at = issued_at - 3_600;
+    let stale = json!({
+        "epoch": epoch,
+        "issued_at": stale_at,
+        "signature": reservation_signature(epoch, stale_at),
+    });
+    let (status, body) = reserve_body(&state, &stale).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "stale_reservation");
+}
+
+/// The relying party's own burst holds its capacity without spending it, so it is told to come
+/// back rather than that its epoch is gone.
+#[tokio::test]
+async fn reservations_holding_capacity_are_refused_as_retryable() {
+    let state = state_with_escrow(StubEnclaveClient::default(), escrow_with(2));
+
+    for _ in 0..2 {
+        let (status, _) = reserve(&state).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, body) = reserve(&state).await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"]["code"], "capacity_reserved");
+    assert_eq!(body["allowRetry"], true);
+    assert_eq!(body["error"]["details"]["admitted_units"], 0);
+    assert!(
+        body["error"]["details"]["retry_after"].as_u64().is_some(),
+        "the caller should be told when a lane comes back"
+    );
 }
 
 #[tokio::test]

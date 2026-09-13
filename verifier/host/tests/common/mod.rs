@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256, address};
 use async_trait::async_trait;
 use flamingo_verifier_enclave_types::{KeyAttestation, MatchRequest, MatchResponse};
 use flamingo_verifier_host::enclave::{self, EnclaveClient};
@@ -18,8 +18,11 @@ use flamingo_verifier_host::payments::{InMemoryStore, PaymentConfig, PaymentLedg
 use flamingo_verifier_host::{AppState, Environment};
 
 /// The address this host settles to, and the one a test channel must name.
-pub const COLLECTOR: Address =
-    alloy_primitives::address!("0x0000000000000000000000000000000000FeE5c0");
+pub const COLLECTOR: Address = address!("0x0000000000000000000000000000000000FeE5c0");
+/// The only token this host accepts payment in.
+pub const FEE_TOKEN: Address = address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+/// The least this host sells a verification for. A cheaper channel is refused.
+pub const MIN_PRICE_PER_UNIT: u64 = 1_000;
 
 /// An [`EnclaveClient`] answering from fixed results.
 ///
@@ -187,5 +190,12 @@ pub fn payment_config() -> PaymentConfig {
 
 /// The same defaults, with metering on or off.
 pub fn payment_config_with(payment_required: bool) -> PaymentConfig {
-    PaymentConfig::new(4801, Address::ZERO, COLLECTOR, payment_required)
+    PaymentConfig::new(
+        4801,
+        Address::ZERO,
+        COLLECTOR,
+        FEE_TOKEN,
+        U256::from(MIN_PRICE_PER_UNIT),
+        payment_required,
+    )
 }

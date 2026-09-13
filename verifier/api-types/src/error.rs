@@ -37,6 +37,10 @@ pub struct ErrorDetails {
     pub admitted_units: u64,
     /// Units the channel may spend in that epoch, as the escrow reports them.
     pub capacity: u64,
+    /// Unix seconds at which the earliest outstanding reservation frees its lane. Present only
+    /// when waiting is what would help.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
     /// The highest authorization on each lane, lowest lane first.
     pub authorizations: Vec<LaneAuthorizationBody>,
 }
@@ -87,6 +91,7 @@ mod tests {
                     epoch: 7,
                     admitted_units: 2,
                     capacity: 2,
+                    retry_after: None,
                     authorizations: vec![LaneAuthorizationBody {
                         lane: 0,
                         channel_nonce: ChannelNonce::new(0, 1),

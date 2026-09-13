@@ -92,12 +92,18 @@ pub struct Payment {
 }
 
 /// `POST /v1/channels/{channel_id}/nonces` request.
+///
+/// Signed, because a reservation holds capacity for its lifetime and an unsigned one would let
+/// anyone starve a channel they do not fund. A retry takes another lane rather than the same
+/// counter, and the lane it abandons frees itself at `expires_by`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReserveNonceRequestBody {
     /// Epoch the reservation belongs to.
     pub epoch: u64,
-    /// Caller-chosen identifier that makes the reservation idempotent.
-    pub request_id: B256,
+    /// Unix seconds the relying party signed at. Must sit near the verifier's clock.
+    pub issued_at: u64,
+    /// The spend key's EIP-712 signature over `(channelId, epoch, issuedAt)`.
+    pub signature: FixedBytes<65>,
 }
 
 /// An authorization the channel's spend key signed, without the channel and epoch that the
@@ -147,11 +153,6 @@ mod tests {
         b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
     const CHANNEL_ID_HEX: &str =
         "0x1111111111111111111111111111111111111111111111111111111111111111";
-
-    const REQUEST_ID: B256 =
-        b256!("0x4444444444444444444444444444444444444444444444444444444444444444");
-    const REQUEST_ID_HEX: &str =
-        "0x4444444444444444444444444444444444444444444444444444444444444444";
 
     const SIGNATURE: FixedBytes<65> = fixed_bytes!(
         "0x3333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"
@@ -217,9 +218,14 @@ mod tests {
             format!("0x{}", "11".repeat(31)),
             format!("0x{}", "11".repeat(33)),
         ] {
-            let json = serde_json::json!({ "epoch": 7, "request_id": rejected });
+            let json = serde_json::json!({
+                "channel_id": rejected,
+                "epoch": 7,
+                "channel_nonce": "0x1",
+                "signature": SIGNATURE_HEX,
+            });
             assert!(
-                serde_json::from_value::<ReserveNonceRequestBody>(json).is_err(),
+                serde_json::from_value::<Payment>(json).is_err(),
                 "{rejected} should be rejected"
             );
         }
@@ -250,9 +256,14 @@ mod tests {
         assert_wire(
             &ReserveNonceRequestBody {
                 epoch: 7,
-                request_id: REQUEST_ID,
+                issued_at: 1_700_000_000,
+                signature: SIGNATURE,
             },
-            &serde_json::json!({ "epoch": 7, "request_id": REQUEST_ID_HEX }),
+            &serde_json::json!({
+                "epoch": 7,
+                "issued_at": 1_700_000_000u64,
+                "signature": SIGNATURE_HEX,
+            }),
         );
 
         assert_wire(

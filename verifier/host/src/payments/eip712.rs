@@ -17,6 +17,14 @@ sol! {
         uint64 epoch;
         uint96 channelNonce;
     }
+
+    /// A request to hold a lane. Signed because a reservation holds capacity for its lifetime,
+    /// so anyone who could send one unsigned could starve the channel that funds it.
+    struct NonceReservation {
+        bytes32 channelId;
+        uint64 epoch;
+        uint64 issuedAt;
+    }
 }
 
 /// A signature that cannot be attributed to a signer.
@@ -61,6 +69,40 @@ pub fn digest(domain: &Eip712Domain, channel_id: B256, epoch: u64, nonce: Channe
     .eip712_signing_hash(domain)
 }
 
+/// Returns the EIP-712 digest a relying party signs to hold a lane.
+#[must_use]
+pub fn reservation_digest(
+    domain: &Eip712Domain,
+    channel_id: B256,
+    epoch: u64,
+    issued_at: u64,
+) -> B256 {
+    NonceReservation {
+        channelId: channel_id,
+        epoch,
+        issuedAt: issued_at,
+    }
+    .eip712_signing_hash(domain)
+}
+
+/// Recovers the address that signed this reservation request.
+///
+/// # Errors
+///
+/// Returns [`SignatureError`] when the signature is malformed, malleable, or recovers nothing.
+pub fn recover_reservation_signer(
+    domain: &Eip712Domain,
+    channel_id: B256,
+    epoch: u64,
+    issued_at: u64,
+    signature: &FixedBytes<65>,
+) -> Result<Address, SignatureError> {
+    recover(
+        signature,
+        reservation_digest(domain, channel_id, epoch, issued_at),
+    )
+}
+
 /// Recovers the address that signed this authorization.
 ///
 /// # Errors
@@ -73,6 +115,11 @@ pub fn recover_signer(
     nonce: ChannelNonce,
     signature: &FixedBytes<65>,
 ) -> Result<Address, SignatureError> {
+    recover(signature, digest(domain, channel_id, epoch, nonce))
+}
+
+/// Recovers the signer of `prehash`, refusing anything but a canonical low-s signature.
+fn recover(signature: &FixedBytes<65>, prehash: B256) -> Result<Address, SignatureError> {
     // Checked on the raw bytes: `Signature::from_raw` also accepts 0 and 1, and the escrow only
     // ever sees the 27/28 encoding.
     if !matches!(signature[64], 27 | 28) {
@@ -88,7 +135,6 @@ pub fn recover_signer(
         return Err(SignatureError::HighS);
     }
 
-    let prehash = digest(domain, channel_id, epoch, nonce);
     let address = parsed
         .recover_address_from_prehash(&prehash)
         .map_err(|_| SignatureError::NotRecoverable)?;
@@ -109,7 +155,10 @@ mod tests {
     use flamingo_verifier_api_types::ChannelNonce;
     use k256::ecdsa::SigningKey;
 
-    use super::{SignatureError, digest, domain, recover_signer};
+    use super::{
+        SignatureError, digest, domain, recover_reservation_signer, recover_signer,
+        reservation_digest,
+    };
 
     const CHANNEL_ID: B256 =
         b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
@@ -218,6 +267,61 @@ mod tests {
                 nonce(3, 42)
             ),
             b256!("0xe48a4f68fee8fe87bfd02bbb52eaad7786f3471f385b2dd9542ec87495609df7")
+        );
+    }
+
+    /// `cast keccak "NonceReservation(bytes32 channelId,uint64 epoch,uint64 issuedAt)"`, then
+    /// the struct hash and the `0x1901` prefix, the same way as the payment digest above.
+    ///
+    /// A reservation and a payment must never share a digest: one holds a lane, the other spends
+    /// it, and a signature for the first must not buy the second.
+    #[test]
+    fn the_reservation_digest_matches_the_contract() {
+        assert_eq!(
+            reservation_digest(
+                &domain(4801, FEE_ESCROW),
+                VECTOR_CHANNEL_ID,
+                7,
+                1_700_000_000
+            ),
+            b256!("0xaf3b7b2b30d9c82dc039028c52da00c4203961f0914fd7a6434cf820847edf4a")
+        );
+    }
+
+    #[test]
+    fn a_reservation_and_a_payment_never_share_a_digest() {
+        let reservation = reservation_digest(&test_domain(), CHANNEL_ID, EPOCH, 1);
+        let payment = digest(&test_domain(), CHANNEL_ID, EPOCH, nonce(0, 1));
+
+        assert_ne!(reservation, payment);
+    }
+
+    #[test]
+    fn a_reservation_signature_recovers_its_signer() {
+        let prehash = reservation_digest(&test_domain(), CHANNEL_ID, EPOCH, 1_700_000_000);
+        let signature = sign(&known_key(), &prehash);
+
+        assert_eq!(
+            recover_reservation_signer(
+                &test_domain(),
+                CHANNEL_ID,
+                EPOCH,
+                1_700_000_000,
+                &signature
+            ),
+            Ok(address!("0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF"))
+        );
+
+        // Every field is in the digest, so the same bytes do not carry to another issue time.
+        assert_ne!(
+            recover_reservation_signer(
+                &test_domain(),
+                CHANNEL_ID,
+                EPOCH,
+                1_700_000_001,
+                &signature
+            ),
+            Ok(address!("0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF"))
         );
     }
 

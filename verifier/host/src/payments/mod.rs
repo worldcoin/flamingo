@@ -9,14 +9,15 @@ pub mod escrow;
 pub mod ledger;
 pub mod store;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use alloy_sol_types::Eip712Domain;
 
 pub use eip712::SignatureError;
 pub use escrow::{ChannelSettings, EscrowError, EscrowReader, RpcEscrowReader};
 pub use ledger::{
     AdmitRequest, CapacityProof, EpochLedger, LedgerError, MAX_LANES_PER_EPOCH,
-    PaymentAuthorization, PaymentLedger, RESERVATION_LIFETIME_SECS, ReserveOutcome,
+    PaymentAuthorization, PaymentLedger, RESERVATION_CLOCK_SKEW_SECS, RESERVATION_LIFETIME_SECS,
+    ReserveOutcome, ReserveRequest,
 };
 pub use store::{InMemoryStore, PaymentStore, StoreError};
 
@@ -28,6 +29,8 @@ pub use store::{InMemoryStore, PaymentStore, StoreError};
 pub struct PaymentConfig {
     domain: Eip712Domain,
     collector: Address,
+    token: Address,
+    min_price_per_unit: U256,
     payment_required: bool,
 }
 
@@ -38,11 +41,15 @@ impl PaymentConfig {
         chain_id: u64,
         fee_escrow: Address,
         collector: Address,
+        token: Address,
+        min_price_per_unit: U256,
         payment_required: bool,
     ) -> Self {
         Self {
             domain: eip712::domain(chain_id, fee_escrow),
             collector,
+            token,
+            min_price_per_unit,
             payment_required,
         }
     }
@@ -57,6 +64,18 @@ impl PaymentConfig {
     #[must_use]
     pub const fn collector(&self) -> Address {
         self.collector
+    }
+
+    /// The only token this host accepts payment in.
+    #[must_use]
+    pub const fn token(&self) -> Address {
+        self.token
+    }
+
+    /// The least this host will sell a verification for, in that token's smallest unit.
+    #[must_use]
+    pub const fn min_price_per_unit(&self) -> U256 {
+        self.min_price_per_unit
     }
 
     /// Whether a match without a payment is refused. The kill switch for metering.

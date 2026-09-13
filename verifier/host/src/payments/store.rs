@@ -29,7 +29,7 @@ pub enum StoreError {
 /// Channels are not stored: they live in the fee escrow, and this host only ever reads them.
 ///
 /// [`Self::store_epoch`] is the concurrency primitive. It writes only if the stored version is
-/// still the one the caller read, which DynamoDB satisfies with a conditional write on a version
+/// still the one the caller read, which `DynamoDB` satisfies with a conditional write on a version
 /// attribute (`attribute_not_exists(version) OR version = :expected`).
 #[async_trait]
 pub trait PaymentStore: Send + Sync {

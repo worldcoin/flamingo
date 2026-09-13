@@ -54,6 +54,11 @@ impl PaymentStore for InMemoryStore {
             .unwrap_or_default())
     }
 
+    // The read and the write are one critical section, so the guard cannot end between them.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the compare and the write must share the guard"
+    )]
     async fn store_epoch(
         &self,
         channel_id: B256,

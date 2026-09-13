@@ -5,21 +5,25 @@
 
 pub mod rpc;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use async_trait::async_trait;
 
 pub use rpc::RpcEscrowReader;
 
 /// The part of the escrow's `ChannelSettings` this host acts on.
 ///
-/// The contract stores more: a relying party id, the payment token, the price per unit and a
-/// salt. None of them decide whether a nonce is admitted, so none of them are carried here.
+/// Naming this host as collector is not enough to spend here: whoever opened the channel chose
+/// its token and price, so both are carried and both are checked against what this host accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelSettings {
     /// Address whose signature authorizes spending from the channel.
     pub spend_key: Address,
     /// Verifier the channel's fees settle to. Only that verifier may admit its nonces.
     pub collector: Address,
+    /// Token the channel pays in. Only an allowlisted one is accepted.
+    pub token: Address,
+    /// What one verification costs, in that token's smallest unit.
+    pub price_per_unit: U256,
     /// Unix seconds at which epoch 0 began.
     pub epoch_zero: u64,
     /// Seconds each epoch lasts. Never zero on-chain.

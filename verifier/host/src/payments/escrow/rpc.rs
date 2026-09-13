@@ -119,9 +119,7 @@ impl RpcEscrowReader {
                 .await
             {
                 Ok(result) => return decode_hex(&result).map_err(CallFailure::Rpc),
-                Err(CallFailure::Reverted(reason)) => {
-                    return Err(CallFailure::Reverted(reason));
-                }
+                Err(CallFailure::Reverted(data)) => return Err(CallFailure::Reverted(data)),
                 Err(failure) => {
                     tracing::error!(
                         attempt,
@@ -176,9 +174,13 @@ impl RpcEscrowReader {
             .map_err(|error| CallFailure::Rpc(EscrowError::Unavailable(error.to_string())))?;
 
         // A revert is the contract answering, not the node failing. Telling the two apart is
-        // what keeps a node outage from reading as an unknown channel.
+        // what keeps a node outage from reading as an unknown channel. A rate limit, a quota
+        // refusal and an internal node error all arrive here too, and none of them are answers.
         if let Some(error) = payload.get("error") {
-            return Err(CallFailure::Reverted(error.to_string()));
+            return Err(revert_data(error).map_or_else(
+                || CallFailure::Rpc(EscrowError::Unavailable(format!("rpc error: {error}"))),
+                CallFailure::Reverted,
+            ));
         }
 
         payload
@@ -193,18 +195,48 @@ impl RpcEscrowReader {
     }
 }
 
+/// Selector of the escrow's `ChannelNotFound(bytes32)` error, from `cast sig`.
+///
+/// The one revert that means "no such channel". Every other revert, and every failure that is
+/// not a revert at all, leaves this host unable to tell, which is not the same answer.
+const CHANNEL_NOT_FOUND: [u8; 4] = [0xf3, 0x83, 0xb1, 0x3e];
+
 /// Why one `eth_call` did not produce bytes.
 ///
 /// A revert and an outage look the same to a caller that only sees `Result`, and they must not:
-/// one means the channel does not exist, the other means this host cannot tell.
+/// one means the channel does not exist, the other means this host cannot tell. A rate limit is
+/// an outage, and answering it as an absent channel would let a throttled node open the gate.
 #[derive(Debug, thiserror::Error)]
 enum CallFailure {
-    /// The contract reverted. For these reads that means the channel is not there.
-    #[error("the call reverted: {0}")]
-    Reverted(String),
+    /// The contract reverted, with whatever data it reverted with.
+    #[error("the call reverted")]
+    Reverted(Vec<u8>),
     /// The node could not answer.
     #[error(transparent)]
     Rpc(EscrowError),
+}
+
+impl CallFailure {
+    /// Whether this is the escrow saying it does not know the channel.
+    fn is_channel_not_found(&self) -> bool {
+        match self {
+            Self::Reverted(data) => data.starts_with(&CHANNEL_NOT_FOUND),
+            Self::Rpc(_) => false,
+        }
+    }
+}
+
+/// Reads the revert data out of a JSON-RPC error object.
+///
+/// A node reports a revert as an error with the returned bytes in `data`. An error without them
+/// is not a revert this host can read, so it is treated as an outage rather than as an answer.
+fn revert_data(error: &serde_json::Value) -> Option<Vec<u8>> {
+    let data = error
+        .get("data")
+        .and_then(|data| data.get("data").or(Some(data)))
+        .and_then(serde_json::Value::as_str)?;
+
+    decode_hex(data).ok()
 }
 
 #[async_trait]
@@ -226,16 +258,22 @@ impl EscrowReader for RpcEscrowReader {
             channelId: channel_id,
         };
 
-        // `ChannelNotFound` is how the contract says it does not know the channel. Nothing else
-        // in this call reverts, so a revert is an absent channel and anything else is an outage.
+        // Only `ChannelNotFound` means the channel is absent. Any other revert, and every
+        // transport or rate-limit failure, leaves this host unable to tell, which refuses.
         let returned = match self.call(call.abi_encode()).await {
             Ok(returned) => returned,
-            Err(CallFailure::Reverted(_)) => {
+            Err(failure) if failure.is_channel_not_found() => {
                 self.cache().missing.insert(channel_id, Instant::now());
 
                 return Ok(None);
             }
             Err(CallFailure::Rpc(error)) => return Err(error),
+            Err(CallFailure::Reverted(data)) => {
+                return Err(EscrowError::Unavailable(format!(
+                    "unexpected revert: 0x{}",
+                    alloy_primitives::hex::encode(data)
+                )));
+            }
         };
 
         let decoded = channelSettingsCall::abi_decode_returns(&returned)
@@ -251,6 +289,8 @@ impl EscrowReader for RpcEscrowReader {
         let settings = ChannelSettings {
             spend_key: decoded.spendKey,
             collector: decoded.collector,
+            token: decoded.token,
+            price_per_unit: decoded.pricePerUnit,
             epoch_zero: decoded.epochZero,
             epoch_length: decoded.epochLength,
         };
@@ -293,8 +333,14 @@ impl EscrowReader for RpcEscrowReader {
         let returned = match self.call(call.abi_encode()).await {
             Ok(returned) => returned,
             // An epoch the contract will not talk about has nothing funded in it.
-            Err(CallFailure::Reverted(_)) => return Ok(0),
+            Err(failure) if failure.is_channel_not_found() => return Ok(0),
             Err(CallFailure::Rpc(error)) => return Err(error),
+            Err(CallFailure::Reverted(data)) => {
+                return Err(EscrowError::Unavailable(format!(
+                    "unexpected revert: 0x{}",
+                    alloy_primitives::hex::encode(data)
+                )));
+            }
         };
 
         let decoded = epochStateCall::abi_decode_returns(&returned)
@@ -320,21 +366,40 @@ impl EscrowReader for RpcEscrowReader {
             .await
             .map_err(|failure| match failure {
                 CallFailure::Rpc(error) => error,
-                CallFailure::Reverted(reason) => EscrowError::Unavailable(reason),
+                CallFailure::Reverted(_) => {
+                    EscrowError::Unavailable("eth_chainId reverted".to_owned())
+                }
             })?;
-        let digits = answer.strip_prefix("0x").unwrap_or(&answer);
 
+        let digits = answer.strip_prefix("0x").unwrap_or(&answer);
         let actual = u64::from_str_radix(digits, 16)
             .map_err(|_| EscrowError::Unavailable(format!("undecodable chain id: {answer}")))?;
 
-        if actual == self.config.chain_id {
-            return Ok(());
+        if actual != self.config.chain_id {
+            return Err(EscrowError::WrongChain {
+                expected: self.config.chain_id,
+                actual,
+            });
         }
 
-        Err(EscrowError::WrongChain {
-            expected: self.config.chain_id,
-            actual,
-        })
+        // A real read, not just a reachable node: the channel id zero is not derivable, so the
+        // contract must answer `ChannelNotFound`. Anything else means this host is pointed at
+        // something that is not the escrow, or at a node that cannot reach it.
+        let call = channelSettingsCall {
+            channelId: B256::ZERO,
+        };
+
+        match self.call(call.abi_encode()).await {
+            Err(failure) if failure.is_channel_not_found() => Ok(()),
+            Ok(_) => Err(EscrowError::Unavailable(
+                "the escrow answered for the zero channel id".to_owned(),
+            )),
+            Err(CallFailure::Rpc(error)) => Err(error),
+            Err(CallFailure::Reverted(data)) => Err(EscrowError::Unavailable(format!(
+                "unexpected revert: 0x{}",
+                alloy_primitives::hex::encode(data)
+            ))),
+        }
     }
 }
 

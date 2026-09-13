@@ -14,7 +14,7 @@ use flamingo_verifier_api_types::{
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::payments::{AdmitRequest, CapacityProof, LedgerError, PaymentAuthorization};
+use crate::payments::{AdmitRequest, CapacityProof, LedgerError, ReserveRequest};
 
 /// Largest body these routes accept. They carry fixed-width hex fields and nothing else.
 pub const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -34,9 +34,16 @@ pub async fn reserve(
     let channel_id = parse_channel_id(&channel_id)?;
     let Json(body) = body.map_err(|rejection| rejected_body(&rejection))?;
 
+    let request = ReserveRequest {
+        channel_id,
+        epoch: body.epoch,
+        issued_at: body.issued_at,
+        signature: body.signature,
+    };
+
     let outcome = state
         .payments()
-        .reserve(channel_id, body.epoch, now())
+        .reserve(&request, now())
         .await
         .map_err(|error| refused(&error, channel_id, body.epoch, None))?;
 
@@ -118,41 +125,61 @@ fn refused(
         )
     };
 
-    let (status, code, message, allow_retry) = match error {
+    if let Some(special) = carries_evidence(error) {
+        return special.with_detail(context());
+    }
+
+    let (status, code, message, allow_retry) = status_for(error);
+
+    AppError::new(status, code, message, allow_retry).with_detail(context())
+}
+
+/// The refusals that carry more than a status: a dependency name, or evidence for the client.
+fn carries_evidence(error: &LedgerError) -> Option<AppError> {
+    let mapped = match error {
         // The two dependency failures. Retryable, and each names itself so a dashboard can tell
         // a store outage from a node outage without reading the message.
-        LedgerError::Store(_) => {
-            return AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "payments_store_unavailable",
-                "The payments store is unavailable",
-                true,
-            )
-            .with_dependency("payments_store")
-            .with_detail(format!("{error}; {}", context()));
-        }
-        LedgerError::Escrow(_) => {
-            return AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "escrow_unavailable",
-                "The fee escrow cannot be read",
-                true,
-            )
-            .with_dependency("fee_escrow_rpc")
-            .with_detail(format!("{error}; {}", context()));
-        }
+        LedgerError::Store(_) => AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "payments_store_unavailable",
+            "The payments store is unavailable",
+            true,
+        )
+        .with_dependency("payments_store"),
+        LedgerError::Escrow(_) => AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "escrow_unavailable",
+            "The fee escrow cannot be read",
+            true,
+        )
+        .with_dependency("fee_escrow_rpc"),
         // Carries the proof: an operator told the channel is spent can check every signature
         // listed and add up the counters instead of taking the number on trust.
-        LedgerError::CapacityExhausted(proof) => {
-            return AppError::new(
-                StatusCode::CONFLICT,
-                "capacity_exhausted",
-                "The channel has spent its capacity for this epoch",
-                false,
-            )
-            .with_details(details(proof))
-            .with_detail(context());
-        }
+        LedgerError::CapacityExhausted(proof) => AppError::new(
+            StatusCode::CONFLICT,
+            "capacity_exhausted",
+            "The channel has spent its capacity for this epoch",
+            false,
+        )
+        .with_details(details(proof)),
+        // Nothing is spent yet, so waiting is what helps. The proof carries the deadline of the
+        // earliest outstanding reservation rather than leaving the caller to guess.
+        LedgerError::CapacityReserved(proof) => AppError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "capacity_reserved",
+            "The channel's capacity is held by outstanding reservations",
+            true,
+        )
+        .with_details(details(proof)),
+        _ => return None,
+    };
+
+    Some(mapped)
+}
+
+/// Status, code and retryability for every refusal that carries nothing else.
+const fn status_for(error: &LedgerError) -> (StatusCode, &'static str, &'static str, bool) {
+    match error {
         LedgerError::UnknownChannel => (
             StatusCode::NOT_FOUND,
             "unknown_channel",
@@ -163,6 +190,24 @@ fn refused(
             StatusCode::FORBIDDEN,
             "wrong_collector",
             "The channel settles to another verifier",
+            false,
+        ),
+        LedgerError::ChannelTermsRejected => (
+            StatusCode::FORBIDDEN,
+            "channel_terms_rejected",
+            "The channel's token or price is not accepted here",
+            false,
+        ),
+        LedgerError::InvalidReservation => (
+            StatusCode::UNAUTHORIZED,
+            "invalid_signature",
+            "The reservation was not signed by the channel spend key",
+            false,
+        ),
+        LedgerError::StaleReservation => (
+            StatusCode::BAD_REQUEST,
+            "stale_reservation",
+            "The reservation was issued too far from this verifier's clock",
             false,
         ),
         LedgerError::InvalidEpoch => (
@@ -204,9 +249,17 @@ fn refused(
             "The channel nonce has already been spent on a verification",
             false,
         ),
-    };
-
-    AppError::new(status, code, message, allow_retry).with_detail(context())
+        // Handled by `carries_evidence`, which runs first.
+        LedgerError::Store(_)
+        | LedgerError::Escrow(_)
+        | LedgerError::CapacityExhausted(_)
+        | LedgerError::CapacityReserved(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Internal server error",
+            false,
+        ),
+    }
 }
 
 /// Turns the ledger's proof into the wire shape a refusal carries.
@@ -215,15 +268,16 @@ fn details(proof: &CapacityProof) -> ErrorDetails {
         epoch: proof.epoch,
         admitted_units: proof.admitted_units,
         capacity: proof.capacity,
-        authorizations: proof.authorizations.iter().map(lane_body).collect(),
-    }
-}
-
-fn lane_body(authorization: &PaymentAuthorization) -> LaneAuthorizationBody {
-    LaneAuthorizationBody {
-        lane: authorization.lane,
-        channel_nonce: authorization.nonce(),
-        signature: authorization.signature,
+        retry_after: proof.retry_after,
+        authorizations: proof
+            .authorizations
+            .iter()
+            .map(|authorization| LaneAuthorizationBody {
+                lane: authorization.lane,
+                channel_nonce: authorization.nonce(),
+                signature: authorization.signature,
+            })
+            .collect(),
     }
 }
 

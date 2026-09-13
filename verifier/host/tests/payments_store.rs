@@ -8,13 +8,13 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alloy_primitives::{Address, B256, FixedBytes, b256};
+use alloy_primitives::{Address, B256, FixedBytes, U256, b256};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use common::{
-    COLLECTOR, FakeEscrowReader, StubEnclaveClient, ledger_over, payment_config,
-    state_with_payments,
+    COLLECTOR, FEE_TOKEN, FakeEscrowReader, MIN_PRICE_PER_UNIT, StubEnclaveClient, ledger_over,
+    payment_config, state_with_payments,
 };
 use flamingo_verifier_api_types::ChannelNonce;
 use flamingo_verifier_host::AppState;
@@ -29,8 +29,6 @@ use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 const CHANNEL: B256 = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
-const FIRST_REQUEST: B256 =
-    b256!("0x0101010101010101010101010101010101010101010101010101010101010101");
 const EPOCH_LENGTH: u64 = 3_600;
 
 /// A store that loses the race a fixed number of times before it starts accepting writes.
@@ -178,14 +176,8 @@ fn signing_key() -> SigningKey {
     SigningKey::from_slice(scalar.as_slice()).expect("scalar should be a valid key")
 }
 
-fn authorize(epoch: u64, lane: u32, counter: u64) -> FixedBytes<65> {
-    let prehash = eip712::digest(
-        &eip712::domain(4801, Address::ZERO),
-        CHANNEL,
-        epoch,
-        ChannelNonce::new(lane, counter),
-    );
-
+/// Signs `prehash` and returns `r || s || v`, the encoding the escrow expects.
+fn sign(prehash: &alloy_primitives::B256) -> FixedBytes<65> {
     let (signature, recovery_id) = signing_key()
         .sign_prehash_recoverable(prehash.as_slice())
         .expect("signing should succeed");
@@ -197,6 +189,15 @@ fn authorize(epoch: u64, lane: u32, counter: u64) -> FixedBytes<65> {
     FixedBytes(encoded)
 }
 
+fn authorize(epoch: u64, lane: u32, counter: u64) -> FixedBytes<65> {
+    sign(&eip712::digest(
+        &eip712::domain(4801, Address::ZERO),
+        CHANNEL,
+        epoch,
+        ChannelNonce::new(lane, counter),
+    ))
+}
+
 /// An escrow that knows the test channel and funds it generously.
 fn escrow() -> FakeEscrowReader {
     FakeEscrowReader::new()
@@ -205,6 +206,8 @@ fn escrow() -> FakeEscrowReader {
             ChannelSettings {
                 spend_key: spend_key(),
                 collector: COLLECTOR,
+                token: FEE_TOKEN,
+                price_per_unit: U256::from(MIN_PRICE_PER_UNIT),
                 epoch_zero: epoch_zero(),
                 epoch_length: EPOCH_LENGTH,
             },
@@ -224,7 +227,19 @@ fn spend_key() -> Address {
 }
 
 async fn reserve(state: &AppState) -> (StatusCode, Value) {
-    let body = json!({ "epoch": current_epoch() });
+    let epoch = current_epoch();
+    let issued_at = now();
+    let prehash = eip712::reservation_digest(
+        &eip712::domain(4801, Address::ZERO),
+        CHANNEL,
+        epoch,
+        issued_at,
+    );
+    let body = json!({
+        "epoch": epoch,
+        "issued_at": issued_at,
+        "signature": sign(&prehash),
+    });
     let uri = format!("/v1/channels/{CHANNEL}/nonces");
 
     send(state, json_request(Method::POST, &uri, &body)).await
