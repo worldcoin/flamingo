@@ -9,11 +9,15 @@ use crate::error::AppError;
 /// Largest match body this route accepts. 12 MiB to allow for images in payload.
 pub const MAX_BODY_BYTES: usize = 12 * 1024 * 1024;
 
-/// Relays a sealed match request to the enclave.
+/// Relays a sealed match request to the enclave, spending its payment first.
+///
+/// The payment is spent before the enclave runs, so a caller cannot get a verification without
+/// burning the nonce. The reverse order would leak a free match whenever the ledger refused.
 ///
 /// # Errors
 ///
-/// Returns [`AppError`] if the body is rejected or the enclave rejects the request.
+/// Returns [`AppError`] if the body is rejected, the payment is missing or refused, or the
+/// enclave rejects the request.
 pub async fn handler(
     State(state): State<AppState>,
     body: Result<Json<MatchRequestBody>, JsonRejection>,
@@ -28,6 +32,9 @@ pub async fn handler(
             false,
         )
     })?;
+
+    // Resolves before the await below, so the ledger's lock is never held across it.
+    super::payments::admit(&state, body.payment.as_ref()).await?;
 
     let response = state
         .enclave_client()

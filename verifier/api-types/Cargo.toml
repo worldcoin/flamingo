@@ -12,6 +12,7 @@ publish = true
 # Host-side only, and deliberately not in either enclave's source set: the HTTP contract stops
 # at the host, so none of it belongs in an EIF.
 [dependencies]
+alloy-primitives.workspace = true
 serde.workspace = true
 
 [dev-dependencies]

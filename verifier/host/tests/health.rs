@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request};
+mod common;
+
+use common::{FakeEscrowReader, payment_config};
+use flamingo_verifier_host::payments::{InMemoryStore, PaymentLedger};
 use flamingo_verifier_host::{AppState, Environment, enclave::PontifexEnclaveClient, routes};
 use tower::ServiceExt;
 
@@ -10,6 +14,11 @@ async fn health_returns_ok() {
     let state = AppState::new(
         Environment::Development,
         Arc::new(PontifexEnclaveClient::new(0, 0)),
+        Arc::new(PaymentLedger::new(
+            payment_config(),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(FakeEscrowReader::new()),
+        )),
     );
     let response = routes::handler()
         .with_state(state)

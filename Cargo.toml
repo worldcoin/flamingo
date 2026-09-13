@@ -23,6 +23,8 @@ repository = "https://github.com/worldcoin/flamingo"
 publish = false
 
 [workspace.dependencies]
+alloy-primitives = { version = "~1.5.7", default-features = false, features = ["std", "k256", "serde"] }
+alloy-sol-types = { version = "~1.5.7", default-features = false, features = ["std"] }
 anyhow = "1.0"
 ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5" }
 ark-ff = "0.5"
@@ -42,6 +44,9 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"
 image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
+# Test-only: alloy-primitives uses k256 for recovery but does not re-export it, and the tests
+# need a signer.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 pontifex = { version = "2.0.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
 rand = "0.8"

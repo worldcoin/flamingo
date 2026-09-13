@@ -14,7 +14,12 @@
 mod assignment;
 mod error;
 mod matches;
+mod payments;
 
 pub use assignment::EnclaveAssignmentResponse;
-pub use error::{ApiErrorResponse, ErrorBody};
+pub use error::{ApiErrorResponse, ErrorBody, ErrorDetails};
 pub use matches::{MatchRequestBody, MatchResponseBody};
+pub use payments::{
+    ChannelNonce, LaneAuthorizationBody, Payment, PaymentAuthorizationBody,
+    ReserveNonceRequestBody, ReserveNonceResponseBody,
+};

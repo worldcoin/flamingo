@@ -13,6 +13,7 @@ mod environment;
 
 pub mod enclave;
 pub mod error;
+pub mod payments;
 pub mod routes;
 pub mod server;
 

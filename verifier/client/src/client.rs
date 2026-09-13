@@ -176,6 +176,8 @@ impl FlamingoVerifierClient {
         );
         let request = self.http.post(url).json(&MatchRequestBody {
             ciphertext: STANDARD.encode(sealed),
+            // This client does not meter its callers yet, so it never presents a payment.
+            payment: None,
         });
 
         Ok((request, opener))
@@ -368,6 +370,8 @@ mod tests {
         );
         let request = client.http.post(url).json(&MatchRequestBody {
             ciphertext: STANDARD.encode(sealed),
+            // This client does not meter its callers yet, so it never presents a payment.
+            payment: None,
         });
 
         client.request_match_with(request, opener).await
