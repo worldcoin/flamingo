@@ -19,6 +19,7 @@ mod tests {
             attestation: "Y29zZQ==".to_owned(),
             public_key: "a2V5".to_owned(),
         };
+
         let json = serde_json::json!({ "attestation": "Y29zZQ==", "public_key": "a2V5" });
 
         assert_eq!(serde_json::to_value(&body).expect("should serialize"), json);
