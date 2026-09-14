@@ -32,6 +32,7 @@ async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 ciborium = "0.2"
+clap = { version = "4", features = ["derive", "env"] }
 coset = "0.4.2"
 flamingo-verifier-api-types = { version = "0.3.0", path = "verifier/api-types" }
 flamingo-verifier-client = { path = "verifier/client" }

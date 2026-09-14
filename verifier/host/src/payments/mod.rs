@@ -31,7 +31,6 @@ pub struct PaymentConfig {
     collector: Address,
     token: Address,
     min_price_per_unit: U256,
-    payment_required: bool,
 }
 
 impl PaymentConfig {
@@ -43,14 +42,12 @@ impl PaymentConfig {
         collector: Address,
         token: Address,
         min_price_per_unit: U256,
-        payment_required: bool,
     ) -> Self {
         Self {
             domain: eip712::domain(chain_id, fee_escrow),
             collector,
             token,
             min_price_per_unit,
-            payment_required,
         }
     }
 
@@ -76,14 +73,5 @@ impl PaymentConfig {
     #[must_use]
     pub const fn min_price_per_unit(&self) -> U256 {
         self.min_price_per_unit
-    }
-
-    /// Whether a match without a payment is refused. The kill switch for metering.
-    ///
-    /// Off by default so metering can be turned on per environment after the channels are
-    /// funded, rather than as a flag day that refuses every caller at once.
-    #[must_use]
-    pub const fn payment_required(&self) -> bool {
-        self.payment_required
     }
 }

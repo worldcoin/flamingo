@@ -85,7 +85,6 @@ impl Environment {
             Self::required_address("FEE_COLLECTOR_ADDRESS"),
             Self::required_address("FEE_TOKEN_ADDRESS"),
             Self::required_u256("FEE_MIN_PRICE_PER_UNIT"),
-            Self::optional("PAYMENT_REQUIRED", false),
         )
     }
 

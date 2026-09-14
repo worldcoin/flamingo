@@ -22,5 +22,5 @@ pub mod payments;
 pub mod routes;
 pub mod server;
 
-pub use app_state::AppState;
+pub use app_state::{AppState, PaymentGate};
 pub use environment::Environment;

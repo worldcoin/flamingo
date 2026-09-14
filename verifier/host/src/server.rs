@@ -27,7 +27,7 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
 
     axum::serve(
         listener,
-        routes::handler()
+        routes::handler(state.payments().is_some())
             .with_state(state)
             .layer(TraceLayer::new_for_axum())
             .into_make_service(),

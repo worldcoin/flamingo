@@ -84,6 +84,31 @@ pub trait EscrowReader: Send + Sync {
     /// Returns [`EscrowError`] when the node cannot be reached or answers with an error.
     async fn capacity(&self, channel_id: B256, epoch: u64) -> Result<u64, EscrowError>;
 
+    /// Units the escrow has already settled in `epoch`, summed across every lane.
+    ///
+    /// The chain is the authority here. A host that restarts mid-epoch forgets what it admitted,
+    /// and without this it would serve the whole epoch again against the same funding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EscrowError`] when the node cannot be reached or answers with an error.
+    async fn settled_units(&self, channel_id: B256, epoch: u64) -> Result<u64, EscrowError>;
+
+    /// Highest counter the escrow has settled on `lane` in `epoch`.
+    ///
+    /// Zero means the lane has never been settled, which is how a probe finds where a channel's
+    /// lanes stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EscrowError`] when the node cannot be reached or answers with an error.
+    async fn lane_high_water(
+        &self,
+        channel_id: B256,
+        epoch: u64,
+        lane: u32,
+    ) -> Result<u64, EscrowError>;
+
     /// Checks the node is reachable and serving the configured chain.
     ///
     /// # Errors

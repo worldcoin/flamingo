@@ -19,7 +19,7 @@ use tower::ServiceExt as _;
 
 /// Sends `request` through the router and returns the status and decoded JSON body.
 async fn send(state: AppState, request: Request<Body>) -> (StatusCode, Value) {
-    let response = routes::handler()
+    let response = routes::handler(state.payments().is_some())
         .with_state(state)
         .oneshot(request)
         .await

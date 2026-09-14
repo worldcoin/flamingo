@@ -37,6 +37,7 @@ sol! {
 
     function channelSettings(bytes32 channelId) external view returns (SolChannelSettings memory);
     function epochState(bytes32 channelId, uint64 epoch) external view returns (SolEpochState memory);
+    function laneHighWater(bytes32 channelId, uint64 epoch, uint32 lane) external view returns (uint64);
 }
 
 /// How the escrow reader talks to a node.
@@ -67,9 +68,19 @@ struct Cache {
     /// Settings are immutable once the channel exists, so a hit never expires. The price rides
     /// along because capacity divides by it and it comes from the same call.
     channels: HashMap<B256, (ChannelSettings, U256)>,
-    /// Absence and capacity both change with funding, so both carry a deadline.
+    /// Absence and epoch state both change with funding and settlement, so both carry a deadline.
     missing: HashMap<B256, Instant>,
-    capacity: HashMap<(B256, u64), (u64, Instant)>,
+    epochs: HashMap<(B256, u64), (EpochSnapshot, Instant)>,
+    lanes: HashMap<(B256, u64, u32), (u64, Instant)>,
+}
+
+/// What one `epochState` read tells this host.
+#[derive(Debug, Clone, Copy, Default)]
+struct EpochSnapshot {
+    /// Funding over the price per unit.
+    capacity: u64,
+    /// Units the escrow has already settled.
+    settled_units: u64,
 }
 
 impl RpcEscrowReader {
@@ -304,17 +315,81 @@ impl EscrowReader for RpcEscrowReader {
     }
 
     async fn capacity(&self, channel_id: B256, epoch: u64) -> Result<u64, EscrowError> {
-        let cached = self.cache().capacity.get(&(channel_id, epoch)).copied();
-        if let Some((capacity, read_at)) = cached
+        Ok(self.epoch_state(channel_id, epoch).await?.capacity)
+    }
+
+    async fn settled_units(&self, channel_id: B256, epoch: u64) -> Result<u64, EscrowError> {
+        Ok(self.epoch_state(channel_id, epoch).await?.settled_units)
+    }
+
+    async fn ready(&self) -> Result<(), EscrowError> {
+        self.check_ready().await
+    }
+
+    async fn lane_high_water(
+        &self,
+        channel_id: B256,
+        epoch: u64,
+        lane: u32,
+    ) -> Result<u64, EscrowError> {
+        let cached = self.cache().lanes.get(&(channel_id, epoch, lane)).copied();
+        if let Some((mark, read_at)) = cached
             && read_at.elapsed() < self.config.capacity_ttl
         {
-            return Ok(capacity);
+            return Ok(mark);
+        }
+
+        let call = laneHighWaterCall {
+            channelId: channel_id,
+            epoch,
+            lane,
+        };
+
+        let returned = match self.call(call.abi_encode()).await {
+            Ok(returned) => returned,
+            // A channel or epoch the contract will not talk about has no settled lanes.
+            Err(failure) if failure.is_channel_not_found() => return Ok(0),
+            Err(CallFailure::Rpc(error)) => return Err(error),
+            Err(CallFailure::Reverted(data)) => {
+                return Err(EscrowError::Unavailable(format!(
+                    "unexpected revert: 0x{}",
+                    alloy_primitives::hex::encode(data)
+                )));
+            }
+        };
+
+        let mark = laneHighWaterCall::abi_decode_returns(&returned)
+            .map_err(|error| EscrowError::Unavailable(format!("undecodable answer: {error}")))?;
+
+        self.cache()
+            .lanes
+            .insert((channel_id, epoch, lane), (mark, Instant::now()));
+
+        Ok(mark)
+    }
+}
+
+impl RpcEscrowReader {
+    /// Reads one epoch's funding and settlement, cached for the configured lifetime.
+    ///
+    /// Capacity and settled units come from the same `epochState` call, so reading them
+    /// separately would double the traffic for no extra information.
+    async fn epoch_state(
+        &self,
+        channel_id: B256,
+        epoch: u64,
+    ) -> Result<EpochSnapshot, EscrowError> {
+        let cached = self.cache().epochs.get(&(channel_id, epoch)).copied();
+        if let Some((snapshot, read_at)) = cached
+            && read_at.elapsed() < self.config.capacity_ttl
+        {
+            return Ok(snapshot);
         }
 
         // Warms the settings cache when it is cold, so the price below is one call, not two.
         // An unknown channel buys nothing, and its caller has already been refused.
         if self.channel(channel_id).await?.is_none() {
-            return Ok(0);
+            return Ok(EpochSnapshot::default());
         }
 
         let price = {
@@ -332,8 +407,8 @@ impl EscrowReader for RpcEscrowReader {
         };
         let returned = match self.call(call.abi_encode()).await {
             Ok(returned) => returned,
-            // An epoch the contract will not talk about has nothing funded in it.
-            Err(failure) if failure.is_channel_not_found() => return Ok(0),
+            // An epoch the contract will not talk about has nothing funded and nothing settled.
+            Err(failure) if failure.is_channel_not_found() => return Ok(EpochSnapshot::default()),
             Err(CallFailure::Rpc(error)) => return Err(error),
             Err(CallFailure::Reverted(data)) => {
                 return Err(EscrowError::Unavailable(format!(
@@ -353,14 +428,20 @@ impl EscrowReader for RpcEscrowReader {
             u64::try_from(decoded.funded / price).unwrap_or(u64::MAX)
         };
 
-        self.cache()
-            .capacity
-            .insert((channel_id, epoch), (capacity, Instant::now()));
+        let snapshot = EpochSnapshot {
+            capacity,
+            settled_units: decoded.settledUnits,
+        };
 
-        Ok(capacity)
+        self.cache()
+            .epochs
+            .insert((channel_id, epoch), (snapshot, Instant::now()));
+
+        Ok(snapshot)
     }
 
-    async fn ready(&self) -> Result<(), EscrowError> {
+    /// Checks the node is reachable, on the right chain, and serving the escrow.
+    async fn check_ready(&self) -> Result<(), EscrowError> {
         let answer = self
             .send("eth_chainId", serde_json::json!([]))
             .await

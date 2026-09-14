@@ -33,7 +33,7 @@ const OTHER_COLLECTOR: Address =
 const EPOCH_LENGTH: u64 = 3_600;
 
 async fn send(state: &AppState, request: Request<Body>) -> (StatusCode, Value) {
-    let response = routes::handler()
+    let response = routes::handler(state.payments().is_some())
         .with_state(state.clone())
         .oneshot(request)
         .await
@@ -609,4 +609,169 @@ async fn the_removed_payment_routes_are_gone() {
             "{method} {uri} should be gone, got {status}"
         );
     }
+}
+
+/// The restart-replay finding: a host that comes back with an empty store must not serve the
+/// epoch again against funding the chain has already seen spent.
+///
+/// Four units settled on lane 0, capacity six. Exactly two remain, on a lane this host can chain
+/// onto: lane 0 is held because it has no authorization for counter 4 to put in `previous`.
+#[tokio::test]
+async fn a_restarted_host_serves_only_what_the_chain_has_not_settled() {
+    let epoch = current_epoch();
+    let escrow = FakeEscrowReader::new()
+        .with_channel(CHANNEL, settings(spend_key(), COLLECTOR))
+        .with_capacity(CHANNEL, epoch, 6)
+        .with_settled(CHANNEL, epoch, &[4]);
+    let state = state_with_escrow(answering_enclave(), escrow);
+
+    let (status, body) = reserve(&state).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["lane"], 1,
+        "lane 0 is the chain's, not this host's to reissue"
+    );
+    assert_eq!(body["counter"], 1);
+    assert_eq!(
+        body["previous"],
+        Value::Null,
+        "a fresh lane has nothing before it"
+    );
+
+    // Two units of headroom, and no more.
+    for counter in 1..=2u64 {
+        let (status, _) = run_match(&state, Some(payment(epoch, 1, counter))).await;
+        assert_eq!(status, StatusCode::OK, "unit {counter} is still funded");
+
+        if counter == 1 {
+            let (status, _) = reserve(&state).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    let (status, body) = reserve(&state).await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "capacity_exhausted");
+    assert_eq!(
+        body["error"]["details"]["admitted_units"], 6,
+        "four settled on chain plus two served here"
+    );
+
+    // The proof lists only what this host can vouch for. The chain's own lanes are not its to
+    // show: it never saw those signatures.
+    let authorizations = body["error"]["details"]["authorizations"]
+        .as_array()
+        .expect("the refusal should carry authorizations");
+    assert_eq!(authorizations.len(), 1);
+    assert_eq!(authorizations[0]["lane"], 1);
+    assert_eq!(authorizations[0]["channel_nonce"], "0x10000000000000002");
+}
+
+/// A store that still remembers the epoch keeps its lanes, so an ordinary restart-free run is
+/// unaffected by the probe.
+#[tokio::test]
+async fn a_store_that_already_knows_a_lane_keeps_using_it() {
+    let epoch = current_epoch();
+    let state = state_with_escrow(answering_enclave(), escrow_with(10));
+
+    let (status, first) = reserve(&state).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["lane"], 0);
+
+    let (status, _) = run_match(&state, Some(payment(epoch, 0, 1))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, second) = reserve(&state).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["lane"], 0, "the lane this host opened stays its own");
+    assert_eq!(second["counter"], 2);
+    assert_eq!(second["previous"]["channel_nonce"], "0x1");
+}
+
+/// Switched off, a payment is not read, not verified and not spent. A body carrying one that
+/// would be refused in any other mode still relays, because nothing looks at it.
+#[tokio::test]
+async fn payments_off_ignores_a_payment_entirely() {
+    let state = common::state_without_payments(answering_enclave());
+
+    let unusable = json!({
+        "channel_id": OTHER_CHANNEL,
+        "epoch": 0,
+        "channel_nonce": ChannelNonce::new(0, 1),
+        "signature": FixedBytes::<65>::repeat_byte(0x11),
+    });
+
+    for payment in [None, Some(unusable)] {
+        let (status, body) = run_match(&state, payment).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["response_ciphertext"], STANDARD.encode([9u8; 48]));
+    }
+}
+
+/// The nonce route is not mounted when payments are off, so the path is absent rather than
+/// answering from a handler.
+#[tokio::test]
+async fn payments_off_does_not_mount_the_nonce_route() {
+    let state = common::state_without_payments(StubEnclaveClient::default());
+
+    let issued_at = now();
+    let body = json!({
+        "epoch": current_epoch(),
+        "issued_at": issued_at,
+        "signature": reservation_signature(current_epoch(), issued_at),
+    });
+
+    let (status, _) = reserve_body(&state, &body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A GET would answer 405 if the path were routed at all, so this pins absence rather than
+    // a handler that happens to refuse.
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/v1/channels/{CHANNEL}/nonces"))
+        .body(Body::empty())
+        .expect("request should be valid");
+
+    let (status, _) = send(&state, request).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Readiness follows the enclave alone when payments are off, so a broken escrow cannot take a
+/// rolled-back host out of rotation.
+#[tokio::test]
+async fn payments_off_keeps_readiness_independent_of_the_escrow() {
+    let state = common::state_without_payments(StubEnclaveClient::default());
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/ready")
+        .body(Body::empty())
+        .expect("request should be valid");
+
+    let (status, _) = send(&state, request).await;
+
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Optional is the middle setting: a payment that is present is spent, and one that is absent is
+/// still served.
+#[tokio::test]
+async fn payments_optional_meters_a_payment_and_serves_without_one() {
+    let state = state_with_escrow(answering_enclave(), escrow_with(10));
+    let epoch = current_epoch();
+
+    let (status, _) = run_match(&state, None).await;
+    assert_eq!(status, StatusCode::OK, "an unpaid match is still served");
+
+    reserve(&state).await;
+    let (status, _) = run_match(&state, Some(payment(epoch, 0, 1))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Spent once, so the same payment does not buy a second even in the permissive mode.
+    let (status, body) = run_match(&state, Some(payment(epoch, 0, 1))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "already_admitted");
 }

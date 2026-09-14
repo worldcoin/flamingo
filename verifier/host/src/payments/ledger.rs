@@ -171,6 +171,18 @@ pub enum LedgerError {
 struct Lane {
     latest: Option<PaymentAuthorization>,
     pending_until: Option<u64>,
+    /// Counter the escrow had already settled on this lane when this host first saw the epoch.
+    ///
+    /// Zero for a lane this host opened itself. Units below it are in the chain's own total, so
+    /// counting them again would refuse a channel that has paid for them.
+    on_chain_mark: u64,
+    /// A lane this host cannot issue on.
+    ///
+    /// The escrow has settled counters here that this host never saw, so it holds no
+    /// authorization for `counter - 1` and could not fill `previous`. A relying party would sign
+    /// an authorization the escrow can never settle. Sealed lanes are counted through the
+    /// chain's total instead, and new reservations start above them.
+    sealed: bool,
 }
 
 impl Lane {
@@ -184,9 +196,36 @@ impl Lane {
 
     /// Whether the lane may be handed to a new request.
     const fn is_free(&self, now: u64) -> bool {
+        if self.sealed {
+            return false;
+        }
+
         match self.pending_until {
             Some(until) => until < now,
             None => true,
+        }
+    }
+
+    /// Whether the lane is holding a reservation that has not expired.
+    ///
+    /// Distinct from "not free": a sealed lane is never free and never outstanding either,
+    /// because nobody is waiting on it.
+    const fn is_outstanding(&self, now: u64) -> bool {
+        match self.pending_until {
+            Some(until) => until >= now,
+            None => false,
+        }
+    }
+
+    /// Units this lane has spent that the chain's own total does not already include.
+    const fn unsettled_units(&self) -> u64 {
+        if self.sealed {
+            return 0;
+        }
+
+        match &self.latest {
+            Some(latest) => latest.counter.saturating_sub(self.on_chain_mark),
+            None => 0,
         }
     }
 }
@@ -209,24 +248,29 @@ impl EpochLedger {
     pub(crate) fn apply_reserve(
         &mut self,
         capacity: u64,
+        settled_units: u64,
         epoch: u64,
         now: u64,
     ) -> Result<ReserveOutcome, LedgerError> {
         // Spent is permanent; reserved is not. A caller told its own outstanding reservations
         // are in the way should come back, and one told the epoch is spent should not.
-        let spent = self.admitted_units();
+        let spent = self.used(settled_units);
         if spent >= capacity {
             return Err(LedgerError::CapacityExhausted(Box::new(
-                self.capacity_proof(epoch, capacity, None),
+                self.capacity_proof(epoch, capacity, settled_units, None),
             )));
         }
 
-        let outstanding = self.lanes.iter().filter(|lane| !lane.is_free(now)).count();
+        let outstanding = self
+            .lanes
+            .iter()
+            .filter(|lane| lane.is_outstanding(now))
+            .count();
         let committed = spent.saturating_add(outstanding.try_into().unwrap_or(u64::MAX));
 
         if committed >= capacity {
             return Err(LedgerError::CapacityReserved(Box::new(
-                self.capacity_proof(epoch, capacity, self.earliest_free(now)),
+                self.capacity_proof(epoch, capacity, settled_units, self.earliest_free(now)),
             )));
         }
 
@@ -274,6 +318,7 @@ impl EpochLedger {
         &mut self,
         settings: &ChannelSettings,
         capacity: u64,
+        settled_units: u64,
         request: &AdmitRequest,
         signer: Result<Address, eip712::SignatureError>,
         now: u64,
@@ -305,9 +350,9 @@ impl EpochLedger {
             return Err(LedgerError::InvalidSignature);
         }
 
-        if self.admitted_units() >= capacity {
+        if self.used(settled_units) >= capacity {
             return Err(LedgerError::CapacityExhausted(Box::new(
-                self.capacity_proof(request.epoch, capacity, None),
+                self.capacity_proof(request.epoch, capacity, settled_units, None),
             )));
         }
 
@@ -325,19 +370,45 @@ impl EpochLedger {
         Ok(())
     }
 
-    /// Units spent in this epoch. Counters are dense, so each lane has spent its latest counter.
-    fn admitted_units(&self) -> u64 {
-        self.lanes
-            .iter()
-            .filter_map(|lane| lane.latest)
-            .fold(0u64, |total, latest| total.saturating_add(latest.counter))
+    /// Units spent in this epoch, anchored to the chain.
+    ///
+    /// A host that restarts mid-epoch forgets what it admitted, so its own memory is a floor and
+    /// never a ceiling. The chain's total covers everything settled; memory adds only what this
+    /// host has served on top of each lane's settled mark, which is what has not been settled yet.
+    fn used(&self, settled_units: u64) -> u64 {
+        self.lanes.iter().fold(settled_units, |total, lane| {
+            total.saturating_add(lane.unsettled_units())
+        })
+    }
+
+    /// Records the lanes the escrow has already settled, so this host never issues on them.
+    ///
+    /// Called once, when an epoch is first seen with nothing stored for it. A lane with a
+    /// non-zero mark has counters this host cannot chain onto, so it is held rather than reused.
+    pub(crate) fn seal(&mut self, marks: &[u64]) {
+        if !self.lanes.is_empty() {
+            return;
+        }
+
+        self.lanes.extend(marks.iter().map(|mark| Lane {
+            latest: None,
+            pending_until: None,
+            on_chain_mark: *mark,
+            sealed: true,
+        }));
     }
 
     /// The evidence behind a capacity refusal.
-    fn capacity_proof(&self, epoch: u64, capacity: u64, retry_after: Option<u64>) -> CapacityProof {
+    fn capacity_proof(
+        &self,
+        epoch: u64,
+        capacity: u64,
+        settled_units: u64,
+        retry_after: Option<u64>,
+    ) -> CapacityProof {
         CapacityProof {
             epoch,
-            admitted_units: self.admitted_units(),
+            admitted_units: self.used(settled_units),
             capacity,
             retry_after,
             authorizations: self.lanes.iter().filter_map(|lane| lane.latest).collect(),
@@ -348,7 +419,7 @@ impl EpochLedger {
     fn earliest_free(&self, now: u64) -> Option<u64> {
         self.lanes
             .iter()
-            .filter(|lane| !lane.is_free(now))
+            .filter(|lane| lane.is_outstanding(now))
             .filter_map(|lane| lane.pending_until)
             .min()
     }
@@ -445,10 +516,10 @@ impl PaymentLedger {
             return Err(LedgerError::InvalidEpoch);
         }
 
-        let capacity = self.escrow.capacity(channel_id, epoch).await?;
+        let chain = self.chain_state(channel_id, epoch).await?;
 
-        self.mutate(channel_id, epoch, |ledger| {
-            ledger.apply_reserve(capacity, epoch, now)
+        self.mutate(channel_id, epoch, &chain, |ledger| {
+            ledger.apply_reserve(chain.capacity, chain.settled_units, epoch, now)
         })
         .await
     }
@@ -476,15 +547,50 @@ impl PaymentLedger {
             &request.signature,
         );
 
-        let capacity = self
-            .escrow
-            .capacity(request.channel_id, request.epoch)
-            .await?;
+        let chain = self.chain_state(request.channel_id, request.epoch).await?;
 
-        self.mutate(request.channel_id, request.epoch, |ledger| {
-            ledger.apply_admit(&settings, capacity, request, signer, now)
+        self.mutate(request.channel_id, request.epoch, &chain, |ledger| {
+            ledger.apply_admit(
+                &settings,
+                chain.capacity,
+                chain.settled_units,
+                request,
+                signer,
+                now,
+            )
         })
         .await
+    }
+
+    /// Reads what the escrow says about one epoch, including which lanes it has already settled.
+    ///
+    /// The lane probe walks upward until the first unsettled lane. A channel's lanes are dense,
+    /// so the first zero is the end of them.
+    async fn chain_state(&self, channel_id: B256, epoch: u64) -> Result<ChainState, LedgerError> {
+        let capacity = self.escrow.capacity(channel_id, epoch).await?;
+        let settled_units = self.escrow.settled_units(channel_id, epoch).await?;
+
+        let mut sealed_lanes = Vec::new();
+
+        // Nothing settled means nothing to seal, which is the ordinary case and costs no calls.
+        if settled_units > 0 {
+            for lane in 0..MAX_LANES_PER_EPOCH {
+                let lane = u32::try_from(lane).map_err(|_| LedgerError::TooManyPending)?;
+                let mark = self.escrow.lane_high_water(channel_id, epoch, lane).await?;
+
+                if mark == 0 {
+                    break;
+                }
+
+                sealed_lanes.push(mark);
+            }
+        }
+
+        Ok(ChainState {
+            capacity,
+            settled_units,
+            sealed_lanes,
+        })
     }
 
     /// Reads a channel's settings and checks this host accepts it.
@@ -516,12 +622,23 @@ impl PaymentLedger {
     ///
     /// `apply` runs again from a fresh read on every attempt, so it must not carry state between
     /// calls. A refusal is returned without writing, which keeps a rejected request off the store.
-    async fn mutate<T, F>(&self, channel_id: B256, epoch: u64, apply: F) -> Result<T, LedgerError>
+    async fn mutate<T, F>(
+        &self,
+        channel_id: B256,
+        epoch: u64,
+        chain: &ChainState,
+        apply: F,
+    ) -> Result<T, LedgerError>
     where
         F: Fn(&mut EpochLedger) -> Result<T, LedgerError>,
     {
         for attempt in 0..MAX_WRITE_ATTEMPTS {
             let (mut ledger, version) = self.store.load_epoch(channel_id, epoch).await?;
+
+            // An epoch this host has nothing stored for may still have lanes on chain, from a
+            // replica or from this host before it restarted. Seal them before anything is issued.
+            ledger.seal(&chain.sealed_lanes);
+
             let outcome = apply(&mut ledger)?;
 
             match self
@@ -553,6 +670,17 @@ impl PaymentLedger {
     }
 }
 
+/// What the escrow says about one epoch, read once per operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChainState {
+    /// Units the channel may spend in this epoch.
+    capacity: u64,
+    /// Units the escrow has already settled.
+    settled_units: u64,
+    /// High-water mark of each lane the escrow has settled, lowest lane first.
+    sealed_lanes: Vec<u64>,
+}
+
 /// Exponential backoff with full jitter, so replicas that collide do not collide again together.
 fn backoff(attempt: u32) -> Duration {
     let ceiling = BASE_BACKOFF.saturating_mul(1u32 << attempt.min(6));
@@ -574,9 +702,28 @@ mod tests {
     const SPEND_KEY: Address = address!("0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF");
     const OTHER_KEY: Address = address!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
     const EPOCH: u64 = 7;
-    const NOW: u64 = 1_700_000_000;
+    pub(super) const NOW: u64 = 1_700_000_000;
     /// One second past the deadline a reservation taken at [`NOW`] carries.
     const LATER: u64 = NOW + RESERVATION_LIFETIME_SECS + 1;
+
+    /// Admits `(lane, counter)` against a chain that has already settled `settled_units`.
+    pub(super) fn admit_at(
+        ledger: &mut EpochLedger,
+        capacity: u64,
+        settled_units: u64,
+        lane: u32,
+        counter: u64,
+        now: u64,
+    ) -> Result<(), LedgerError> {
+        ledger.apply_admit(
+            &settings(),
+            capacity,
+            settled_units,
+            &admit_request(lane, counter),
+            Ok(SPEND_KEY),
+            now,
+        )
+    }
 
     fn settings() -> ChannelSettings {
         ChannelSettings {
@@ -619,6 +766,7 @@ mod tests {
         ledger.apply_admit(
             &settings(),
             capacity,
+            0,
             &admit_request(lane, counter),
             Ok(SPEND_KEY),
             now,
@@ -630,7 +778,7 @@ mod tests {
         let mut ledger = EpochLedger::default();
 
         let outcome = ledger
-            .apply_reserve(10, EPOCH, NOW)
+            .apply_reserve(10, 0, EPOCH, NOW)
             .expect("the reservation should be granted");
 
         assert_eq!(outcome.lane, 0);
@@ -645,8 +793,8 @@ mod tests {
     fn a_reservation_taken_while_another_is_live_opens_a_new_lane() {
         let mut ledger = EpochLedger::default();
 
-        let first = ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
-        let second = ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        let first = ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
+        let second = ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
 
         assert_eq!((first.lane, first.counter), (0, 1));
         assert_eq!((second.lane, second.counter), (1, 1));
@@ -657,10 +805,10 @@ mod tests {
     fn an_expired_lane_is_handed_out_again_with_the_same_counter() {
         let mut ledger = EpochLedger::default();
 
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
 
-        let reissued = ledger.apply_reserve(10, EPOCH, LATER).expect("granted");
+        let reissued = ledger.apply_reserve(10, 0, EPOCH, LATER).expect("granted");
 
         assert_eq!(reissued.lane, 0, "the lowest expired lane goes first");
         assert_eq!(
@@ -674,10 +822,10 @@ mod tests {
     fn an_admitted_lane_is_reused_with_the_next_counter_and_carries_the_previous() {
         let mut ledger = EpochLedger::default();
 
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
         assert_eq!(admit(&mut ledger, 10, 0, 1, NOW), Ok(()));
 
-        let next = ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        let next = ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
 
         assert_eq!((next.lane, next.counter), (0, 2));
         assert_eq!(
@@ -693,7 +841,7 @@ mod tests {
     #[test]
     fn a_nonce_is_admitted_only_once() {
         let mut ledger = EpochLedger::default();
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
 
         assert_eq!(admit(&mut ledger, 10, 0, 1, NOW), Ok(()));
         assert_eq!(
@@ -705,7 +853,7 @@ mod tests {
     #[test]
     fn a_counter_that_is_not_the_lanes_next_is_refused() {
         let mut ledger = EpochLedger::default();
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
 
         assert_eq!(
             admit(&mut ledger, 10, 0, 9, NOW),
@@ -722,7 +870,7 @@ mod tests {
     #[test]
     fn a_lane_with_no_live_reservation_is_refused() {
         let mut ledger = EpochLedger::default();
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
 
         assert_eq!(
             admit(&mut ledger, 10, 0, 1, LATER),
@@ -740,16 +888,17 @@ mod tests {
     #[test]
     fn a_signature_from_another_key_is_refused() {
         let mut ledger = EpochLedger::default();
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
 
         assert_eq!(
-            ledger.apply_admit(&settings(), 10, &admit_request(0, 1), Ok(OTHER_KEY), NOW),
+            ledger.apply_admit(&settings(), 10, 0, &admit_request(0, 1), Ok(OTHER_KEY), NOW),
             Err(LedgerError::InvalidSignature)
         );
         assert_eq!(
             ledger.apply_admit(
                 &settings(),
                 10,
+                0,
                 &admit_request(0, 1),
                 Err(SignatureError::HighS),
                 NOW
@@ -764,16 +913,16 @@ mod tests {
         let mut ledger = EpochLedger::default();
 
         // Both lanes at once, because an admitted lane frees immediately and would be reused.
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
         assert_eq!(admit(&mut ledger, 10, 0, 1, NOW), Ok(()));
         assert_eq!(admit(&mut ledger, 10, 1, 1, NOW), Ok(()));
 
         // Lane 0 is free again, so it hands out its second counter.
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
         assert_eq!(admit(&mut ledger, 10, 0, 2, NOW), Ok(()));
 
-        ledger.apply_reserve(10, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(10, 0, EPOCH, NOW).expect("granted");
         let Err(LedgerError::CapacityExhausted(proof)) = admit(&mut ledger, 3, 0, 3, NOW) else {
             panic!("a fourth unit past a capacity of three should be refused");
         };
@@ -797,11 +946,12 @@ mod tests {
     fn capacity_held_by_reservations_is_refused_as_retryable() {
         let mut ledger = EpochLedger::default();
 
-        ledger.apply_reserve(2, EPOCH, NOW).expect("granted");
+        ledger.apply_reserve(2, 0, EPOCH, NOW).expect("granted");
         assert_eq!(admit(&mut ledger, 2, 0, 1, NOW), Ok(()));
-        let held = ledger.apply_reserve(2, EPOCH, NOW).expect("granted");
+        let held = ledger.apply_reserve(2, 0, EPOCH, NOW).expect("granted");
 
-        let Err(LedgerError::CapacityReserved(proof)) = ledger.apply_reserve(2, EPOCH, NOW) else {
+        let Err(LedgerError::CapacityReserved(proof)) = ledger.apply_reserve(2, 0, EPOCH, NOW)
+        else {
             panic!("one spent plus one held fills a capacity of two, but waiting frees it");
         };
 
@@ -817,7 +967,7 @@ mod tests {
         assert_eq!(admit(&mut ledger, 2, held.lane, held.counter, NOW), Ok(()));
         assert!(
             matches!(
-                ledger.apply_reserve(2, EPOCH, NOW),
+                ledger.apply_reserve(2, 0, EPOCH, NOW),
                 Err(LedgerError::CapacityExhausted(_))
             ),
             "two spent units fill a capacity of two for good"
@@ -830,16 +980,91 @@ mod tests {
 
         for _ in 0..MAX_LANES_PER_EPOCH {
             ledger
-                .apply_reserve(u64::MAX, EPOCH, NOW)
+                .apply_reserve(u64::MAX, 0, EPOCH, NOW)
                 .expect("lanes under the ceiling should be granted");
         }
 
         assert_eq!(
-            ledger.apply_reserve(u64::MAX, EPOCH, NOW),
+            ledger.apply_reserve(u64::MAX, 0, EPOCH, NOW),
             Err(LedgerError::TooManyPending)
         );
 
         // Expired lanes are reusable, so they do not hold the epoch at its ceiling.
-        assert!(ledger.apply_reserve(u64::MAX, EPOCH, LATER).is_ok());
+        assert!(ledger.apply_reserve(u64::MAX, 0, EPOCH, LATER).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::{EpochLedger, LedgerError};
+    use crate::payments::ledger::tests::{NOW, admit_at};
+
+    /// Memory is a floor, never a ceiling: what the chain has settled counts even when this host
+    /// has forgotten it, which is what a restart looks like.
+    #[test]
+    fn a_forgotten_epoch_still_counts_what_the_chain_settled() {
+        let mut ledger = EpochLedger::default();
+        ledger.seal(&[4]);
+
+        // Capacity six, four already settled: two left, and the first refusal is at the third.
+        ledger
+            .apply_reserve(6, 4, 7, NOW)
+            .expect("two units remain");
+        assert_eq!(admit_at(&mut ledger, 6, 4, 1, 1, NOW), Ok(()));
+        ledger
+            .apply_reserve(6, 4, 7, NOW)
+            .expect("one unit remains");
+        assert_eq!(admit_at(&mut ledger, 6, 4, 1, 2, NOW), Ok(()));
+
+        let Err(LedgerError::CapacityExhausted(proof)) = ledger.apply_reserve(6, 4, 7, NOW) else {
+            panic!("four settled plus two served fills a capacity of six");
+        };
+
+        assert_eq!(proof.admitted_units, 6);
+        assert_eq!(
+            proof.authorizations.len(),
+            1,
+            "the sealed lane's signatures were never seen here, so they are not shown"
+        );
+    }
+
+    /// A sealed lane is held, not reused: this host has no authorization for its predecessor and
+    /// could not fill `previous`, so anything it issued there would be unsettleable.
+    #[test]
+    fn a_sealed_lane_is_never_handed_out() {
+        let mut ledger = EpochLedger::default();
+        ledger.seal(&[4, 2]);
+
+        let outcome = ledger.apply_reserve(100, 6, 7, NOW).expect("granted");
+
+        assert_eq!(outcome.lane, 2, "both settled lanes are held");
+        assert_eq!(outcome.counter, 1);
+        assert_eq!(outcome.previous, None);
+    }
+
+    /// Sealing runs once. A store that still holds the epoch keeps the lanes it already has.
+    #[test]
+    fn sealing_a_known_epoch_changes_nothing() {
+        let mut ledger = EpochLedger::default();
+        let first = ledger.apply_reserve(100, 0, 7, NOW).expect("granted");
+        assert_eq!(first.lane, 0);
+
+        ledger.seal(&[4]);
+
+        let second = ledger.apply_reserve(100, 0, 7, NOW).expect("granted");
+        assert_eq!(second.lane, 1, "the probe must not renumber a live epoch");
+    }
+
+    /// The chain's own units are not counted twice against a lane it has settled.
+    #[test]
+    fn a_settled_lane_does_not_count_against_itself() {
+        let mut ledger = EpochLedger::default();
+        ledger.seal(&[4]);
+
+        // Nothing served here yet, so the only used units are the chain's four.
+        assert!(
+            ledger.apply_reserve(5, 4, 7, NOW).is_ok(),
+            "one unit of headroom above the settled four"
+        );
     }
 }

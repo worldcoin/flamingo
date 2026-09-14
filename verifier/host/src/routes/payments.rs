@@ -41,8 +41,19 @@ pub async fn reserve(
         signature: body.signature,
     };
 
-    let outcome = state
-        .payments()
+    // The route is not mounted when payments are off, so reaching it without a gate is a wiring
+    // bug rather than a caller's mistake.
+    let Some(gate) = state.payments() else {
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "This verifier does not issue channel nonces",
+            false,
+        ));
+    };
+
+    let outcome = gate
+        .ledger()
         .reserve(&request, now())
         .await
         .map_err(|error| refused(&error, channel_id, body.epoch, None))?;
@@ -77,8 +88,14 @@ pub async fn reserve(
 ///
 /// Returns [`AppError`] when a payment is required and absent, or when the ledger refuses it.
 pub(super) async fn admit(state: &AppState, payment: Option<&Payment>) -> Result<(), AppError> {
+    // Switched off: a payment is not read, not verified and not spent, and a match relays as it
+    // did before metering existed. This is the rollback position.
+    let Some(gate) = state.payments() else {
+        return Ok(());
+    };
+
     let Some(payment) = payment else {
-        if state.payments().config().payment_required() {
+        if gate.required() {
             return Err(AppError::new(
                 StatusCode::PAYMENT_REQUIRED,
                 "payment_required",
@@ -97,8 +114,7 @@ pub(super) async fn admit(state: &AppState, payment: Option<&Payment>) -> Result
         signature: payment.signature,
     };
 
-    state
-        .payments()
+    gate.ledger()
         .admit(&request, now())
         .await
         .map_err(|error| {
