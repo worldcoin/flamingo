@@ -213,9 +213,14 @@ The host runs on a laptop with a mock enclave in place of Nitro. The mock answer
 `sha256` of the sealed body, so a harness can assert a round trip, and it attests nothing. The
 `mock-enclave` feature is off by default and a release build refuses to compile it.
 
+Metering is selected with the one command-line flag this host takes, `--payments`, which accepts
+`off`, `optional` or `required` and falls back to the `PAYMENTS` environment variable. It
+defaults to `off`, where no `FEE_*` setting is read, the nonce route is not mounted and every
+match is served unbilled. That is the rollback position; a harness passes `PAYMENTS=required`.
+
 ```bash
 ENCLAVE_MODE=mock \
-PAYMENT_REQUIRED=true \
+PAYMENTS=required \
 FEE_ESCROW_RPC_URL=http://127.0.0.1:8545 \
 FEE_ESCROW_CHAIN_ID=31337 \
 FEE_ESCROW_ADDRESS=<proxy> \
@@ -227,8 +232,8 @@ cargo run -p flamingo-verifier-host --features mock-enclave
 ```
 
 `ENCLAVE_MODE=mock` without the feature fails at startup rather than falling back to the real
-client. The three fee variables are required in every mode and are all checked against the
-channel the escrow reports: a channel must name this collector, pay in this token, and price a
+client. The three fee variables are required whenever `--payments` is not `off`, and are all
+checked against the channel the escrow reports: a channel must name this collector, pay in this token, and price a
 verification at or above this floor. Naming the collector alone is not enough, because whoever
 opened the channel chose its token and price.
 
@@ -266,8 +271,9 @@ curl -sS -X POST http://127.0.0.1:8000/v1/matches \
 ```
 
 The payment is a bearer token for one verification. Replaying it answers `409 already_admitted`
-rather than the earlier result, which is not cached. Omitting `payment` while `PAYMENT_REQUIRED`
-is true answers `402 payment_required`; with it false the match relays as it always did.
+rather than the earlier result, which is not cached. Omitting `payment` under
+`--payments required` answers `402 payment_required`; under `optional` the match relays as it
+always did, and under `off` the field is not read at all.
 
 Two refusals carry evidence in `error.details`. `409 capacity_exhausted` means the epoch's units
 are spent and lists the highest authorization per lane, so a relying party can check the
