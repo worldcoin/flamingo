@@ -16,9 +16,14 @@ nix build --no-update-lock-file .#privatePackages.x86_64-linux.verifier-worker-r
 ```
 
 The private Nix build embeds both ONNX models and the YAML graphs in the worker.
-Its runtime output contains five regular files: the worker, the ELF loader, and
-three shared libraries. No model or configuration files are needed at runtime.
-Only ELF runtime dependencies are packaged, rather than entire Nix packages.
+Its runtime output contains only `bin/verifier-worker`, a statically linked
+x86_64 Linux executable. It needs no external loader, shared libraries, model
+files, or inference configuration. Packaging fails if the executable acquires an
+external ELF interpreter or shared-library dependency.
+
+Nix is still the build tool. Updating embedded models, inference configuration,
+or linked libraries requires rebuilding and signing the worker. Publisher trust
+and sandbox budgets remain separate in the measured enclave configuration.
 
 Embedding currently uses `nix/worker-embedded-models.patch` against the pinned
 private Face Engine dependency. Plain Cargo builds do not apply that patch and

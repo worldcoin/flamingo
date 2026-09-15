@@ -3,26 +3,17 @@
   worker,
 }:
 pkgs.runCommand "verifier-worker-runtime-${worker.version}"
-  { nativeBuildInputs = [ pkgs.pax-utils ]; }
+  { nativeBuildInputs = [ pkgs.binutils ]; }
   ''
-    mkdir -p "$out/bin"
-    cp ${worker}/bin/verifier-worker "$out/bin/verifier-worker"
+    # Fail the build if a toolchain/dependency change reintroduces runtime libraries.
+    readelf -lW ${worker}/bin/verifier-worker > program-headers
+    readelf -dW ${worker}/bin/verifier-worker > dynamic-section
+    if grep -q INTERP program-headers || grep -q '(NEEDED)' dynamic-section; then
+      echo "worker must not require an ELF interpreter or shared libraries" >&2
+      exit 1
+    fi
 
-    # Resolve ELF dependencies without executing the worker. Copy only the
-    # interpreter and shared libraries, retaining their absolute Nix paths.
-    lddtree -l ${worker}/bin/verifier-worker > runtime-paths
-    while IFS= read -r path; do
-      if [ "$path" = "${worker}/bin/verifier-worker" ]; then
-        continue
-      fi
-      case "$path" in
-        /nix/store/*) ;;
-        *) echo "unexpected runtime dependency: $path" >&2; exit 1 ;;
-      esac
-      mkdir -p "$out$(dirname "$path")"
-      cp -L "$path" "$out$path"
-    done < runtime-paths
-
+    install -Dm555 ${worker}/bin/verifier-worker "$out/bin/verifier-worker"
     # Deployment must additionally ensure root ownership on single-user Nix hosts.
     chmod -R a-w "$out"
   ''

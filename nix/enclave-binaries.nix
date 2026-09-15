@@ -125,6 +125,11 @@ let
       }
       // lib.optionalAttrs privateWorker {
         WORKER_MODEL_DIR = "${workerModels}/models";
+        # An explicit target keeps static-link flags off host build scripts/proc macros.
+        CARGO_BUILD_TARGET = "x86_64-unknown-linux-gnu";
+        # Keep static glibc target-only: adding it to buildInputs breaks host helpers.
+        RUSTFLAGS = commonArgs.RUSTFLAGS
+          + " -C target-feature=+crt-static -L native=${pkgs.glibc.static}/lib";
         # All Cargo invocations, including Crane's unqualified install-time metadata,
         # must use the private workspace. Keep the surrounding source for sibling deps.
         postUnpack = ''
