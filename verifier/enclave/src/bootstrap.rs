@@ -3,6 +3,9 @@
 use anyhow::{Context, bail};
 pub use flamingo_verifier_worker_artifact::BootstrapConfig as Config;
 
+/// Nitro uses CID 3 for the parent EC2 instance.
+const NITRO_PARENT_CID: u32 = 3;
+
 /// Owns the verified runtime and the unacknowledged startup transfer.
 pub struct BootWorker {
     /// All runtime bytes have been verified against the measured publisher key set.
@@ -79,7 +82,7 @@ pub fn receive() -> anyhow::Result<BootWorker> {
         }
     };
     drop(listener);
-    if peer.cid() != libc::VMADDR_CID_HOST {
+    if peer.cid() != NITRO_PARENT_CID {
         bail!("worker provisioner must be the parent host");
     }
     let timeout = Some(Duration::from_secs(config.provisioning_io_timeout_seconds));
