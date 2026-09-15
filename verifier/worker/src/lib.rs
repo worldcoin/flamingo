@@ -2,7 +2,7 @@
 
 mod model;
 
-use std::{os::unix::net::UnixStream, path::Path};
+use std::os::unix::net::UnixStream;
 
 use flamingo_verifier_worker_protocol::WorkerResult;
 use flamingo_verifier_worker_rpc::{WorkerServerConfig, WorkerServerError, serve_worker};
@@ -15,8 +15,7 @@ pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_REQUEST_BYTES: usize = 3 * MAX_IMAGE_BYTES + 1024;
 /// Serves sequential comparisons, loading the two models only on the first valid request.
 /// The caller must terminate the process on error; there is no reinitialization or retry.
-/// `model_dir` is trusted local boot configuration, never an RPC field.
-pub fn run_worker(stream: UnixStream, model_dir: &Path) -> Result<(), WorkerServerError> {
+pub fn run_worker(stream: UnixStream) -> Result<(), WorkerServerError> {
     let mut engine = None;
     serve_worker(
         stream,
@@ -26,7 +25,7 @@ pub fn run_worker(stream: UnixStream, model_dir: &Path) -> Result<(), WorkerServ
         },
         |request| {
             if engine.is_none() {
-                engine = Some(FaceEngine::load(model_dir)?);
+                engine = Some(FaceEngine::load()?);
             }
             match engine.as_ref().expect("model was initialized").compare(
                 &request.credential_image,

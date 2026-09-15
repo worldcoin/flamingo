@@ -11,12 +11,21 @@ nix build --no-update-lock-file .#verifier-oci .#verifier-eif .#worker-bundle
 The private adapter remains a separate workspace until its repository migration:
 
 ```sh
-CARGO_TARGET_DIR=target cargo test --locked --manifest-path verifier/worker/Cargo.toml
 bash scripts/fetch-face-models.sh
 nix build --no-update-lock-file .#privatePackages.x86_64-linux.verifier-worker-runtime
 ```
 
-Stage the worker, models and approved library closure as regular files. Then:
+The private Nix build embeds both ONNX models and the YAML graphs in the worker.
+Its runtime output contains five regular files: the worker, the ELF loader, and
+three shared libraries. No model or configuration files are needed at runtime.
+Only ELF runtime dependencies are packaged, rather than entire Nix packages.
+
+Embedding currently uses `nix/worker-embedded-models.patch` against the pinned
+private Face Engine dependency. Plain Cargo builds do not apply that patch and
+are not equivalent to the embedded-model Nix build. Move this support upstream
+before relying on plain Cargo for real-model tests.
+
+Use the runtime output as `ARTIFACT_ROOT`. Then:
 
 ```sh
 worker-bundle manifest RELEASE_ID ARTIFACT_ROOT > manifest.json
@@ -74,8 +83,8 @@ it does not build or qualify the private model runtime. Before release:
 - Stall provisioning and verify that the supervisor times out, removes the old
   enclave and provisioner, and can start a fresh attempt.
 
-The ignored `verifier/worker/tests/model.rs` test needs `WORKER_MODEL_DIR` and
-`WORKER_FACE_FIXTURE`. The `worker-process` example `qualify-worker` takes
+The ignored `verifier/worker/tests/model.rs` test needs the patched embedded-model
+dependency and `WORKER_FACE_FIXTURE`. The `worker-process` example `qualify-worker` takes
 `RUNTIME_ROOT ADDRESS_SPACE_BYTES MAX_THREADS FACE_FIXTURE`; run it as root under
 `timeout --kill-after=5s 150s unshare --fork --pid --mount-proc --kill-child --`.
 

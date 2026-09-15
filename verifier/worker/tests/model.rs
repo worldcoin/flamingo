@@ -1,6 +1,6 @@
 //! Opt-in real-model test; use only an approved non-production face fixture.
 
-use std::{fs::File, io::Read, os::unix::net::UnixStream, path::PathBuf, thread};
+use std::{fs::File, io::Read, os::unix::net::UnixStream, thread};
 
 use flamingo_verifier_worker::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, run_worker};
 use flamingo_verifier_worker_protocol::CompareRequest;
@@ -8,10 +8,8 @@ use flamingo_verifier_worker_rpc::{WorkerClient, WorkerClientConfig, WorkerClien
 
 /// Covers cold inference, expected rejection and successful reuse with the actual ONNX models.
 #[test]
-#[ignore = "requires WORKER_MODEL_DIR and WORKER_FACE_FIXTURE; not sandbox qualification"]
+#[ignore = "requires embedded-model dependency and WORKER_FACE_FIXTURE; not sandbox qualification"]
 fn real_model_roundtrip() {
-    let model_dir =
-        PathBuf::from(std::env::var_os("WORKER_MODEL_DIR").expect("set WORKER_MODEL_DIR"));
     let fixture = std::env::var_os("WORKER_FACE_FIXTURE").expect("set WORKER_FACE_FIXTURE");
     let mut bytes = Vec::new();
     File::open(fixture)
@@ -26,7 +24,7 @@ fn real_model_roundtrip() {
         challenge_image: bytes,
     };
     let (broker, worker) = UnixStream::pair().unwrap();
-    let server = thread::spawn(move || run_worker(worker, &model_dir));
+    let server = thread::spawn(move || run_worker(worker));
     let mut client = WorkerClient::new(
         broker,
         WorkerClientConfig {

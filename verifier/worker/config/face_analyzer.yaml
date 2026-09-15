@@ -4,8 +4,8 @@ graph:
     node_type: RGBNet
     dependencies: ["input"]
     args:
-      # Packaged at this fixed location in the prototype enclave image.
-      model_path: /models/rgbnet.onnx
+      # Use the model bytes embedded in the worker executable.
+      model_path: null
       confidence_threshold: 0.8
       iou_threshold: 0.3
 

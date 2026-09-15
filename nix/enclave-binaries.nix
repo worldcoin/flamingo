@@ -2,6 +2,7 @@
   root,
   pkgs,
   crane,
+  workerModels,
 }:
 let
   lib = pkgs.lib;
@@ -68,10 +69,11 @@ let
       if
         lib.any (package: lib.hasInfix "worldcoin/biometric-engines" (package.source or "")) packages
       then
-        pkgs.runCommandLocal "biometric-engines-checkout-with-assets" { } ''
+        pkgs.runCommandLocal "biometric-engines-checkout-with-assets" { nativeBuildInputs = [ pkgs.patch ]; } ''
           cp -R --no-preserve=mode,ownership ${drv} $out
           chmod -R u+w $out
           cp -R ${biometricEngines}/assets $out/assets
+          patch -d "$out" -p1 < ${root + "/nix/worker-embedded-models.patch"}
         ''
       else
         drv;
@@ -122,6 +124,7 @@ let
         cargoExtraArgs = "--locked --bin ${pname}";
       }
       // lib.optionalAttrs privateWorker {
+        WORKER_MODEL_DIR = "${workerModels}/models";
         # All Cargo invocations, including Crane's unqualified install-time metadata,
         # must use the private workspace. Keep the surrounding source for sibling deps.
         postUnpack = ''

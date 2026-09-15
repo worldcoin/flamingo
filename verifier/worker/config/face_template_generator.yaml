@@ -4,7 +4,7 @@ graph:
     node_type: GhostFaceNet
     dependencies: ["input"]
     args:
-      # Packaged at this fixed location in the prototype enclave image.
-      model_path: /models/face_embedding_generator.onnx
+      # Use the model bytes embedded in the worker executable.
+      model_path: null
       # Match Face Engine's default by averaging embeddings for the image and its horizontal flip.
       average_with_flipped: true

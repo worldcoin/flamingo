@@ -1,6 +1,6 @@
 //! Fixed-entrypoint worker. The broker supplies a connected Unix stream on FD 3.
 
-use std::{io, os::fd::FromRawFd, os::unix::net::UnixStream, path::Path, process::ExitCode};
+use std::{io, os::fd::FromRawFd, os::unix::net::UnixStream, process::ExitCode};
 
 /// Suppresses potentially sensitive panic payloads and exits on every terminal failure.
 fn main() -> ExitCode {
@@ -12,7 +12,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match flamingo_verifier_worker::run_worker(stream, Path::new("/models")) {
+    match flamingo_verifier_worker::run_worker(stream) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Display omits third-party model errors and biometric data.

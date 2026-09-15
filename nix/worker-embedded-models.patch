@@ -1,0 +1,26 @@
+--- a/face-engine-2.16.0/src/utils/deep_learning.rs
++++ b/face-engine-2.16.0/src/utils/deep_learning.rs
+@@ -255,13 +255,21 @@
+     #[cfg(not(feature = "assets"))]
+     {
+         match model_type {
+-            ModelType::Detection => load_model_from_path(DEFAULT_DETECTION_MODEL_PATH),
++            ModelType::Detection => Ok(Box::new(
++                deep_learning_backends::onnx::OnnxBackend::from_bytes(include_bytes!(
++                    concat!(env!("WORKER_MODEL_DIR"), "/rgbnet.onnx")
++                ))?,
++            )),
+             ModelType::HeadPose => load_model_from_path(DEFAULT_HEAD_POSE_MODEL_PATH),
+             ModelType::Fas => load_model_from_path(DEFAULT_FAS_MODEL_PATH),
+             ModelType::Occlusion => load_model_from_path(DEFAULT_OCCLUSION_MODEL_PATH),
+             ModelType::Quality => load_model_from_path(DEFAULT_QUALITY_MODEL_PATH),
+             ModelType::AGEProperties => load_model_from_path(DEFAULT_AGE_MODEL_PATH),
+-            ModelType::Embedding => load_model_from_path(DEFAULT_EMBEDDING_MODEL_PATH),
++            ModelType::Embedding => Ok(Box::new(
++                deep_learning_backends::onnx::OnnxBackend::from_bytes(include_bytes!(
++                    concat!(env!("WORKER_MODEL_DIR"), "/face_embedding_generator.onnx")
++                ))?,
++            )),
+             ModelType::MeshLandmarks => load_model_from_path(DEFAULT_MESHLANDMARKS_MODEL_PATH),
+             ModelType::MeshExpressions => load_model_from_path(DEFAULT_MESHEXPRESSIONS_MODEL_PATH),
+             ModelType::ExpressionNeutrality => {

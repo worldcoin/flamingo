@@ -1,21 +1,28 @@
 {
   pkgs,
   worker,
-  models,
 }:
-let
-  # Only the executable's runtime references, never the build closure or host store.
-  closure = pkgs.closureInfo { rootPaths = [ worker ]; };
-in
-pkgs.runCommand "verifier-worker-runtime-${worker.version}" { } ''
-  mkdir -p "$out/bin" "$out/nix/store" "$out/models"
-  cp ${worker}/bin/verifier-worker "$out/bin/verifier-worker"
-  cp ${models}/models/*.onnx "$out/models/"
-  while IFS= read -r path; do
-    if [ "$path" != "${worker}" ]; then
-      cp -aL "$path" "$out/nix/store/"
-    fi
-  done < ${closure}/store-paths
-  # Deployment must additionally ensure root ownership, including on single-user Nix hosts.
-  chmod -R a-w "$out"
-''
+pkgs.runCommand "verifier-worker-runtime-${worker.version}"
+  { nativeBuildInputs = [ pkgs.pax-utils ]; }
+  ''
+    mkdir -p "$out/bin"
+    cp ${worker}/bin/verifier-worker "$out/bin/verifier-worker"
+
+    # Resolve ELF dependencies without executing the worker. Copy only the
+    # interpreter and shared libraries, retaining their absolute Nix paths.
+    lddtree -l ${worker}/bin/verifier-worker > runtime-paths
+    while IFS= read -r path; do
+      if [ "$path" = "${worker}/bin/verifier-worker" ]; then
+        continue
+      fi
+      case "$path" in
+        /nix/store/*) ;;
+        *) echo "unexpected runtime dependency: $path" >&2; exit 1 ;;
+      esac
+      mkdir -p "$out$(dirname "$path")"
+      cp -L "$path" "$out$path"
+    done < runtime-paths
+
+    # Deployment must additionally ensure root ownership on single-user Nix hosts.
+    chmod -R a-w "$out"
+  ''

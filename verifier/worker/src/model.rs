@@ -1,10 +1,10 @@
-use std::{io::Cursor, path::Path, sync::Arc};
+use std::{io::Cursor, sync::Arc};
 
 use face_engine::{
     components::{
         captured_image_analyzer::CapturedImageAnalyzer, template_generator::TemplateGenerator,
     },
-    io::{ml_model_files::MlModelFiles, rgb_image::RgbImage},
+    io::rgb_image::RgbImage,
     matchers::cosine_similarity::CosineSimilarity,
     nodes::{subject_extraction::SubjectFace, template_generation::EmbeddingVector},
 };
@@ -13,7 +13,7 @@ use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 use crate::MAX_IMAGE_BYTES;
 
-/// Embedded graph, with model files supplied by the trusted runtime bundle.
+/// Embedded graph selecting the private executable's embedded model defaults.
 const ANALYZER_CONFIG: &str = include_str!("../config/face_analyzer.yaml");
 /// Embedding generation only; thresholds and authentication belong to the broker.
 const TEMPLATE_CONFIG: &str = include_str!("../config/face_template_generator.yaml");
@@ -55,36 +55,12 @@ pub struct FaceEngine {
 }
 
 impl FaceEngine {
-    /// Loads models from a trusted immutable directory; never downloads or searches for them.
-    pub fn load(model_dir: &Path) -> Result<Self, ComparisonError> {
-        let paths = MlModelFiles {
-            rgbnet: Some(
-                model_dir
-                    .join("rgbnet.onnx")
-                    .to_str()
-                    .ok_or(ComparisonError::Initialization)?
-                    .to_owned(),
-            ),
-            face_embedding_generator: Some(
-                model_dir
-                    .join("face_embedding_generator.onnx")
-                    .to_str()
-                    .ok_or(ComparisonError::Initialization)?
-                    .to_owned(),
-            ),
-            ..Default::default()
-        };
-        let analyzer_config = paths
-            .apply_to_yaml(ANALYZER_CONFIG)
-            .map_err(|_| ComparisonError::Initialization)?;
-        let template_config = paths
-            .apply_to_yaml(TEMPLATE_CONFIG)
-            .map_err(|_| ComparisonError::Initialization)?;
-
+    /// Loads the two model graphs embedded in the private executable.
+    pub fn load() -> Result<Self, ComparisonError> {
         Ok(Self {
-            analyzer: CapturedImageAnalyzer::new(&analyzer_config)
+            analyzer: CapturedImageAnalyzer::new(ANALYZER_CONFIG)
                 .map_err(|_| ComparisonError::Initialization)?,
-            template_generator: TemplateGenerator::new(&template_config)
+            template_generator: TemplateGenerator::new(TEMPLATE_CONFIG)
                 .map_err(|_| ComparisonError::Initialization)?,
             matcher: CosineSimilarity::default(),
         })
