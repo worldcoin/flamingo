@@ -88,22 +88,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}
-      - id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
-          owner: worldcoin
-          repositories: biometric-engines
-      - env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          git config --global credential."https://github.com".helper \
-            '!f() { echo username=x-access-token; echo "password=${GH_APP_TOKEN}"; }; f'
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
-          HUGGING_FACE_TOKEN: ${{ secrets.HUGGING_FACE_TOKEN }}
+      - name: Validate measured worker policy and build enclave
         run: scripts/build-enclaves.sh --workload "$WORKLOAD" target/release
       - name: Package OCI layout
         run: |
@@ -115,19 +101,19 @@ jobs:
         env:
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
-          face_models='{}'
+          worker_bootstrap='null'
           if [[ "$WORKLOAD" == verifier ]]; then
-            face_models=$(nix eval --json --no-update-lock-file .#faceModels | jq 'map_values({url, hash})')
+            worker_bootstrap=$(jq -c . config/worker-bootstrap.json)
           fi
           jq -n \
             --arg workload "$WORKLOAD" --arg version "$VERSION" --arg gitSha "$RELEASE_SHA" \
             --arg eifSha256 "$(sha256sum "target/release/$WORKLOAD-enclave.eif" | cut -d' ' -f1)" \
             --arg ociArchiveSha256 "$(sha256sum "target/release/$WORKLOAD-oci.tar.gz" | cut -d' ' -f1)" \
             --argjson measurements "$(cat "target/release/$WORKLOAD-pcr.json")" \
-            --argjson faceModels "$face_models" \
+            --argjson workerBootstrap "$worker_bootstrap" \
             '{workload: $workload, version: $version, gitSha: $gitSha,
               artifacts: {eifSha256: $eifSha256, ociArchiveSha256: $ociArchiveSha256},
-              measurements: $measurements, faceModels: $faceModels}' \
+              measurements: $measurements, workerBootstrap: $workerBootstrap}' \
             > target/release/manifest.json
       - id: outputs
         run: |
