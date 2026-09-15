@@ -19,8 +19,10 @@ pub struct BootstrapConfig {
     pub address_space_bytes: u64,
     /// Reserved worker UID's process/thread ceiling.
     pub max_threads: u32,
-    /// Whole startup transfer budget, including waiting for the provisioner and acknowledgement.
-    pub bootstrap_timeout_seconds: u64,
+    /// Timeout for each blocking read/write on the accepted provisioning socket (1..=900 seconds).
+    /// Configure both directions before receiving; progress can extend the total transfer.
+    /// The bootstrap supervisor separately bounds total startup and owns enclave cleanup.
+    pub provisioning_io_timeout_seconds: u64,
 }
 
 impl BootstrapConfig {
@@ -34,7 +36,7 @@ impl BootstrapConfig {
             || !(1..=MAX_BUNDLE_BYTES).contains(&self.max_bundle_bytes)
             || !(1..=i64::MAX as u64).contains(&self.address_space_bytes)
             || !(1..=256).contains(&self.max_threads)
-            || !(1..=900).contains(&self.bootstrap_timeout_seconds)
+            || !(1..=900).contains(&self.provisioning_io_timeout_seconds)
         {
             return Err(Error::InvalidConfig);
         }
@@ -75,7 +77,7 @@ mod tests {
     /// Public CI images build without trusted keys, but cannot provision a worker.
     #[test]
     fn unconfigured_release_cannot_boot() {
-        let config: Config = serde_json::from_str(r#"{"publisher_keys":[],"max_bundle_bytes":0,"address_space_bytes":0,"max_threads":0,"bootstrap_timeout_seconds":0}"#).unwrap();
+        let config: Config = serde_json::from_str(r#"{"publisher_keys":[],"max_bundle_bytes":0,"address_space_bytes":0,"max_threads":0,"provisioning_io_timeout_seconds":0}"#).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -89,7 +91,7 @@ mod tests {
             "max_bundle_bytes": 1024,
             "address_space_bytes": 1024,
             "max_threads": 1,
-            "bootstrap_timeout_seconds": 1
+            "provisioning_io_timeout_seconds": 1
         });
         let config: Config = serde_json::from_value(valid.clone()).unwrap();
         assert_eq!(config.validate().unwrap().len(), 1);
@@ -104,8 +106,8 @@ mod tests {
             ("address_space_bytes", serde_json::json!(u64::MAX)),
             ("max_threads", serde_json::json!(0)),
             ("max_threads", serde_json::json!(257)),
-            ("bootstrap_timeout_seconds", serde_json::json!(0)),
-            ("bootstrap_timeout_seconds", serde_json::json!(901)),
+            ("provisioning_io_timeout_seconds", serde_json::json!(0)),
+            ("provisioning_io_timeout_seconds", serde_json::json!(901)),
         ] {
             let mut invalid = valid.clone();
             invalid[field] = value;

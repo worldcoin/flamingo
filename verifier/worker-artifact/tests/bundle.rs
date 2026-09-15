@@ -1,6 +1,11 @@
 //! Signed byte fixtures only; these are not runnable workers or model substitutes.
 
-use std::{fs, io::Cursor, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    io::{Cursor, ErrorKind, Write},
+    os::unix::{fs::PermissionsExt, net::UnixStream},
+    time::Duration,
+};
 
 use flamingo_verifier_worker_artifact::{
     Artifact, Error, MAX_BUNDLE_BYTES, Manifest, Role, WORKER_PATH, package, receive,
@@ -244,6 +249,69 @@ fn incomplete_or_tampered_bundles_are_cleaned_up() {
         Err(Error::TrailingData)
     ));
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Native socket timeouts abort silent peers, partial files and missing write-half EOF.
+/// Unix sockets exercise the portable receiver; deployed vsock is qualified separately.
+#[test]
+fn stalled_socket_receives_are_abandoned_and_cleaned_up() {
+    let fixture = Fixture::new();
+    let bundle = fixture.bundle();
+    let parent = tempfile::tempdir().unwrap();
+    for length in [0, bundle.len() - 1, bundle.len()] {
+        let (mut receiver, mut sender) = UnixStream::pair().unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        sender.write_all(&bundle[..length]).unwrap();
+        // Keep the peer open without sending more bytes or signalling EOF.
+        let result = receive(
+            &mut receiver,
+            &[*fixture.key.verifying_key()],
+            1024,
+            parent.path(),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Io(ref error))
+                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+        ));
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+        drop(sender);
+    }
+}
+
+/// A blocked package upload propagates the socket timeout instead of retrying forever.
+#[test]
+fn blocked_socket_upload_is_abandoned() {
+    let mut fixture = Fixture::new();
+    fixture.files[2] = vec![1; 8 * 1024 * 1024];
+    fixture.manifest.artifacts[2].size = fixture.files[2].len() as u64;
+    fixture.manifest.artifacts[2].sha384 = hex::encode(Sha384::digest(&fixture.files[2]));
+    let root = tempfile::tempdir().unwrap();
+    for (artifact, bytes) in fixture.manifest.artifacts.iter().zip(&fixture.files) {
+        let path = root.path().join(&artifact.logical_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    let manifest = serde_json::to_vec(&fixture.manifest).unwrap();
+    let signature: Signature = fixture.key.sign(&manifest);
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
+    sender
+        .set_write_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let result = package(
+        &mut sender,
+        &manifest,
+        signature.to_der().as_bytes(),
+        root.path(),
+    );
+    assert!(matches!(
+        result,
+        Err(Error::Io(ref error))
+            if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+    ));
+    drop(receiver);
 }
 
 /// Valid signatures do not authorize a different executable architecture or an unknown role.

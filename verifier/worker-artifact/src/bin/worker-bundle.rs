@@ -1,4 +1,6 @@
-//! Offline release inventory/packaging and one-shot bounded host-to-enclave provisioning.
+//! Offline release inventory/packaging and one-shot host-to-enclave provisioning.
+//! Socket timeouts bound individual I/O operations. The supervisor owns the overall
+//! startup timeout, including connection establishment, and enclave cleanup before retry.
 
 use std::{
     fs::{self, File},
@@ -137,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(concat!(
                 "usage: worker-bundle manifest RELEASE_ID ARTIFACT_ROOT | ",
                 "pack MANIFEST SIGNATURE_DER ARTIFACT_ROOT OUTPUT | ",
-                "send CID BUNDLE TIMEOUT_SECONDS | validate-config CONFIG_PATH"
+                "send CID BUNDLE IO_TIMEOUT_SECONDS | validate-config CONFIG_PATH"
             )
             .into());
         }
@@ -147,25 +149,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "linux")]
 /// One transfer; only pre-transfer connection establishment may be retried by the caller.
-fn send(cid: &str, bundle: &str, timeout: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use std::time::{Duration, Instant};
+fn send(cid: &str, bundle: &str, io_timeout: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
     let cid: u32 = cid.parse()?;
-    let timeout: u64 = timeout.parse()?;
-    if cid <= 2 || !(1..=900).contains(&timeout) {
-        return Err("invalid enclave CID or provisioning timeout".into());
+    let io_timeout: u64 = io_timeout.parse()?;
+    if cid <= 2 || !(1..=900).contains(&io_timeout) {
+        return Err("invalid enclave CID or provisioning I/O timeout".into());
     }
     let mut bundle = File::open(bundle)?;
     let metadata = bundle.metadata()?;
     if !metadata.is_file() || metadata.len() > MAX_BUNDLE_BYTES + MAX_MANIFEST_BYTES as u64 + 112 {
         return Err("invalid bundle file or size".into());
     }
-    let deadline = Instant::now() + Duration::from_secs(timeout);
-    let mut stream = flamingo_verifier_worker_artifact::transport::connect(cid, 1001, deadline)?;
+    let mut stream = vsock::VsockStream::connect_with_cid_port(cid, 1001)?;
+    let timeout = Some(Duration::from_secs(io_timeout));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
     let sent = std::io::copy(&mut (&mut bundle).take(metadata.len()), &mut stream)?;
     if sent != metadata.len() || bundle.read(&mut [0])? != 0 {
         return Err("bundle changed during transfer".into());
     }
-    stream.stream.shutdown(std::net::Shutdown::Write)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
     let mut acknowledgement = [0xff];
     stream.read_exact(&mut acknowledgement)?;
     if acknowledgement != [0] {

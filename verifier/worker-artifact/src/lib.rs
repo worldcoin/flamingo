@@ -14,7 +14,6 @@ use sha2::{Digest, Sha384};
 use tempfile::TempDir;
 
 mod config;
-pub mod transport;
 pub use config::BootstrapConfig;
 
 /// The only executable entry point accepted by the public broker.
@@ -81,7 +80,7 @@ pub struct VerifiedRuntime {
 /// Redacted failures; no untrusted paths, manifest text or model bytes are included.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// I/O, truncation or deadline failure.
+    /// I/O, truncation or socket timeout failure.
     #[error("worker bundle I/O failed: {0}")]
     Io(#[from] io::Error),
     /// Unconfigured trust or unusable public limits.
@@ -186,7 +185,12 @@ impl Manifest {
 }
 
 /// Reads and verifies one framed manifest, then streams exact artifacts into a fresh tree.
-/// The caller supplies a deadline-bound reader and must require sender write-half EOF.
+/// For socket readers, the caller configures a fixed read timeout before calling this
+/// function and a write timeout for the subsequent acknowledgement. The sender must
+/// close its write half: receiving the declared files alone does not complete the transfer.
+/// Socket timeouts bound individual I/O operations, not the full transfer. The bootstrap
+/// supervisor owns the overall startup timeout and terminates the provisioner and enclave
+/// before retrying. Any I/O error, including `WouldBlock`, abandons this receive attempt.
 /// Trust and limits come only from the measured image, never this untrusted stream.
 pub fn receive(
     reader: &mut impl Read,

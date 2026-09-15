@@ -1588,7 +1588,6 @@ name = "flamingo-verifier-worker-artifact"
 version = "0.3.0"
 dependencies = [
  "hex",
- "libc",
  "p384",
  "serde",
  "serde_json",
