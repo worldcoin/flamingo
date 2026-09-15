@@ -207,6 +207,81 @@ It hangs off the match route alone. Assignment sends no body and the health rout
 allowing multi-megabyte requests there would widen the service's ingress for nothing. Over-limit
 bodies come back as `413 request_too_large` in the usual envelope rather than as a bare status.
 
+## Local end-to-end
+
+The host runs on a laptop with a mock enclave in place of Nitro. The mock answers a match with
+`sha256` of the sealed body, so a harness can assert a round trip, and it attests nothing. The
+`mock-enclave` feature is off by default and a release build refuses to compile it.
+
+Metering is selected with the one command-line flag this host takes, `--payments`, which accepts
+`off`, `optional` or `required` and falls back to the `PAYMENTS` environment variable. It
+defaults to `off`, where no `FEE_*` setting is read, the nonce route is not mounted and every
+match is served unbilled. That is the rollback position; a harness passes `PAYMENTS=required`.
+
+```bash
+ENCLAVE_MODE=mock \
+PAYMENTS=required \
+FEE_ESCROW_RPC_URL=http://127.0.0.1:8545 \
+FEE_ESCROW_CHAIN_ID=31337 \
+FEE_ESCROW_ADDRESS=<proxy> \
+FEE_COLLECTOR_ADDRESS=<collector> \
+FEE_TOKEN_ADDRESS=<token> \
+FEE_MIN_PRICE_PER_UNIT=1000 \
+PORT=8000 \
+cargo run -p flamingo-verifier-host --features mock-enclave
+```
+
+`ENCLAVE_MODE=mock` without the feature fails at startup rather than falling back to the real
+client. The three fee variables are required whenever `--payments` is not `off`, and are all
+checked against the channel the escrow reports: a channel must name this collector, pay in this token, and price a
+verification at or above this floor. Naming the collector alone is not enough, because whoever
+opened the channel chose its token and price.
+
+Reserve a nonce. `epoch` must be the channel's current epoch or the next one. The body is signed
+by the channel's spend key over `NonceReservation(bytes32 channelId,uint64 epoch,uint64 issuedAt)`
+in the same EIP-712 domain as a payment, because a reservation holds capacity for its lifetime
+and an unsigned one would let anyone starve a channel they do not fund. `issued_at` must sit
+within 60 seconds of the verifier's clock.
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8000/v1/channels/$CHANNEL_ID/nonces" \
+  -H 'content-type: application/json' \
+  -d '{"epoch":7,"issued_at":1700000000,"signature":"0x<65 bytes>"}'
+```
+
+```json
+{ "lane": 0, "counter": 1, "expires_by": 1700000600, "previous": null }
+```
+
+Then spend it. `channel_nonce` is the `uint96` the lane and counter pack into, and `signature` is
+the channel spend key's EIP-712 signature over `(channelId, epoch, channelNonce)`.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/v1/matches \
+  -H 'content-type: application/json' \
+  -d '{
+    "ciphertext": "<base64 sealed request>",
+    "payment": {
+      "channel_id": "'"$CHANNEL_ID"'",
+      "epoch": 7,
+      "channel_nonce": "0x1",
+      "signature": "0x<65 bytes>"
+    }
+  }'
+```
+
+The payment is a bearer token for one verification. Replaying it answers `409 already_admitted`
+rather than the earlier result, which is not cached. Omitting `payment` under
+`--payments required` answers `402 payment_required`; under `optional` the match relays as it
+always did, and under `off` the field is not read at all.
+
+Two refusals carry evidence in `error.details`. `409 capacity_exhausted` means the epoch's units
+are spent and lists the highest authorization per lane, so a relying party can check the
+arithmetic itself. `429 capacity_reserved` means its own outstanding reservations are in the way
+and carries `retry_after`, the moment the earliest lane comes back.
+
+The wire types are `verifier/api-types/src/payments.rs` and `verifier/api-types/src/matches.rs`.
+
 ## Nitro-enabled development host
 
 Use an Amazon Linux 2023 EC2 instance type that supports Nitro Enclaves and launch it with

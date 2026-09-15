@@ -1,0 +1,118 @@
+//! Reads of the fee escrow contract.
+//!
+//! Everything this host knows about a channel comes from the chain. Nothing registers a channel
+//! with the verifier, so a caller cannot invent one by talking to this API.
+
+pub mod rpc;
+
+use alloy_primitives::{Address, B256, U256};
+use async_trait::async_trait;
+
+pub use rpc::RpcEscrowReader;
+
+/// The part of the escrow's `ChannelSettings` this host acts on.
+///
+/// Naming this host as collector is not enough to spend here: whoever opened the channel chose
+/// its token and price, so both are carried and both are checked against what this host accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelSettings {
+    /// Address whose signature authorizes spending from the channel.
+    pub spend_key: Address,
+    /// Verifier the channel's fees settle to. Only that verifier may admit its nonces.
+    pub collector: Address,
+    /// Token the channel pays in. Only an allowlisted one is accepted.
+    pub token: Address,
+    /// What one verification costs, in that token's smallest unit.
+    pub price_per_unit: U256,
+    /// Unix seconds at which epoch 0 began.
+    pub epoch_zero: u64,
+    /// Seconds each epoch lasts. Never zero on-chain.
+    pub epoch_length: u64,
+}
+
+impl ChannelSettings {
+    /// The epoch `now` falls in.
+    ///
+    /// Everything before `epoch_zero` reads as epoch 0 rather than wrapping, so a clock that is
+    /// behind cannot mint an epoch below the first one.
+    #[must_use]
+    pub const fn epoch_at(&self, now: u64) -> u64 {
+        if self.epoch_length == 0 || now <= self.epoch_zero {
+            return 0;
+        }
+
+        (now - self.epoch_zero) / self.epoch_length
+    }
+}
+
+/// Why the escrow could not be read.
+///
+/// Every variant is fail-closed at the call site: a channel this host cannot verify is a channel
+/// it will not spend from.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EscrowError {
+    /// The node answered with an error, or not at all. Carries context for the log.
+    #[error("the fee escrow rpc is unavailable: {0}")]
+    Unavailable(String),
+    /// The node did not answer inside the call deadline.
+    #[error("the fee escrow rpc timed out")]
+    Timeout,
+    /// The node is serving a different chain than the escrow address belongs to.
+    #[error("the fee escrow rpc is on chain {actual}, expected {expected}")]
+    WrongChain {
+        /// The chain this host is configured for.
+        expected: u64,
+        /// The chain the node reported.
+        actual: u64,
+    },
+}
+
+/// Reads channel settings and per-epoch capacity from the fee escrow.
+#[async_trait]
+pub trait EscrowReader: Send + Sync {
+    /// Reads a channel's settings, or `None` when the escrow does not know it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EscrowError`] when the node cannot be reached or answers with an error.
+    async fn channel(&self, channel_id: B256) -> Result<Option<ChannelSettings>, EscrowError>;
+
+    /// Units the channel may spend in `epoch`, which is its funding over the price per unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EscrowError`] when the node cannot be reached or answers with an error.
+    async fn capacity(&self, channel_id: B256, epoch: u64) -> Result<u64, EscrowError>;
+
+    /// Units the escrow has already settled in `epoch`, summed across every lane.
+    ///
+    /// The chain is the authority here. A host that restarts mid-epoch forgets what it admitted,
+    /// and without this it would serve the whole epoch again against the same funding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EscrowError`] when the node cannot be reached or answers with an error.
+    async fn settled_units(&self, channel_id: B256, epoch: u64) -> Result<u64, EscrowError>;
+
+    /// Highest counter the escrow has settled on `lane` in `epoch`.
+    ///
+    /// Zero means the lane has never been settled, which is how a probe finds where a channel's
+    /// lanes stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EscrowError`] when the node cannot be reached or answers with an error.
+    async fn lane_high_water(
+        &self,
+        channel_id: B256,
+        epoch: u64,
+        lane: u32,
+    ) -> Result<u64, EscrowError>;
+
+    /// Checks the node is reachable and serving the configured chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EscrowError`] when the node is unreachable or on another chain.
+    async fn ready(&self) -> Result<(), EscrowError>;
+}

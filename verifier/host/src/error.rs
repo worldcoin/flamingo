@@ -10,7 +10,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use flamingo_verifier_api_types::{ApiErrorResponse, ErrorBody};
+use flamingo_verifier_api_types::{ApiErrorResponse, ErrorBody, ErrorDetails};
 use flamingo_verifier_enclave_types as enclave_types;
 
 use crate::enclave;
@@ -24,6 +24,11 @@ pub struct AppError {
     allow_retry: bool,
     /// Extra context for logs. Never serialized, since it may name internals.
     detail: Option<String>,
+    /// Which dependency failed, for the log. `None` means the request never left this host.
+    dependency: Option<&'static str>,
+    /// Evidence returned to the client. Boxed because only a capacity refusal carries any, and
+    /// every other error would otherwise pay for its `Vec`.
+    details: Option<Box<ErrorDetails>>,
 }
 
 impl AppError {
@@ -41,7 +46,23 @@ impl AppError {
             message,
             allow_retry,
             detail: None,
+            dependency: None,
+            details: None,
         }
+    }
+
+    /// Attaches evidence the client can check, unlike `with_detail`, which only reaches the log.
+    #[must_use]
+    pub fn with_details(mut self, details: ErrorDetails) -> Self {
+        self.details = Some(Box::new(details));
+        self
+    }
+
+    /// Names the dependency that failed, so a dashboard can tell one outage from another.
+    #[must_use]
+    pub const fn with_dependency(mut self, dependency: &'static str) -> Self {
+        self.dependency = Some(dependency);
+        self
     }
 
     /// Attaches context that is logged but not returned to the client.
@@ -85,6 +106,7 @@ impl AppError {
                         "Internal server error",
                         false,
                     )
+                    .with_dependency("enclave")
                     .with_detail(format!(
                         "unexpected enclave error on assignment: {operation:?}"
                     ))
@@ -110,6 +132,7 @@ impl AppError {
                     "The request was not sealed to this enclave's current encryption key",
                     true,
                 )
+                .with_dependency("enclave")
                 .with_detail(format!("{operation:?}")),
                 enclave_types::Error::Internal => Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -117,6 +140,7 @@ impl AppError {
                     "Internal server error",
                     true,
                 )
+                .with_dependency("enclave")
                 .with_detail(format!("{operation:?}")),
                 enclave_types::Error::NotReady
                 | enclave_types::Error::SecureModuleNotInitialized
@@ -133,13 +157,15 @@ impl AppError {
                 "enclave_timeout",
                 "The enclave did not answer in time",
                 true,
-            ),
+            )
+            .with_dependency("enclave"),
             enclave::Error::Transport(detail) => Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "enclave_unreachable",
                 "The enclave is unreachable",
                 true,
             )
+            .with_dependency("enclave")
             .with_detail(detail.clone()),
             enclave::Error::Operation(_) => unreachable!("caller matched a transport failure"),
         }
@@ -153,6 +179,7 @@ impl AppError {
             "The enclave is not ready",
             true,
         )
+        .with_dependency("enclave")
         .with_detail(format!("{operation:?}"))
     }
 }
@@ -164,7 +191,7 @@ impl IntoResponse for AppError {
                 code = self.code,
                 status = %self.status,
                 detail = self.detail.as_deref().unwrap_or_default(),
-                dependency = "enclave",
+                dependency = self.dependency.unwrap_or("none"),
                 "request failed"
             );
         } else {
@@ -182,6 +209,7 @@ impl IntoResponse for AppError {
             error: ErrorBody {
                 code: self.code.to_owned(),
                 message: self.message.to_owned(),
+                details: self.details.map(|details| *details),
             },
         };
 
