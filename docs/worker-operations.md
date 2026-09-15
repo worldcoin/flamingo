@@ -22,12 +22,23 @@ Stage the worker, models and approved library closure as regular files. Then:
 worker-bundle manifest RELEASE_ID ARTIFACT_ROOT > manifest.json
 openssl dgst -sha384 -sign publisher.pem -out manifest.sig manifest.json
 worker-bundle pack manifest.json manifest.sig ARTIFACT_ROOT worker.bundle
-worker-bundle send ENCLAVE_CID worker.bundle TIMEOUT_SECONDS
+worker-bundle send ENCLAVE_CID worker.bundle IO_TIMEOUT_SECONDS
 ```
 
 Use an approved publisher key, kept outside Git/images/the provisioner. Do not edit
 the manifest after signing. Commit qualified budgets and public keys to the measured
 bootstrap configuration before using `scripts/build-enclaves.sh`.
+
+`IO_TIMEOUT_SECONDS` bounds each blocking read/write by the sender. The enclave
+uses `provisioning_io_timeout_seconds` from its measured configuration for its
+accepted socket. These are not whole-startup deadlines: a progressing transfer
+can take longer, and connect/accept are outside the socket I/O timeouts.
+
+Before deployment, configure a supervisor to bound the full bootstrap attempt,
+terminate both the provisioner and enclave on timeout/failure, and retry only with
+a fresh enclave. A timeout around the uploader alone is insufficient. The existing
+carrier script only monitors whether the enclave is running; it does not yet
+implement this startup watchdog or provisioning orchestration.
 
 ## Serving
 
@@ -60,6 +71,8 @@ it does not build or qualify the private model runtime. Before release:
 - Run the Linux signed-runtime sandbox test and the real adapter under the same policy.
 - Measure cold/warm inference, memory and threads using approved fixtures.
 - Verify Nitro provisioning, failed-launch handling, readiness and fatal guest teardown.
+- Stall provisioning and verify that the supervisor times out, removes the old
+  enclave and provisioner, and can start a fresh attempt.
 
 The ignored `verifier/worker/tests/model.rs` test needs `WORKER_MODEL_DIR` and
 `WORKER_FACE_FIXTURE`. The `worker-process` example `qualify-worker` takes

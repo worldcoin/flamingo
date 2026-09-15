@@ -44,7 +44,12 @@ Files must be regular, with safe relative paths and no duplicates or parent/file
 conflicts. Model weights may be separate signed files; the local adapter embeds YAML.
 
 The broker verifies the signature and streams hash-checked files into a fresh root
-under `/worker-runtime`. Metadata, total bytes and all provisioning I/O are bounded.
+under `/worker-runtime`. Metadata and total bytes are bounded. The measured
+`provisioning_io_timeout_seconds` configures fixed read/write timeouts on the
+accepted socket; the sender independently configures its socket timeouts. Progress
+can extend the full transfer beyond either timeout. The deployment supervisor must
+bound overall startup (including connect/accept) and terminate the provisioner and
+enclave before retrying.
 It launches through Minijail before starting Tokio threads or generating broker keys.
 After launch and key attestation it acknowledges with one zero byte and closes the
 socket. Normal requests use port 1000. The acknowledgement is not model warmup.

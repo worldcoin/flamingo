@@ -3,5 +3,5 @@
   "max_bundle_bytes": 0,
   "address_space_bytes": 0,
   "max_threads": 0,
-  "bootstrap_timeout_seconds": 0
+  "provisioning_io_timeout_seconds": 0
 }

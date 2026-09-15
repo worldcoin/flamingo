@@ -12,7 +12,7 @@ pub struct BootWorker {
     /// Public, measured thread budget.
     pub max_threads: u32,
     /// The one-shot provisioner waits for acknowledgement after successful broker startup.
-    provisioner: flamingo_verifier_worker_artifact::transport::DeadlineStream<vsock::VsockStream>,
+    provisioner: vsock::VsockStream,
 }
 
 impl BootWorker {
@@ -25,17 +25,19 @@ impl BootWorker {
         self.provisioner
             .write_all(&[0])
             .context("failed to acknowledge worker startup")?;
-        self.provisioner.stream.shutdown(std::net::Shutdown::Both)?;
+        self.provisioner.shutdown(std::net::Shutdown::Both)?;
         Ok(())
     }
 }
 
-/// Accepts exactly one bounded bundle from the parent host, then permanently closes bootstrap.
+/// Accepts one size-bounded bundle from the parent host, then permanently closes bootstrap.
+///
+/// Fixed socket timeouts bound individual reads/writes after accept. The deployment
+/// supervisor must bound total startup, including accept, and tear down the enclave on failure.
 ///
 /// # Errors
 /// Returns an error for invalid measured configuration, transport failure, or an invalid artifact.
 pub fn receive() -> anyhow::Result<BootWorker> {
-    use flamingo_verifier_worker_artifact::transport::{DeadlineStream, wait};
     use std::{
         fs::File,
         io,
@@ -44,7 +46,7 @@ pub fn receive() -> anyhow::Result<BootWorker> {
             unix::fs::{MetadataExt, PermissionsExt},
         },
         path::Path,
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     let config = Config::load_from(Path::new("/etc/flamingo/worker-bootstrap.json"))?;
@@ -68,18 +70,11 @@ pub fn receive() -> anyhow::Result<BootWorker> {
     drop(directory);
     // Nix normalizes directory modes; restore private write access before receiving bytes.
     std::fs::set_permissions(runtime_parent, std::fs::Permissions::from_mode(0o700))?;
-    let deadline = Instant::now() + Duration::from_secs(config.bootstrap_timeout_seconds);
     let listener = vsock::VsockListener::bind_with_cid_port(libc::VMADDR_CID_ANY, 1001)?;
-    listener.set_nonblocking(true)?;
-    let (socket, peer) = loop {
-        wait(listener.as_raw_fd(), libc::POLLIN, deadline)?;
+    let (mut provisioner, peer) = loop {
         match listener.accept() {
             Ok(connection) => break connection,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
-                ) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error.into()),
         }
     };
@@ -87,7 +82,9 @@ pub fn receive() -> anyhow::Result<BootWorker> {
     if peer.cid() != libc::VMADDR_CID_HOST {
         bail!("worker provisioner must be the parent host");
     }
-    let mut provisioner = DeadlineStream::new(socket, deadline)?;
+    let timeout = Some(Duration::from_secs(config.provisioning_io_timeout_seconds));
+    provisioner.set_read_timeout(timeout)?;
+    provisioner.set_write_timeout(timeout)?;
     let runtime = flamingo_verifier_worker_artifact::receive(
         &mut provisioner,
         &keys,
