@@ -12,7 +12,7 @@ FROM public.ecr.aws/amazonlinux/amazonlinux:2023
 RUN dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq && \
     dnf clean all
 
-ARG EIF_FILE=deepface-enclave.eif
+ARG EIF_FILE=verifier-enclave.eif
 COPY ${EIF_FILE} /home/enclave.eif
 
 # ENCLAVE_CID is unset by default (auto-assigned CID). Set it to pin the

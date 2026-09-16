@@ -1,7 +1,7 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use flamingo_verifier_client::{Config, FaceVerifierClient, VerifiedAssignment};
+use flamingo_verifier_client::{Config, FlamingoVerifierClient, VerifiedAssignment};
 use flamingo_verifier_enclave_types::MatchRequest;
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey};
 use flamingo_verifier_sealed_types::{MatchInputs, MatchResult};
@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let config = load_config()?;
     let verifier = config.verifier()?;
 
-    let client = FaceVerifierClient::new(config).context("failed to build the client")?;
+    let client = FlamingoVerifierClient::new(config).context("failed to build the client")?;
     let assignment = client
         .request_assignment()
         .await
