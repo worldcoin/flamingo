@@ -90,3 +90,11 @@ the measurements from source and compare against `manifest.json`.
   the release pipeline; it does not ship a working service.
 - The EIF is published publicly, and the verifier enclave links private face-engine code. Confirm
   with the `biometric-engines` owners before the first `verifier/v*` tag.
+
+## Publishing the Rust client
+
+`release-crates.yml` uses `release-plz.toml` to publish only `flamingo-verifier-client`.
+The API, protocol and sealed payload types ship as modules inside that package; no other
+Flamingo crate is needed by consumers. Unpublished internal crates compile the same source
+files through `#[path]` modules, so the enclave does not depend on the client. Changes to these modules are included in the client
+release and changelog.

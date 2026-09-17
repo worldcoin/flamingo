@@ -7,8 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-# Published because `flamingo-verifier-client` seals and opens these types.
-publish = true
+publish.workspace = true
 
 [dependencies]
 flamingo-verifier-api-types.workspace = true

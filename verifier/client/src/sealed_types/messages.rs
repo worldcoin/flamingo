@@ -1,9 +1,9 @@
 //! Typed CBOR payloads. Image ownership moves across inference adapters without cloning.
-use crate::{Error, FailureReason};
-use flamingo_verifier_api_types::{
+use super::{Error, FailureReason};
+use crate::api_types::{
     MAX_HASHES_JSON_BYTES, MAX_IMAGE_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_IMAGE_BYTES,
 };
-use flamingo_verifier_protocol::match_token::{MatchClaims, MatchToken};
+use crate::protocol::match_token::{MatchClaims, MatchToken};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -410,8 +410,8 @@ mod tests {
         });
         let failure = MatchResult::Failed(FailureReason::UnsupportedCapture);
         let image_failure = MatchResult::Failed(FailureReason::ImageRejected {
-            image: crate::ImageRole::LiveSelfie,
-            reason: crate::ImageFailureReason::EyesClosed,
+            image: crate::sealed_types::ImageRole::LiveSelfie,
+            reason: crate::sealed_types::ImageFailureReason::EyesClosed,
         });
         for result in [success, failure, image_failure] {
             let encoded = result.to_padded_cbor().unwrap();

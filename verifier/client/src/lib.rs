@@ -1,12 +1,12 @@
 //! Client for the Flamingo Verifier's enclave-assignment flow.
 //!
 //! Fetches an assignment, verifies the AWS Nitro attestation document it carries, and yields
-//! a [`ChannelConsumer`] bound to the separately supplied public key. The signed document
+//! a `ChannelConsumer` bound to the separately supplied public key. The signed document
 //! commits to that key; Pontifex checks the commitment, measurements, signature and freshness.
 //!
 //! ```no_run
 //! use flamingo_verifier_client::{Config, FlamingoVerifierClient, PcrMeasurement};
-//! use flamingo_verifier_sealed_types::MatchInputs;
+//! use flamingo_verifier_client::sealed_types::MatchInputs;
 //!
 //! # async fn example(inputs: &MatchInputs, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Config::new(
@@ -36,3 +36,12 @@ pub use client::{FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, Veri
 pub use config::Config;
 pub use error::Error;
 pub use pontifex::{ChannelConsumer, PcrMeasurement};
+
+/// HTTP request and response types shared with the host.
+pub mod api_types;
+
+/// Signed match claims and token verification.
+pub mod protocol;
+
+/// Sealed client-to-enclave match requests and responses.
+pub mod sealed_types;

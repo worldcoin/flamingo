@@ -1478,20 +1478,27 @@ dependencies = [
 name = "flamingo-verifier-client"
 version = "0.3.0"
 dependencies = [
+ "ark-ff",
  "axum",
  "base64",
- "flamingo-verifier-api-types",
- "flamingo-verifier-protocol",
- "flamingo-verifier-sealed-types",
+ "ciborium",
+ "coset",
  "hex",
  "hex-literal",
  "pontifex",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
+ "serde_bytes",
  "serde_json",
+ "sha2 0.10.9",
+ "taceo-ark-babyjubjub",
+ "taceo-eddsa-babyjubjub",
+ "taceo-poseidon2",
  "thiserror 2.0.20",
  "tokio",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -1501,8 +1508,6 @@ dependencies = [
  "anyhow",
  "flamingo-verifier-client",
  "flamingo-verifier-enclave-types",
- "flamingo-verifier-protocol",
- "flamingo-verifier-sealed-types",
  "hex",
  "pontifex",
  "sha2 0.10.9",

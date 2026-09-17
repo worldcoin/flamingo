@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-publish = true
+publish.workspace = true
 
 # Host-side only, and deliberately not in either enclave's source set: the HTTP contract stops
 # at the host, so none of it belongs in an EIF.

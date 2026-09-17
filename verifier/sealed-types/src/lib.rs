@@ -1,22 +1,10 @@
-//! The sealed client↔enclave match payload. The host relays the ciphertext and does not link this.
+//! Internal sealed-types crate, sharing its implementation with the published client.
 
-#![deny(
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    missing_docs,
-    dead_code
-)]
+// Match the sibling module names used when these sources compile inside the client.
+use flamingo_verifier_api_types as api_types;
+use flamingo_verifier_protocol as protocol;
 
-mod errors;
-mod messages;
+#[path = "../../client/src/sealed_types/mod.rs"]
+mod sealed_types;
 
-/// Pontifex channel domain shared by the consumer and enclave.
-pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v2";
-
-pub use errors::{ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole};
-pub use messages::*;
-pub use serde_bytes::ByteBuf;
-
-/// Bound on sealed match bytes before decryption.
-pub use flamingo_verifier_api_types::MAX_MATCH_BODY_BYTES;
+pub use sealed_types::*;

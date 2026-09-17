@@ -7,12 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+flamingo-verifier-client.workspace = true
 anyhow.workspace = true
-flamingo-verifier-protocol.workspace = true
-flamingo-verifier-sealed-types.workspace = true
 flamingo-verifier-enclave-types.workspace = true
 hex.workspace = true
 pontifex = { workspace = true, features = ["client", "channel", "attestation"] }
 sha2.workspace = true
 tokio.workspace = true
-flamingo-verifier-client.workspace = true
