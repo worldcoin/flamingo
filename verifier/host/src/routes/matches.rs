@@ -1,70 +1,71 @@
-use axum::{Json, extract::State, extract::rejection::JsonRejection, http::StatusCode};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use flamingo_verifier_api_types::{MatchRequestBody, MatchResponseBody};
+use crate::{AppState, error::AppError};
+use axum::{
+    body::Bytes,
+    extract::{State, rejection::BytesRejection},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use flamingo_verifier_api_types::MATCH_CONTENT_TYPE;
 use flamingo_verifier_enclave_types as enclave;
 
-use crate::AppState;
-use crate::error::AppError;
+/// Maximum sealed binary body, independent of HTTP transfer encoding.
+pub const MAX_BODY_BYTES: usize = flamingo_verifier_api_types::MAX_MATCH_BODY_BYTES;
 
-/// Largest match body this route accepts. 12 MiB to allow for images in payload.
-pub const MAX_BODY_BYTES: usize = 12 * 1024 * 1024;
-
-/// Relays a sealed match request to the enclave.
-///
-/// # Errors
-///
-/// Returns [`AppError`] if the body is rejected or the enclave rejects the request.
+/// Relay ciphertext without a JSON/base64 buffer or a copy into a Vec.
 pub async fn handler(
     State(state): State<AppState>,
-    body: Result<Json<MatchRequestBody>, JsonRejection>,
-) -> Result<(StatusCode, Json<MatchResponseBody>), AppError> {
-    let Json(body) = body.map_err(|rejection| rejected_body(&rejection))?;
-
-    let ciphertext = STANDARD.decode(body.ciphertext.trim()).map_err(|_| {
-        AppError::new(
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        != Some(MATCH_CONTENT_TYPE)
+    {
+        return Err(AppError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "Expected application/octet-stream",
+            false,
+        ));
+    }
+    let body = body.map_err(|error| {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "The sealed request exceeded the body limit",
+                false,
+            )
+        } else {
+            AppError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Could not read the sealed request",
+                false,
+            )
+        }
+    })?;
+    if body.is_empty() {
+        return Err(AppError::new(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "The sealed match request was not valid base64",
+            "The sealed request was empty",
             false,
-        )
-    })?;
-
+        ));
+    }
     let response = state
         .enclave_client()
-        .run_match(enclave::MatchRequest { body: ciphertext })
+        .run_match(enclave::MatchRequest { body })
         .await
         .map_err(|error| AppError::enclave_match(&error))?;
-
-    // Always 200 when the enclave answered. Whether the match results (failure or success) must not be leaked to host.
     Ok((
         StatusCode::OK,
-        Json(MatchResponseBody {
-            response_ciphertext: STANDARD.encode(response.ciphertext),
-        }),
-    ))
-}
-
-/// Maps a body the extractor refused.
-///
-/// Axum answers its own rejections with a bare status and a plaintext line, which is the one way
-/// out of this service that carries no `code` for a client to branch on. Routing them through
-/// [`AppError`] keeps that envelope universal. The size is only ever logged: it describes the
-/// request, and a caller that sent it already knows.
-fn rejected_body(rejection: &JsonRejection) -> AppError {
-    let (status, code, message) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request_too_large",
-            "The match request was larger than this route accepts",
-        )
-    } else {
-        (
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "The match request body was not the expected JSON",
-        )
-    };
-
-    AppError::new(status, code, message, false)
-        .with_detail(format!("{}; limit={MAX_BODY_BYTES}", rejection.body_text()))
+        [
+            (header::CONTENT_TYPE, MATCH_CONTENT_TYPE),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        response.ciphertext,
+    )
+        .into_response())
 }

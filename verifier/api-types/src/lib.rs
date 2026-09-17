@@ -17,4 +17,4 @@ mod matches;
 
 pub use assignment::EnclaveAssignmentResponse;
 pub use error::{ApiErrorResponse, ErrorBody};
-pub use matches::{MatchRequestBody, MatchResponseBody};
+pub use matches::*;

@@ -8,7 +8,7 @@ use flamingo_verifier_sealed_types::FailureReason;
 
 use crate::{
     attestation::Attestor,
-    face_engine::{ComparisonScores, FaceComparator},
+    face_engine::{DeepFaceScores, FaceComparator, GrayBadgeScores},
     state::EnclaveState,
 };
 
@@ -94,12 +94,11 @@ impl Attestor for FailsAfterSuccessesAttestor {
 pub struct UnusedFaceEngine;
 
 impl FaceComparator for UnusedFaceEngine {
-    fn compare_reference_to_probes(
-        &self,
-        _: &[u8],
-        _: &[u8],
-        _: &[u8],
-    ) -> Result<ComparisonScores, FailureReason> {
+    fn deep_face(&self, _: &[u8], _: &[u8], _: &[u8]) -> Result<DeepFaceScores, FailureReason> {
+        panic!("Face Engine was called unexpectedly")
+    }
+
+    fn gray_badge(&self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
         panic!("Face Engine was called unexpectedly")
     }
 }

@@ -11,6 +11,8 @@ repository.workspace = true
 publish = true
 
 [dependencies]
+flamingo-verifier-api-types.workspace = true
+sha2.workspace = true
 ciborium.workspace = true
 flamingo-verifier-protocol.workspace = true
 serde.workspace = true

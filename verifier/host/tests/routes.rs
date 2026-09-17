@@ -33,7 +33,9 @@ async fn send(state: AppState, request: Request<Body>) -> (StatusCode, Value) {
         .expect("the body should be readable")
         .to_bytes();
 
-    let body = if bytes.is_empty() {
+    let body = if status == StatusCode::OK && bytes.first() != Some(&b'{') {
+        serde_json::json!({"binary": bytes.to_vec()})
+    } else if bytes.is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(&bytes).expect("responses should be JSON")
@@ -52,12 +54,12 @@ fn assignment_request() -> Request<Body> {
 
 /// Builds a match request carrying `ciphertext` and nothing else.
 fn match_request(ciphertext: &str) -> Request<Body> {
-    let body = format!(r#"{{"ciphertext":"{ciphertext}"}}"#);
+    let body = ciphertext.to_owned();
 
     Request::builder()
         .method(Method::POST)
         .uri("/v1/matches")
-        .header("content-type", "application/json")
+        .header("content-type", "application/octet-stream")
         .body(Body::from(body))
         .expect("request should be valid")
 }
@@ -176,21 +178,14 @@ async fn matches_relays_the_sealed_request_verbatim() {
         ..StubEnclaveClient::default()
     });
 
-    let (status, body) = send(state, match_request(&STANDARD.encode("sealed"))).await;
+    let (status, body) = send(state, match_request("sealed")).await;
 
     assert_eq!(status, StatusCode::OK);
-    // Relayed opaquely: the host encodes, it does not interpret.
-    assert_eq!(body["response_ciphertext"], STANDARD.encode([9u8; 48]));
-    // The attestation travels sealed inside the ciphertext, so nothing else is exposed.
-    assert_eq!(
-        body.as_object().map(serde_json::Map::len),
-        Some(1),
-        "the host must not add cleartext fields beside the sealed outcome"
-    );
+    assert_eq!(body["binary"], serde_json::json!(vec![9u8; 48]));
 }
 
 #[tokio::test]
-async fn matches_rejects_a_non_base64_ciphertext() {
+async fn matches_rejects_the_old_json_transport() {
     let state = state_with(StubEnclaveClient::default());
 
     let request = Request::builder()
@@ -202,8 +197,8 @@ async fn matches_rejects_a_non_base64_ciphertext() {
 
     let (status, body) = send(state, request).await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(body["error"]["code"], "unsupported_media_type");
 }
 
 #[tokio::test]
@@ -232,7 +227,7 @@ async fn matches_maps_an_unopenable_request_to_conflict() {
         ..StubEnclaveClient::default()
     });
 
-    let (status, body) = send(state, match_request(&STANDARD.encode("sealed"))).await;
+    let (status, body) = send(state, match_request("sealed")).await;
 
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "reassign_required");
@@ -249,10 +244,10 @@ async fn matches_answers_200_whatever_the_sealed_result_says() {
         ..StubEnclaveClient::default()
     });
 
-    let (status, body) = send(state, match_request(&STANDARD.encode("sealed"))).await;
+    let (status, body) = send(state, match_request("sealed")).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["response_ciphertext"], STANDARD.encode([9u8; 48]));
+    assert_eq!(body["binary"], serde_json::json!(vec![9u8; 48]));
     assert_eq!(
         body.as_object().map(serde_json::Map::len),
         Some(1),

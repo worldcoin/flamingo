@@ -10,7 +10,7 @@ pub enum Error {
     /// A token declared an encoding version other than
     /// [`crate::match_token::TOKEN_VERSION`].
     UnsupportedTokenVersion,
-    /// `match_coefficient` was negative, not finite, or too large to scale into the field.
+    /// A similarity or threshold was nonfinite, out of range, or inconsistent with success.
     UnrepresentableCoefficient,
     /// Serializing a key or signature failed.
     KeyEncoding,
