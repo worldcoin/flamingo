@@ -1,7 +1,8 @@
 //! Match-result tokens: CWTs (RFC 8392) carrying private claims.
 //! Note: This is a WIP module and will probably move to the `world-id-protocol` repo.
 //!
-//! The enclave signs the match claims. The `Verifier` proof circuit verifies the signature.
+//! The enclave signs these legacy match claims. They are not yet aligned with the
+//! WIP-110/WIP-111 token consumed by the proposed embedding-similarity circuit.
 //!
 
 use ark_babyjubjub::Fq;
@@ -618,7 +619,7 @@ mod tests {
 
     #[test]
     fn claims_are_in_deterministic_cbor_order() {
-        // The circuit reads claims at constant offsets, so the encoded key order is contractual.
+        // Keep the legacy deterministic CWT map encoding stable.
         let payload = claims().claims().expect("claims should encode");
         let claims: coset::cbor::value::Value =
             coset::cbor::from_reader(payload.as_slice()).expect("claims should decode");

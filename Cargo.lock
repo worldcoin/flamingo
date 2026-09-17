@@ -602,6 +602,9 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cast"
@@ -1486,6 +1489,7 @@ dependencies = [
  "flamingo-verifier-api-types",
  "flamingo-verifier-protocol",
  "flamingo-verifier-sealed-types",
+ "futures-util",
  "getrandom 0.2.17",
  "hex",
  "hex-literal",
@@ -1543,6 +1547,7 @@ dependencies = [
 name = "flamingo-verifier-enclave-types"
 version = "0.3.0"
 dependencies = [
+ "bytes",
  "pontifex",
  "serde",
  "serde_bytes",
@@ -1587,9 +1592,11 @@ name = "flamingo-verifier-sealed-types"
 version = "0.3.0"
 dependencies = [
  "ciborium",
+ "flamingo-verifier-api-types",
  "flamingo-verifier-protocol",
  "serde",
  "serde_bytes",
+ "sha2 0.10.9",
  "zeroize",
 ]
 

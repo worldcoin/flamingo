@@ -3,10 +3,12 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use flamingo_verifier_api_types::{
-    ApiErrorResponse, EnclaveAssignmentResponse, MatchRequestBody, MatchResponseBody,
+    ApiErrorResponse, EnclaveAssignmentResponse, MATCH_CONTENT_TYPE, MAX_MATCH_BODY_BYTES,
+    MAX_MATCH_RESPONSE_BYTES,
 };
-use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey};
+use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
 use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use futures_util::StreamExt as _;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -97,7 +99,7 @@ impl FlamingoVerifierClient {
     ///
     /// Callers may customize the returned builder before passing it to
     /// [`Self::request_assignment_with`].
-    #[must_use]
+    #[must_use = "the request must be sent to fetch an assignment"]
     pub fn build_assignment_request(&self) -> reqwest::RequestBuilder {
         let url = format!(
             "{}/v1/enclave-assignment",
@@ -182,21 +184,24 @@ impl FlamingoVerifierClient {
             "{}/v1/matches",
             self.config.host_url().as_str().trim_end_matches('/')
         );
+        if sealed.len() > MAX_MATCH_BODY_BYTES {
+            return Err(Error::MalformedResult);
+        }
         let request = self
             .configure_request(self.http.post(url))
-            .json(&MatchRequestBody {
-                ciphertext: STANDARD.encode(sealed),
-            });
+            .header(reqwest::header::CONTENT_TYPE, MATCH_CONTENT_TYPE)
+            .header(reqwest::header::ACCEPT, MATCH_CONTENT_TYPE)
+            .body(sealed);
 
         Ok((request, opener))
     }
 
     /// Runs a match against the enclave `assignment` names.
     ///
-    /// [`MatchResult::Failed`] is a normal return, not an error. A statement is verified against the
-    /// attested signing key first; call [`match_token::verify`] again to read its claims.
+    /// [`VerifiedMatchResult::Failed`] is a normal return, not an error. A statement and its claims are verified against the
+    /// attested signing key once, then returned together.
     ///
-    /// The caller supplies all three frames in `inputs`, challenge image included.
+    /// The caller supplies the operation's frames, including the downloaded challenge.
     ///
     /// # Errors
     ///
@@ -205,9 +210,40 @@ impl FlamingoVerifierClient {
         &self,
         assignment: &VerifiedAssignment,
         inputs: &MatchInputs,
-    ) -> Result<MatchResult, Error> {
+    ) -> Result<VerifiedMatchResult, Error> {
         let (request, opener) = self.build_match_request(assignment, inputs)?;
-        self.request_match_with(request, opener).await
+        let result = self.request_match_with(request, opener).await?;
+        if let VerifiedMatchResult::Success(verified) = &result
+            && !inputs.matches_claims(&verified.claims)
+        {
+            return Err(Error::StatementInvalid);
+        }
+        Ok(result)
+    }
+
+    /// Execute a typed `DeepFace` request and return verified claims or a sealed rejection.
+    /// # Errors
+    /// Returns transport, attestation or contract errors.
+    pub async fn deep_face(
+        &self,
+        assignment: &VerifiedAssignment,
+        inputs: flamingo_verifier_sealed_types::DeepFaceInputs,
+    ) -> Result<VerifiedMatchResult, Error> {
+        self.request_match(assignment, &MatchInputs::DeepFace(inputs))
+            .await
+    }
+
+    /// Submit a typed `GrayBadge` request without credential fields.
+    /// Currently returns `UnsupportedOperation` until its token contract is agreed.
+    /// # Errors
+    /// Returns transport, attestation or contract errors.
+    pub async fn gray_badge(
+        &self,
+        assignment: &VerifiedAssignment,
+        inputs: flamingo_verifier_sealed_types::GrayBadgeInputs,
+    ) -> Result<VerifiedMatchResult, Error> {
+        self.request_match(assignment, &MatchInputs::GrayBadge(inputs))
+            .await
     }
 
     /// Sends a caller-customizable match request and verifies its response.
@@ -221,20 +257,25 @@ impl FlamingoVerifierClient {
         &self,
         request: reqwest::RequestBuilder,
         opener: pontifex::ResponseOpener,
-    ) -> Result<MatchResult, Error> {
+    ) -> Result<VerifiedMatchResult, Error> {
         let response = request.send().await.map_err(Error::Request)?;
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.ok();
-            return Err(Self::api_error(status.as_u16(), body.as_deref()));
+            let bytes = bounded_response(response).await?;
+            let body = std::str::from_utf8(&bytes).ok();
+            return Err(Self::api_error(status.as_u16(), body));
         }
 
-        let body: MatchResponseBody = response.json().await.map_err(Error::MalformedResponse)?;
-
-        let ciphertext = STANDARD
-            .decode(body.response_ciphertext.trim())
-            .map_err(|_| Error::MalformedCiphertext)?;
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            != Some(MATCH_CONTENT_TYPE)
+        {
+            return Err(Error::MalformedResult);
+        }
+        let ciphertext = bounded_response(response).await?;
         let plaintext = opener
             .open_from_enclave(&ciphertext)
             .map_err(Error::Channel)?;
@@ -242,7 +283,7 @@ impl FlamingoVerifierClient {
             MatchResult::from_padded_cbor(&plaintext).map_err(|_| Error::MalformedResult)?;
 
         // Only a statement needs the key, so a rejection skips the attestation entirely.
-        if let MatchResult::Success(statement) = &result {
+        if let MatchResult::Success(statement) = result {
             // Response encryption alone does not authenticate the signing key.
             let attested = self
                 .verifier
@@ -260,11 +301,18 @@ impl FlamingoVerifierClient {
                 EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
             })?;
 
-            match_token::verify(&statement.token, &signing_key)
+            let claims = match_token::verify(&statement.token, &signing_key)
                 .map_err(|_| Error::StatementInvalid)?;
+            return Ok(VerifiedMatchResult::Success(Box::new(VerifiedMatch {
+                statement,
+                claims,
+            })));
         }
 
-        Ok(result)
+        match result {
+            MatchResult::Failed(reason) => Ok(VerifiedMatchResult::Failed(reason)),
+            MatchResult::Success(_) => unreachable!("success was verified above"),
+        }
     }
 
     /// Classifies a non-success response, reading the error envelope when there is one.
@@ -293,6 +341,50 @@ impl FlamingoVerifierClient {
     }
 }
 
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        clippy::future_not_send,
+        reason = "Fetch response streams stay on the originating browser worker"
+    )
+)]
+async fn bounded_response(response: reqwest::Response) -> Result<Vec<u8>, Error> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MATCH_RESPONSE_BYTES as u64)
+    {
+        return Err(Error::MalformedResult);
+    }
+    let mut bytes = Vec::new();
+    // bytes_stream is available on both native and browser clients. Keep the limit
+    // incremental so a missing Content-Length cannot force a full-body allocation.
+    let mut stream = Box::pin(response.bytes_stream());
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(Error::MalformedResponse)?;
+        if chunk.len() > MAX_MATCH_RESPONSE_BYTES - bytes.len() {
+            return Err(Error::MalformedResult);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// A statement whose attestation and signature have been verified by the client.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedMatch {
+    /// Encoded statement and attestation for proof consumers.
+    pub statement: flamingo_verifier_sealed_types::AttestedStatement,
+    /// Already-verified operation-specific claims.
+    pub claims: MatchClaims,
+}
+/// Verified success or an encrypted unsigned rejection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VerifiedMatchResult {
+    /// Attested signed result and parsed claims.
+    Success(Box<VerifiedMatch>),
+    /// No statement issued.
+    Failed(flamingo_verifier_sealed_types::FailureReason),
+}
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
@@ -302,17 +394,18 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::post;
     use axum::{Json, Router};
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use flamingo_verifier_protocol::match_token::MatchToken;
     use flamingo_verifier_sealed_types::{
         AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult,
     };
     use hex_literal::hex;
     use pontifex::{ChannelConsumer, ChannelDomain, ChannelEnclave};
-    use serde_json::{Value, json};
+    use serde_json::json;
 
-    use super::{FlamingoVerifierClient, MatchRequestBody};
+    use super::{FlamingoVerifierClient, VerifiedMatchResult};
     use crate::{Config, Error, PcrMeasurement};
+    use axum::body::Bytes;
+    use flamingo_verifier_api_types::MATCH_CONTENT_TYPE;
 
     fn config(base_url: &str) -> Config {
         let pcrs = vec![PcrMeasurement::new(
@@ -326,14 +419,11 @@ mod tests {
     }
 
     fn inputs() -> MatchInputs {
-        MatchInputs {
-            live_image: b"liveness-frame".to_vec(),
-            credential_image: b"credential-thumbnail".to_vec(),
-            light_guard_image: None,
-            hashes_json: br#"{"thumbnail.png":"aa"}"#.to_vec(),
-            challenge_image: b"challenge-frame".to_vec(),
+        MatchInputs::GrayBadge(flamingo_verifier_sealed_types::GrayBadgeInputs {
+            live: flamingo_verifier_sealed_types::LiveCapture::Vanilla(b"live".to_vec().into()),
+            rtms_challenge: b"challenge".to_vec().into(),
             match_threshold: 0.5,
-        }
+        })
     }
 
     async fn serve(router: Router) -> String {
@@ -357,7 +447,7 @@ mod tests {
     struct Enclave {
         responder: Arc<ChannelEnclave>,
         answer: MatchResult,
-        seen: Arc<Mutex<Option<Value>>>,
+        seen: Arc<Mutex<Option<Vec<u8>>>>,
         foreign_reply: bool,
     }
 
@@ -373,7 +463,7 @@ mod tests {
         client: &FlamingoVerifierClient,
         consumer: &ChannelConsumer,
         inputs: &MatchInputs,
-    ) -> Result<MatchResult, Error> {
+    ) -> Result<VerifiedMatchResult, Error> {
         let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
         let (sealed, opener) = consumer
             .seal_to_enclave(&plaintext)
@@ -382,9 +472,11 @@ mod tests {
             "{}/v1/matches",
             client.config.host_url().as_str().trim_end_matches('/')
         );
-        let request = client.http.post(url).json(&MatchRequestBody {
-            ciphertext: STANDARD.encode(sealed),
-        });
+        let request = client
+            .http
+            .post(url)
+            .header("content-type", MATCH_CONTENT_TYPE)
+            .body(sealed);
 
         client.request_match_with(request, opener).await
     }
@@ -392,7 +484,7 @@ mod tests {
     async fn serve_enclave(
         answer: MatchResult,
         foreign_reply: bool,
-    ) -> (String, Arc<ChannelEnclave>, Arc<Mutex<Option<Value>>>) {
+    ) -> (String, Arc<ChannelEnclave>, Arc<Mutex<Option<Vec<u8>>>>) {
         let responder = Arc::new(
             ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
                 .expect("channel key"),
@@ -405,56 +497,51 @@ mod tests {
             foreign_reply,
         };
 
-        let router = Router::new()
-            .route(
-                "/v1/matches",
-                post(
-                    |State(state): State<Enclave>, Json(body): Json<Value>| async move {
-                        *state.seen.lock().expect("lock should be held") = Some(body.clone());
-
-                        let ciphertext = STANDARD
-                            .decode(
-                                body["ciphertext"]
-                                    .as_str()
-                                    .expect("ciphertext should be a string"),
-                            )
-                            .expect("ciphertext should be base64");
-                        let (_, own_sealer) = state
-                            .responder
-                            .open(&ciphertext)
-                            .expect("the enclave should open a request sealed to its own key");
-
-                        let sealer = if state.foreign_reply {
-                            let stranger = ChannelConsumer::from_unverified_public_key(
-                                ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
-                                &state.responder.public_key(),
-                            )
-                            .expect("key should decode");
-                            let (other, _) = stranger
-                                .seal_to_enclave(b"unrelated")
-                                .expect("sealing should succeed");
-                            state
+        let router =
+            Router::new()
+                .route(
+                    "/v1/matches",
+                    post(
+                        |State(state): State<Enclave>,
+                         headers: axum::http::HeaderMap,
+                         body: Bytes| async move {
+                            assert_eq!(headers["content-type"], MATCH_CONTENT_TYPE);
+                            *state.seen.lock().expect("lock") = Some(body.to_vec());
+                            let ciphertext = body;
+                            let (_, own_sealer) = state
                                 .responder
-                                .open(&other)
-                                .expect("the enclave opens its own")
-                                .1
-                        } else {
-                            own_sealer
-                        };
+                                .open(&ciphertext)
+                                .expect("the enclave should open a request sealed to its own key");
 
-                        let encoded = state
-                            .answer
-                            .to_padded_cbor()
-                            .expect("result should fit the envelope");
-                        let response = sealer.seal(&encoded).expect("sealing should succeed");
+                            let sealer = if state.foreign_reply {
+                                let stranger = ChannelConsumer::from_unverified_public_key(
+                                    ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
+                                    &state.responder.public_key(),
+                                )
+                                .expect("key should decode");
+                                let (other, _) = stranger
+                                    .seal_to_enclave(b"unrelated")
+                                    .expect("sealing should succeed");
+                                state
+                                    .responder
+                                    .open(&other)
+                                    .expect("the enclave opens its own")
+                                    .1
+                            } else {
+                                own_sealer
+                            };
 
-                        Json(json!({
-                            "response_ciphertext": STANDARD.encode(response),
-                        }))
-                    },
-                ),
-            )
-            .with_state(state);
+                            let encoded = state
+                                .answer
+                                .to_padded_cbor()
+                                .expect("result should fit the envelope");
+                            let response = sealer.seal(&encoded).expect("sealing should succeed");
+
+                            ([("content-type", MATCH_CONTENT_TYPE)], response)
+                        },
+                    ),
+                )
+                .with_state(state);
 
         (serve(router).await, responder, seen)
     }
@@ -478,7 +565,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_sealed_rejection_round_trips() {
-        let answer = MatchResult::Failed(FailureReason::MatchBelowThreshold);
+        let answer = MatchResult::Failed(FailureReason::MatchBelowThreshold(
+            flamingo_verifier_sealed_types::ComparisonRole::SelfieChallenge,
+        ));
         let (base_url, responder, seen) = serve_enclave(answer.clone(), false).await;
         let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
 
@@ -486,20 +575,17 @@ mod tests {
             .await
             .expect("a rejection is a normal return");
 
-        assert_eq!(result, answer);
+        assert!(matches!(
+            result,
+            VerifiedMatchResult::Failed(FailureReason::MatchBelowThreshold(_))
+        ));
 
         let body = seen.lock().expect("lock should be held").clone().unwrap();
-        assert!(
-            STANDARD
-                .decode(body["ciphertext"].as_str().unwrap())
-                .is_ok(),
-            "the sealed request must be base64"
-        );
-        assert_eq!(
-            body.as_object().map(serde_json::Map::len),
-            Some(1),
-            "the request carries the ciphertext and nothing else"
-        );
+        let (plaintext, _) = responder.open(&body).unwrap();
+        assert!(matches!(
+            MatchInputs::from_cbor(&plaintext),
+            Ok(MatchInputs::GrayBadge(_))
+        ));
     }
 
     #[tokio::test]

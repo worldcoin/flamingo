@@ -4,6 +4,8 @@
 //! reach the same pod. Behind an ALB that affinity is a cookie, and a client that drops it lands
 //! on an arbitrary pod and burns an attestation on `reassign_required`.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 

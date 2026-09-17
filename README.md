@@ -144,68 +144,22 @@ VERIFIER_CONFIG=./client.json cargo run --bin flamingo-verifier-e2e -- <credenti
 
 ## Matches
 
-`POST /v1/matches` compares a credential image against a live frame and the RP's challenge
-frame. The host relays but cannot read anything it carries:
+`POST /v1/matches` accepts and returns raw encrypted bytes with
+`Content-Type: application/octet-stream`. There is no JSON/base64 match envelope.
+The plaintext remains CBOR, with exactly one `deep_face` or `gray_badge` operation.
+DeepFace requires all three Orb/live/challenge similarities to meet a normalized `[0, 1]`
+threshold. Both operations have explicit vanilla/LightGuard capture variants. GrayBadge
+currently returns encrypted `unsupported_operation` pending its signed-token contract;
+LightGuard returns encrypted `unsupported_capture`.
 
-```json
-{ "ciphertext": "<base64 enc || ciphertext>" }
-```
-
-`ciphertext` is the match inputs sealed to the enclave's attested encryption key — all three
-frames and `hashes.json`. The requester downloads the challenge frame from the RP and seals it
-along with the rest, so the host has nothing to look up and no plaintext field it could be
-steered by.
-
-Nothing in the payload proves the challenge frame is the one the RP issued. The enclave commits to
-whatever it compared, as `challenger_image_hash`, and the RP rejects a statement whose hash is not
-the one it retained — that comparison is the entire binding.
-
-The sealed payload also carries an optional `light_guard_image`, a second liveness frame. Omitting
-it selects vanilla mode, the flow described here. Sending one selects LightGuard — challenge-response
-spoof detection — which **is not implemented**: the enclave panics on such a request today.
-
-```json
-{ "response_ciphertext": "<base64 nonce || ciphertext>" }
-```
-
-The sealed response carries either a `COSE_Sign1` match statement or the reason no statement was
-issued. A statement travels with the signing key's attestation sealed beside it, since that
-document is the only thing saying which enclave signed it. A rejection carries no document.
-Only the requester can open any of it — a second channel to the same enclave key cannot.
-
-The signing key's attestation is a separate document from the encryption key's on purpose: it
-outlives the exchange and is carried into the `Verifier` proof, while the encryption key's is
-transport setup discarded with the channel.
-
-The host learns only that the enclave answered. Once a request has been opened there is a sealed
-channel to reply on, so everything the enclave discovers from that point — a malformed payload, an
-unusable `hashes.json`, an image refused on quality grounds, a below-threshold score, an unusable
-challenge frame — travels inside `response_ciphertext`. None of it reaches the status code.
-
-| Status | Meaning |
-| --- | --- |
-| `200` | The enclave answered; the sealed payload holds the outcome |
-| `409` `reassign_required` | The request did not open, so there was no channel to reply on; re-assign and re-seal, once |
-| `413` `request_too_large` | The body exceeded the route's ceiling; nothing was forwarded |
-| `400` `invalid_request` | The body was not the expected JSON, or `ciphertext` was not base64 |
-| `500` `internal_error` | Enclave fault |
-
-`409` is the only *opened*-request failure with a status of its own, because with no channel open
-there is nothing to seal a reply into. Everything else the host might want — how often matches fail,
-how often a requester sends an unusable frame — has to come from enclave-side metrics rather than
-from status codes. A challenge frame the requester could not download never reaches this service at
-all, so do not look for it here.
-
-### The body ceiling
-
-All three frames arrive inside one sealed payload, so the request body is the only thing bounding
-what the host buffers and what the enclave is then asked to allocate — the vsock framing takes the
-host's word for a length. `MAX_BODY_BYTES` in `verifier/host/src/routes/matches.rs` sets it to
-12 MiB, budgeting ~7 MiB of images plus the ~1.37x that CBOR framing, HPKE overhead and base64 add.
-
-It hangs off the match route alone. Assignment sends no body and the health routes are `GET`s, so
-allowing multi-megabyte requests there would widen the service's ingress for nothing. Over-limit
-bodies come back as `413 request_too_large` in the usual envelope rather than as a bare status.
+A `200` response contains a padded encrypted success or failure. Successful DeepFace
+statements retain the legacy token format: live and challenge image hashes, a hash of the
+credential claims, and the credential/live score. The threshold and other two scores are
+not included in the signed token. The client returns parsed, verified claims alongside the
+token and signing-key attestation. Infrastructure
+errors retain the JSON error envelope; `409 reassign_required` requires fresh assignment and
+resealing, with at most one retry. `415` rejects the old JSON transport and `413` enforces the
+binary body limit.
 
 ## Nitro-enabled development host
 

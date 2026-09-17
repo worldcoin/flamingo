@@ -61,10 +61,6 @@ pub enum Error {
     #[error("sealed channel failure: {0:?}")]
     Channel(#[source] ChannelError),
 
-    /// The response ciphertext was not valid base64.
-    #[error("response ciphertext was not valid base64")]
-    MalformedCiphertext,
-
     /// The sealed plaintext was not a match result.
     #[error("sealed response was not a match result")]
     MalformedResult,

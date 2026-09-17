@@ -7,8 +7,7 @@ use crate::Error;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchRequest {
     /// The sealed request, relayed verbatim.
-    #[serde(with = "serde_bytes")]
-    pub body: Vec<u8>,
+    pub body: bytes::Bytes,
 }
 
 impl Request for MatchRequest {

@@ -1,5 +1,7 @@
 //! End-to-end tests for the assignment client, over real HTTP.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::net::{Ipv4Addr, SocketAddr};
 
 use axum::Router;

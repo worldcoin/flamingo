@@ -1,52 +1,15 @@
-use serde::{Deserialize, Serialize};
-
-/// `POST /v1/matches` request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MatchRequestBody {
-    /// The sealed match request, base64.
-    pub ciphertext: String,
-}
-
-/// `POST /v1/matches` response.
-///
-/// No cleartext outcome: whether a match held is itself a fact about the request. The
-/// signing-key attestation travels sealed inside, beside the statement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MatchResponseBody {
-    /// The sealed outcome, base64.
-    pub response_ciphertext: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MatchRequestBody, MatchResponseBody};
-
-    /// Pins the wire names. A round trip alone would not: a rename moves both ends together.
-    #[test]
-    fn the_request_keeps_its_wire_names() {
-        let body = MatchRequestBody {
-            ciphertext: "c2VhbGVk".to_owned(),
-        };
-        let json = serde_json::json!({ "ciphertext": "c2VhbGVk" });
-
-        assert_eq!(serde_json::to_value(&body).expect("should serialize"), json);
-        assert_eq!(
-            serde_json::from_value::<MatchRequestBody>(json).expect("should deserialize"),
-            body
-        );
-    }
-
-    #[test]
-    fn the_response_keeps_its_wire_names() {
-        let body = MatchResponseBody {
-            response_ciphertext: "c2VhbGVk".to_owned(),
-        };
-        let json = serde_json::json!({ "response_ciphertext": "c2VhbGVk" });
-
-        assert_eq!(serde_json::to_value(&body).expect("should serialize"), json);
-        assert_eq!(
-            serde_json::from_value::<MatchResponseBody>(json).expect("should deserialize"),
-            body
-        );
-    }
-}
+//! Bounds for the opaque binary match exchange.
+/// Media type for encrypted match request and response bodies.
+pub const MATCH_CONTENT_TYPE: &str = "application/octet-stream";
+/// Maximum encoded bytes in one image.
+pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum encoded image bytes across all frames (unchanged intended image budget).
+pub const MAX_TOTAL_IMAGE_BYTES: usize = 7 * 1024 * 1024;
+/// Maximum raw PCP hashes.json bytes.
+pub const MAX_HASHES_JSON_BYTES: usize = 64 * 1024;
+/// Image/PCP budget plus bounded CBOR structural overhead.
+pub const MAX_MATCH_PLAINTEXT_BYTES: usize = MAX_TOTAL_IMAGE_BYTES + MAX_HASHES_JSON_BYTES + 4096;
+/// Plaintext budget plus room for the Pontifex channel envelope.
+pub const MAX_MATCH_BODY_BYTES: usize = MAX_MATCH_PLAINTEXT_BYTES + 4096;
+/// Bounded encrypted response (16 KiB padded plaintext plus channel overhead).
+pub const MAX_MATCH_RESPONSE_BYTES: usize = 16 * 1024 + 4096;

@@ -32,7 +32,7 @@ mod client;
 mod config;
 mod error;
 
-pub use client::{FlamingoVerifierClient, VerifiedAssignment};
+pub use client::{FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, VerifiedMatchResult};
 pub use config::Config;
 pub use error::Error;
 pub use pontifex::{ChannelConsumer, PcrMeasurement};
