@@ -8,57 +8,84 @@ use flamingo_verifier_sealed_types::{
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-/// Decrypt, validate and sign; every request-derived outcome stays encrypted.
-pub async fn handler(
-    state: Arc<EnclaveState>,
-    request: MatchRequest,
-) -> Result<MatchResponse, enclave_types::Error> {
-    if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES {
-        return Err(enclave_types::Error::RequestNotOpened);
-    }
-    let (plaintext, sealer) = state
-        .channel()
-        .open(&request.body)
-        .map_err(|_| enclave_types::Error::RequestNotOpened)?;
-    let claims = MatchInputs::from_cbor(&plaintext).and_then(|inputs| evaluate(&state, &inputs));
-    let result = match claims {
-        Ok(claims) => MatchResult::Success(AttestedStatement {
-            token: state
-                .signing_key()
-                .sign_claims(&claims)
-                .map_err(|_| enclave_types::Error::Internal)?,
-            signing_key_attestation: state.signing_key_attestation().await,
-        }),
-        Err(FailureReason::Internal) => return Err(enclave_types::Error::Internal),
-        Err(reason) => MatchResult::Failed(reason),
+use std::time::Duration;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use tokio::time::timeout;
+use crate::face_engine::DeepFaceScores;
+const WORKER_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Decrypt and validate before taking the worker lock; seal every input-derived outcome.
+pub async fn handler(state: Arc<EnclaveState>, request: MatchRequest) -> Result<MatchResponse, enclave_types::Error> {
+    if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES { return Err(enclave_types::Error::RequestNotOpened); }
+    let admission = Arc::clone(&state.admission).try_acquire_owned().map_err(|_| enclave_types::Error::NotReady)?;
+    let preparation_state = Arc::clone(&state);
+    let (sealer, prepared, admission) = blocking(move || {
+        let (plaintext, sealer) = preparation_state.channel().open(&request.body).map_err(|_| enclave_types::Error::RequestNotOpened)?;
+        let prepared = MatchInputs::from_cbor(&plaintext).and_then(prepare);
+        Ok((sealer, prepared, admission))
+    }).await?;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(reason) => return blocking(move || {
+            let _admission = admission;
+            let encoded = MatchResult::Failed(reason).to_padded_cbor().map_err(|_| enclave_types::Error::Internal)?;
+            Ok(MatchResponse { ciphertext: sealer.seal(&encoded).map_err(|_| enclave_types::Error::Internal)? })
+        }).await,
     };
+    let signing_key_attestation = state.signing_key_attestation().await;
+    let mut worker = timeout(WORKER_QUEUE_TIMEOUT, Arc::clone(&state.comparator).lock_owned()).await.map_err(|_| enclave_types::Error::NotReady)?;
+    blocking(move || {
+        let _admission = admission;
+        let (inputs, credential_claim) = prepared;
+        let LiveCapture::Vanilla(live) = &inputs.live else { unreachable!("validated capture") };
+        let scores = exit_on_panic(|| worker.deep_face(&inputs.orb_credential, live, &inputs.rtms_challenge));
+        drop(worker);
+        let claims = scores.and_then(|scores| evaluate(&inputs, credential_claim, scores));
+        let result = match claims {
+            Ok(claims) => MatchResult::Success(AttestedStatement { token: state.signing_key().sign_claims(&claims).map_err(|_| enclave_types::Error::Internal)?, signing_key_attestation }),
+            Err(FailureReason::Internal) => return Err(enclave_types::Error::Internal),
+            Err(reason) => MatchResult::Failed(reason),
+        };
+        let encoded = result.to_padded_cbor().map_err(|_| enclave_types::Error::Internal)?;
+        Ok(MatchResponse { ciphertext: sealer.seal(&encoded).map_err(|_| enclave_types::Error::Internal)? })
+    }).await
+}
+/// Runs synchronous work off the executor, retaining tracing and terminal panic handling.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, enclave_types::Error> + Send + 'static,
+) -> Result<T, enclave_types::Error> {
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
+        exit_on_panic(work)
+    })
+    .await
+    .map_err(|_| {
+        tracing::error!("blocking match task cancelled");
+        enclave_types::Error::Internal
+    })?
+}
 
-    let encoded = result
-        .to_padded_cbor()
-        .map_err(|_| enclave_types::Error::Internal)?;
-
-    Ok(MatchResponse {
-        ciphertext: sealer
-            .seal(&encoded)
-            .map_err(|_| enclave_types::Error::Internal)?,
+/// Detached work must still terminate the enclave on panic.
+fn exit_on_panic<T>(work: impl FnOnce() -> T) -> T {
+    catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|_| {
+        tracing::error!("blocking match task panicked");
+        std::process::exit(1)
     })
 }
 
-fn evaluate(state: &EnclaveState, inputs: &MatchInputs) -> Result<MatchClaims, FailureReason> {
+fn prepare(inputs: MatchInputs) -> Result<(flamingo_verifier_sealed_types::DeepFaceInputs, [u8; 32]), FailureReason> {
     inputs.validate()?;
-    let live = match inputs {
-        MatchInputs::DeepFace(i) => &i.live,
-        MatchInputs::GrayBadge(i) => &i.live,
-    };
-    let LiveCapture::Vanilla(live) = live else {
-        return Err(FailureReason::UnsupportedCapture);
-    };
-    let MatchInputs::DeepFace(i) = inputs else {
-        return Err(FailureReason::UnsupportedOperation);
-    };
+    let live = match &inputs { MatchInputs::DeepFace(i) => &i.live, MatchInputs::GrayBadge(i) => &i.live };
+    if !matches!(live, LiveCapture::Vanilla(_)) { return Err(FailureReason::UnsupportedCapture); }
+    let MatchInputs::DeepFace(i) = inputs else { return Err(FailureReason::UnsupportedOperation); };
+    let credential_claim = pcp::bind_credential_claim(&i.orb_credential, &i.hashes_json)?;
+    Ok((i, credential_claim))
+}
+fn evaluate(i: &flamingo_verifier_sealed_types::DeepFaceInputs, credential_claim: [u8; 32], scores: DeepFaceScores) -> Result<MatchClaims, FailureReason> {
+    let LiveCapture::Vanilla(live) = &i.live else { unreachable!("validated capture") };
     let threshold = i.match_threshold;
     let live_image_hash = Sha256::digest(live).into();
-    let credential_claim = pcp::bind_credential_claim(&i.orb_credential, &i.hashes_json)?;
     let challenger_image_hash = Sha256::digest(&i.rtms_challenge).into();
     let check = |score: f64, comparison| {
         if !valid_similarity(score) {
@@ -69,9 +96,6 @@ fn evaluate(state: &EnclaveState, inputs: &MatchInputs) -> Result<MatchClaims, F
         }
         Ok(())
     };
-    let scores = state
-        .face_engine()
-        .deep_face(&i.orb_credential, live, &i.rtms_challenge)?;
     check(scores.similarity_orb_selfie, ComparisonRole::OrbSelfie)?;
     check(
         scores.similarity_orb_challenge,
@@ -95,7 +119,6 @@ fn evaluate(state: &EnclaveState, inputs: &MatchInputs) -> Result<MatchClaims, F
         match_coefficient,
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,7 +137,7 @@ mod tests {
     }
     impl FaceComparator for Engine {
         fn deep_face(
-            &self,
+            &mut self,
             credential: &[u8],
             live: &[u8],
             challenge: &[u8],
@@ -129,7 +152,7 @@ mod tests {
             })
         }
 
-        fn gray_badge(&self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
+        fn gray_badge(&mut self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
             panic!("GrayBadge must be rejected before inference")
         }
     }
@@ -153,7 +176,7 @@ mod tests {
         })
     }
     fn state(engine: impl FaceComparator + 'static) -> Arc<EnclaveState> {
-        Arc::new(EnclaveState::generate(Arc::new(EchoAttestor), Arc::new(engine)).unwrap())
+        Arc::new(EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine)).unwrap())
     }
     async fn exchange(state: Arc<EnclaveState>, inputs: &MatchInputs) -> (MatchResult, usize) {
         let consumer = ChannelConsumer::from_unverified_public_key(
@@ -295,7 +318,7 @@ mod tests {
     fn invalid_backend_scores_fail_as_infrastructure_errors() {
         for third in [f64::NAN, f64::INFINITY, 1.01, -0.01] {
             assert!(matches!(
-                evaluate(&state(Engine { third }), &inputs()),
+                evaluate(&prepare(inputs()).unwrap().0, [0; 32], DeepFaceScores { similarity_orb_selfie: 0.95, similarity_orb_challenge: 0.9, similarity_selfie_challenge: third }),
                 Err(FailureReason::Internal)
             ));
         }

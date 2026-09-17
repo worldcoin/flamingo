@@ -44,6 +44,10 @@ jobs:
         with:
           app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
           private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
+      - name: Inference dependency boundary
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/public-metadata.json"
+          jq -e 'all(.packages[]; .name != "flamingo-verifier-worker" and .name != "face-engine" and (if ((.source // "") | contains("biometric-engines")) then .name == "biometric-engines-protocol" else true end))' "$RUNNER_TEMP/public-metadata.json"
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -61,15 +65,20 @@ jobs:
           private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - name: tests
         run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-worker-process --verbose
+      - name: Carrier lifecycle tests
+        run: python3 scripts/tests/test_worker_carrier.py
+      - name: Bounded protocol client tests
+        run: cargo test --locked -p flamingo-verifier-worker-process --test client
       - name: Minijail process tests
         run: |
-          cargo test --locked -p flamingo-verifier-worker-process --all-features --no-run \
+          RUSTFLAGS="-C target-feature=+crt-static" cargo test --locked \
+            --target x86_64-unknown-linux-gnu -p flamingo-verifier-worker-process --all-features --no-run \
             --message-format=json > target/worker-test-artifacts.json
           test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "process") | .executable // empty' target/worker-test-artifacts.json)
           test -n "$test_binary"
           sudo timeout --kill-after=5s 60s "$test_binary"
 
-  # Evaluate every Nix output without spending the 90-minute EIF build.
+  # Model credentials are gone; the protocol still needs private Git until published.
   flake:
     name: Flake eval
     runs-on: ubuntu-latest
@@ -101,7 +110,7 @@ jobs:
           GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          for output in verifier-enclave verifier-oci verifier-eif; do
+          for output in verifier-enclave worker-bundle verifier-oci verifier-eif; do
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done

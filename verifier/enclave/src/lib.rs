@@ -10,6 +10,9 @@
 
 /// Nitro Secure Module attestation.
 pub mod attestation;
+/// Authenticated single-threaded runtime provisioning.
+#[cfg(target_os = "linux")]
+pub mod bootstrap;
 /// Face embedding generation and comparison.
 pub mod face_engine;
 /// Boot-scoped key material.

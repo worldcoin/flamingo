@@ -17,7 +17,7 @@ pub const WORKER_UID: u32 = 65532;
 
 /// Trusted boot configuration, not values supplied by the private worker manifest.
 pub struct SandboxConfig<'a> {
-    /// Minimal, root-owned runtime tree containing only approved libraries/config/models.
+    /// Minimal, root-owned runtime tree containing the verified executable.
     /// Provisioning must keep the entire tree and its ancestors immutable during launch.
     pub root: &'a Path,
     /// Hard virtual-address-space ceiling; leave physical memory for the broker and kernel.
