@@ -30,7 +30,7 @@ pub struct MatchInputs {
     /// The RP's challenge frame, as the requester downloaded it.
     #[serde(with = "serde_bytes")]
     pub challenge_image: Vec<u8>,
-    /// Minimum similarity the RP requires.
+    /// Minimum similarity the RP requires, finite and in [0, 1] for nonnegative match claims.
     pub match_threshold: f32,
 }
 
@@ -53,7 +53,13 @@ impl MatchInputs {
     ///
     /// Returns [`Error::Malformed`] if the bytes are not this framing.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, Error> {
-        ciborium::from_reader(bytes).map_err(|_| Error::Malformed)
+        let mut remaining = bytes;
+        let inputs: Self = ciborium::from_reader(&mut remaining).map_err(|_| Error::Malformed)?;
+        if !remaining.is_empty() {
+            return Err(Error::Malformed);
+        }
+
+        Ok(inputs)
     }
 }
 
@@ -136,7 +142,13 @@ impl MatchResult {
     ///
     /// Returns [`Error::Malformed`] if the bytes are not this framing.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, Error> {
-        ciborium::from_reader(bytes).map_err(|_| Error::Malformed)
+        let mut remaining = bytes;
+        let result = ciborium::from_reader(&mut remaining).map_err(|_| Error::Malformed)?;
+        if !remaining.is_empty() {
+            return Err(Error::Malformed);
+        }
+
+        Ok(result)
     }
 
     /// Decodes a result from the fixed-size sealed-response envelope.
@@ -181,8 +193,8 @@ pub enum FailureReason {
     /// A comparison scored below the RP-supplied `match_threshold`.
     MatchBelowThreshold,
     /// The enclave could not get from the images to a score. Covers a decode failure, a quality
-    /// rejection, an unusable frame, and a matcher that failed on well-formed embeddings; the
-    /// enclave log distinguishes them.
+    /// rejection, an unusable frame, and a matcher that failed on well-formed embeddings.
+    /// These outcomes must not appear in enclave logs or metrics.
     ImageAnalysisFailed,
 }
 
@@ -276,6 +288,20 @@ mod tests {
             MatchInputs::from_cbor(b"not cbor framing").err(),
             Some(Error::Malformed)
         );
+    }
+
+    /// A valid value cannot hide a second payload or nonzero envelope data.
+    #[test]
+    fn rejects_trailing_bytes_on_inputs_and_results() {
+        let mut input = inputs().to_cbor().unwrap().to_vec();
+        input.push(0);
+        assert_eq!(MatchInputs::from_cbor(&input).err(), Some(Error::Malformed));
+
+        let mut result = MatchResult::Failed(FailureReason::MalformedInputs)
+            .to_cbor()
+            .unwrap();
+        result.push(0);
+        assert_eq!(MatchResult::from_cbor(&result), Err(Error::Malformed));
     }
 
     #[test]

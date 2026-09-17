@@ -12,11 +12,25 @@ let
   rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml");
   craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-  # The biometric-engines rev pinned by the root lockfile, so the assets grafted into the
+  workerLock = root + "/verifier/worker/Cargo.lock";
+
+  # Public images never resolve the private worker workspace or vendor its dependencies.
+  publicSource = lib.cleanSourceWith {
+    src = root;
+    filter =
+      path: _:
+      !(
+        path == toString (root + "/verifier/worker")
+        || lib.hasPrefix (toString (root + "/verifier/worker") + "/") path
+      );
+  };
+  publicVendorDir = craneLib.vendorCargoDeps { cargoLock = root + "/Cargo.lock"; };
+
+  # The biometric-engines rev pinned by the private worker lockfile, so the assets grafted into the
   # vendor tree below cannot come from a different commit than the crates built against them.
   lockedFaceEngineRev =
     let
-      lock = builtins.fromTOML (builtins.readFile (root + "/Cargo.lock"));
+      lock = builtins.fromTOML (builtins.readFile workerLock);
       sources = lib.unique (
         lib.filter (source: source != null && lib.hasInfix "worldcoin/biometric-engines" source) (
           map (package: package.source or null) lock.package
@@ -24,14 +38,14 @@ let
       );
     in
     assert lib.assertMsg (lib.length sources == 1) (
-      "expected one worldcoin/biometric-engines git source in Cargo.lock,"
+      "expected one worldcoin/biometric-engines git source in verifier/worker/Cargo.lock,"
       + " found "
       + toString (lib.length sources)
     );
     lib.last (lib.splitString "#" (lib.head sources));
 
   # Fetched here rather than taken as a flake input so there is no second pin to keep in
-  # step with Cargo.lock. This is a private repo, and `builtins.fetchGit` runs on the host
+  # step with the worker lock. This is a private repo, and `builtins.fetchGit` runs on the host
   # with the host's git credentials — a credential helper or an ssh agent. No secret
   # reaches a derivation or the store. crane resolves the crates themselves the same way.
   biometricEngines = builtins.fetchGit {
@@ -47,8 +61,8 @@ let
   # checkout, one level above the crate directories, so restoring assets/ there satisfies
   # it without patching the crate. Nothing verifies the addition: cargo writes
   # `{"files":{}}` as the checksum manifest for vendored git crates.
-  verifierVendorDir = craneLib.vendorCargoDeps {
-    cargoLock = root + "/Cargo.lock";
+  workerVendorDir = craneLib.vendorCargoDeps {
+    cargoLock = workerLock;
     overrideVendorGitCheckout =
       packages: drv:
       if
@@ -89,30 +103,34 @@ let
     RUSTFLAGS = "-C llvm-args=-disable-licm-promotion";
   };
 
-  # face-engine builds its ONNX Runtime bindings with bindgen, which needs clang.
-  faceEngineArgs = {
-    nativeBuildInputs = with pkgs; [
-      clang
-      pkg-config
-    ];
-    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-  };
-
   version = (builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"))).workspace.package.version;
 
   buildEnclaveBin =
     {
       pname,
-      extraArgs ? { },
+      privateWorker ? false,
     }:
     craneLib.buildPackage (
       commonArgs
-      // extraArgs
       // {
-        inherit pname version;
-        src = root;
-        cargoVendorDir = verifierVendorDir;
+        inherit pname;
+        version = if privateWorker then
+          (builtins.fromTOML (builtins.readFile (root + "/verifier/worker/Cargo.toml"))).package.version
+        else version;
+        src = if privateWorker then root else publicSource;
+        cargoVendorDir = if privateWorker then workerVendorDir else publicVendorDir;
         cargoExtraArgs = "--locked --bin ${pname}";
+      }
+      // lib.optionalAttrs privateWorker {
+        # All Cargo invocations, including Crane's unqualified install-time metadata,
+        # must use the private workspace. Keep the surrounding source for sibling deps.
+        postUnpack = ''
+          sourceRoot="$sourceRoot/verifier/worker"
+        '';
+        # Crane's dummy source preserves only the root lockfile by default.
+        extraDummyScript = ''
+          cp ${workerLock} "$out/verifier/worker/Cargo.lock"
+        '';
       }
     );
 in
@@ -122,6 +140,12 @@ in
   };
   verifier-enclave = buildEnclaveBin {
     pname = "verifier-enclave";
-    extraArgs = faceEngineArgs;
+  };
+  worker-bundle = buildEnclaveBin {
+    pname = "worker-bundle";
+  };
+  verifier-worker = buildEnclaveBin {
+    pname = "verifier-worker";
+    privateWorker = true;
   };
 }
