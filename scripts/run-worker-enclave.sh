@@ -36,7 +36,14 @@ cleanup() {
         enclave_id=$(nitro-cli describe-enclaves | jq -r --arg name "$enclave_name" '.[] | select(.EnclaveName == $name) | .EnclaveID')
     fi
     if [[ -n "$enclave_id" ]]; then
-        timeout --kill-after=5s 15s nitro-cli terminate-enclave --enclave-id "$enclave_id"
+        if ! timeout --kill-after=5s 15s nitro-cli terminate-enclave --enclave-id "$enclave_id"; then
+            # A crashed or externally terminated enclave may already be gone.
+            # Confirm absence before retrying; a real cleanup failure must stop the carrier.
+            local remaining present
+            remaining=$(nitro-cli describe-enclaves) || return 1
+            present=$(jq -er --arg id "$enclave_id" 'any(.[]; .EnclaveID == $id) | tostring' <<< "$remaining") || return 1
+            [[ "$present" == false ]] || return 1
+        fi
         enclave_id=""
     fi
 }

@@ -109,23 +109,30 @@ fn send(cid: &str, bundle: &str, io_timeout: &str) -> Result<(), Box<dyn std::er
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
                 std::thread::sleep(Duration::from_millis(200))
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(format!("worker bootstrap connect failed: {error}").into()),
         }
     };
     let timeout = Some(Duration::from_secs(io_timeout));
     stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(timeout)?;
-    let sent = std::io::copy(&mut (&mut bundle).take(metadata.len()), &mut stream)?;
+    let sent = std::io::copy(&mut (&mut bundle).take(metadata.len()), &mut stream)
+        .map_err(|error| format!("worker bundle transfer failed: {error}"))?;
     if sent != metadata.len() || bundle.read(&mut [0])? != 0 {
         return Err("bundle changed during transfer".into());
     }
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut acknowledgement = [0xff];
-    stream.read_exact(&mut acknowledgement)?;
+    stream
+        .read_exact(&mut acknowledgement)
+        .map_err(|error| format!("worker initialization acknowledgement failed: {error}"))?;
     if acknowledgement != [0] {
         return Err("enclave refused worker startup".into());
     }
-    if stream.read(&mut [0])? != 0 {
+    if stream
+        .read(&mut [0])
+        .map_err(|error| format!("worker acknowledgement close failed: {error}"))?
+        != 0
+    {
         return Err("invalid trailing startup acknowledgement".into());
     }
     Ok(())
