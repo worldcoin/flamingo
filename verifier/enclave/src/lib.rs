@@ -27,4 +27,4 @@ pub mod state;
 #[cfg(test)]
 mod test_support;
 
-mod validation;
+mod error;

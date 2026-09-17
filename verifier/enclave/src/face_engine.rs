@@ -12,7 +12,7 @@ use face_engine::{
 };
 use flamingo_verifier_protocol::match_token::{DeepFaceScores, GrayBadgeScores, valid_similarity};
 use flamingo_verifier_sealed_types::{
-    AnalysisFailure, ComparisonRole, FailureReason, ImageRole, LiveCapture, MatchInputs,
+    ComparisonRole, FailureReason, ImageFailureReason, ImageRole, LiveCapture, MatchInputs,
 };
 use image::ImageReader;
 
@@ -72,14 +72,14 @@ impl FaceEngine {
             .map_err(|_| FailureReason::Internal)?;
         if let Some(error) = analysis.error {
             tracing::warn!(?error, "Face Engine image analysis failed");
-            return Err(crate::validation::failure(&error, role));
+            return Err(crate::error::image_failure(&error, role));
         }
 
         let subject_metadata = analysis.subject_face_extracted.ok_or_else(|| {
             tracing::warn!("Face Engine did not extract a subject");
-            FailureReason::ImageAnalysisFailed {
+            FailureReason::ImageRejected {
                 image: role,
-                reason: AnalysisFailure::NoFaceDetected,
+                reason: ImageFailureReason::NoFaceDetected,
             }
         })?;
         let subject = SubjectFace {
@@ -93,14 +93,14 @@ impl FaceEngine {
             .map_err(|_| FailureReason::Internal)?;
         if let Some(error) = output.metadata.error {
             tracing::warn!(?error, "Face Engine rejected the generated template");
-            return Err(crate::validation::failure(&error, role));
+            return Err(crate::error::image_failure(&error, role));
         }
 
         output.embedding_vector.ok_or_else(|| {
             tracing::error!("Face Engine returned no embedding");
-            FailureReason::ImageAnalysisFailed {
+            FailureReason::ImageRejected {
                 image: role,
-                reason: AnalysisFailure::TemplateFailed,
+                reason: ImageFailureReason::TemplateFailed,
             }
         })
     }
@@ -175,9 +175,9 @@ impl FaceComparator for FaceEngine {
 }
 
 fn decode_image(bytes: &[u8], role: ImageRole) -> Result<RgbImage, FailureReason> {
-    let invalid = || FailureReason::ImageAnalysisFailed {
+    let invalid = || FailureReason::ImageRejected {
         image: role,
-        reason: AnalysisFailure::InvalidImage,
+        reason: ImageFailureReason::InvalidImage,
     };
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()

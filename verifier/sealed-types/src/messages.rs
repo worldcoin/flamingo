@@ -1,5 +1,5 @@
 //! Typed CBOR payloads. Image ownership moves across inference adapters without cloning.
-use crate::error::Error;
+use crate::{Error, FailureReason};
 use flamingo_verifier_api_types::{
     MAX_HASHES_JSON_BYTES, MAX_IMAGE_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_IMAGE_BYTES,
 };
@@ -319,74 +319,6 @@ impl MatchResult {
     }
 }
 
-/// Semantic location of an image failure, matching the worker vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImageRole {
-    /// Orb thumbnail.
-    OrbCredential,
-    /// Live capture.
-    LiveSelfie,
-    /// RTMS image.
-    RtmsChallenge,
-}
-/// Semantic comparison location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ComparisonRole {
-    /// Orb/live.
-    OrbSelfie,
-    /// Orb/challenge.
-    OrbChallenge,
-    /// Live/challenge.
-    SelfieChallenge,
-}
-/// Approved analysis failures; no raw engine diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AnalysisFailure {
-    /// Image could not be decoded within limits.
-    InvalidImage,
-    /// No face was detected.
-    NoFaceDetected,
-    /// An image validation rejected the capture.
-    ValidationFailed(crate::ValidationFailure),
-    /// Template generation failed.
-    TemplateFailed,
-}
-/// All request-derived failures remain encrypted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailureReason {
-    /// Invalid CBOR shape.
-    MalformedInputs,
-    /// Invalid or oversized PCP hashes.
-    InvalidHashesJson,
-    /// PCP image binding failed.
-    ThumbnailHashMismatch,
-    /// Nonfinite or out-of-range threshold.
-    InvalidThreshold,
-    /// Empty image buffer.
-    EmptyImage,
-    /// Image or aggregate budget exceeded.
-    InputTooLarge,
-    /// Recognized capture is not implemented by this backend.
-    UnsupportedCapture,
-    /// A named comparison did not meet policy.
-    MatchBelowThreshold(ComparisonRole),
-    /// Image analysis rejection with semantic location.
-    ImageAnalysisFailed {
-        /// Which input failed.
-        image: ImageRole,
-        /// Approved reason.
-        reason: AnalysisFailure,
-    },
-    /// Matching failed on a named comparison.
-    MatchingFailed(ComparisonRole),
-    /// Backend infrastructure failed, distinct from biological rejection.
-    Internal,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,7 +379,11 @@ mod tests {
             signing_key_attestation: vec![2; 5000],
         });
         let failure = MatchResult::Failed(FailureReason::UnsupportedCapture);
-        for result in [success, failure] {
+        let image_failure = MatchResult::Failed(FailureReason::ImageRejected {
+            image: crate::ImageRole::LiveSelfie,
+            reason: crate::ImageFailureReason::EyesClosed,
+        });
+        for result in [success, failure, image_failure] {
             let encoded = result.to_padded_cbor().unwrap();
             assert_eq!(encoded.len(), MATCH_RESULT_ENVELOPE_LEN);
             assert_eq!(MatchResult::from_padded_cbor(&encoded), Ok(result));
