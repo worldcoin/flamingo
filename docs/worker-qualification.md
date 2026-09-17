@@ -33,9 +33,11 @@ common-app 2.44.0; its small-deployment strategy override requires `strategy.for
 Dev nodes advertise 4 GiB hugepages each. Cluster rollout/restart/rollback and peak
 memory remain deployment qualification gates; these host results do not prove them.
 
-Agent 1 owns the new public operation/claim contract. The current public adapter retains
-its existing two-score interface; direct worker GrayBadge and three-score success do
-not establish public GrayBadge support or authenticate the additional score.
+The rebase onto API PR #113 preserves binary transport, shared byte limits and all
+three normalized DeepFace policy checks. The existing token still authenticates its
+original coefficient and input hashes. GrayBadge stays explicitly unsupported at the
+public route until its signed claim contract is agreed. The Nitro timings above were
+measured before this API rebase; they are not measurements of the rebased build.
 
 The sole remaining private biometric dependency is the pinned protocol crate. Removing
 private Git credentials depends on its publication; engine/model dependencies and

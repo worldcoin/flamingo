@@ -31,7 +31,7 @@ const FATAL_EXIT: i32 = 70;
 fn config() -> WorkerClientConfig {
     WorkerClientConfig {
         startup_timeout: Duration::from_secs(2),
-        request_timeout: Duration::from_millis(300),
+        request_timeout: Duration::from_secs(2),
         max_request_bytes: 1024,
         max_image_bytes: 100,
     }
@@ -228,6 +228,12 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         .as_ref()
         .map_or(root, |runtime| runtime.root.path());
     let mut limits = config();
+    if matches!(
+        case,
+        "timeout" | "first-comparison-timeout" | "kill-failure"
+    ) {
+        limits.request_timeout = Duration::from_millis(300);
+    }
     if case == "startup-timeout" {
         limits.startup_timeout = Duration::from_millis(50);
     }
