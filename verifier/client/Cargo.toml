@@ -23,8 +23,18 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
 flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 hex-literal.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+axum.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "=0.3.76"
+wasm-bindgen = "=0.2.126"
+js-sys = "=0.3.103"
