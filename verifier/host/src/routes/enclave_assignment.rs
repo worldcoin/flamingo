@@ -1,6 +1,6 @@
 use axum::{Json, extract::State};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use flamingo_verifier_api_types::EnclaveAssignmentResponse;
+use flamingo_verifier_client::api_types::EnclaveAssignmentResponse;
 
 use crate::AppState;
 use crate::error::AppError;

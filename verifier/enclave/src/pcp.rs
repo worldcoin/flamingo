@@ -14,7 +14,7 @@
 //! signature chain. The credential commits `H(hashes.json)`, and the circuit only
 //! checks `claims == credential_claim`.
 
-use flamingo_verifier_sealed_types::FailureReason;
+use flamingo_verifier_client::sealed_types::FailureReason;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 

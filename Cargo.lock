@@ -1467,31 +1467,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
-name = "flamingo-verifier-api-types"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "flamingo-verifier-client"
 version = "0.3.0"
 dependencies = [
+ "ark-ff",
  "axum",
  "base64",
- "flamingo-verifier-api-types",
- "flamingo-verifier-protocol",
- "flamingo-verifier-sealed-types",
+ "ciborium",
+ "coset",
  "hex",
  "hex-literal",
  "pontifex",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
+ "serde_bytes",
  "serde_json",
+ "sha2 0.10.9",
+ "taceo-ark-babyjubjub",
+ "taceo-eddsa-babyjubjub",
+ "taceo-poseidon2",
  "thiserror 2.0.20",
  "tokio",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -1501,8 +1500,6 @@ dependencies = [
  "anyhow",
  "flamingo-verifier-client",
  "flamingo-verifier-enclave-types",
- "flamingo-verifier-protocol",
- "flamingo-verifier-sealed-types",
  "hex",
  "pontifex",
  "sha2 0.10.9",
@@ -1515,9 +1512,8 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "face-engine",
+ "flamingo-verifier-client",
  "flamingo-verifier-enclave-types",
- "flamingo-verifier-protocol",
- "flamingo-verifier-sealed-types",
  "hex",
  "image",
  "pontifex",
@@ -1550,7 +1546,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "flamingo-verifier-api-types",
+ "flamingo-verifier-client",
  "flamingo-verifier-enclave-types",
  "http-body-util",
  "pontifex",
@@ -1560,33 +1556,6 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
-]
-
-[[package]]
-name = "flamingo-verifier-protocol"
-version = "0.3.0"
-dependencies = [
- "ark-ff",
- "coset",
- "rand 0.8.8",
- "serde",
- "serde_bytes",
- "taceo-ark-babyjubjub",
- "taceo-eddsa-babyjubjub",
- "taceo-poseidon2",
-]
-
-[[package]]
-name = "flamingo-verifier-sealed-types"
-version = "0.3.0"
-dependencies = [
- "ciborium",
- "flamingo-verifier-api-types",
- "flamingo-verifier-protocol",
- "serde",
- "serde_bytes",
- "sha2 0.10.9",
- "zeroize",
 ]
 
 [[package]]

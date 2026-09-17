@@ -11,11 +11,11 @@ name = "flamingo-verifier-host"
 path = "src/main.rs"
 
 [dependencies]
+flamingo-verifier-client.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
-flamingo-verifier-api-types.workspace = true
 flamingo-verifier-enclave-types.workspace = true
 pontifex = { workspace = true, features = ["client"] }
 serde.workspace = true

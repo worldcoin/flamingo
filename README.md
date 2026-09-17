@@ -18,11 +18,8 @@ verifier/
 ├── verifier/
 │   ├── host/              # Axum HTTP API — the untrusted side of the boundary
 │   ├── enclave/           # Nitro enclave workload — the trusted side. Own workspace -> own Cargo.lock
-│   ├── api-types/         # Client↔host HTTP contract; stops at the host, so no enclave links it
 │   ├── enclave-types/     # Host↔enclave vsock contract: health, errors, key attestation, the match exchange
-│   ├── sealed-types/      # Sealed client↔enclave match payload; the host relays it, so the host does not link this
-│   ├── protocol/          # The signed match statement a held match produces. Will likely move to `world-id-protocol`.
-│   ├── client/            # Attestation-verifying client
+│   ├── client/            # Published client, HTTP API, signed protocol and sealed payload types
 │   └── e2e/               # End-to-end harness driving host and enclave together
 └── di/                    # Skeleton — dirs and crates only, no behaviour yet
     ├── host/
@@ -36,19 +33,22 @@ One crate per boundary, in the graphs that boundary reaches. Nothing is shared b
 [Spec: DeepIdentifier Migration TEE Setup v1](https://app.notion.com/p/worldcoin/Spec-DeepIdentifier-Migration-TEE-Setup-v1-3c08614bdf8c8014b7ddf50f3cac4e4b)
 for what goes in them.
 
-### Three workspaces, three lockfiles
+### Rust client
 
-Each enclave is its own cargo workspace. One lockfile for the whole repository meant a
-`flamingo-verifier-host` dependency bump re-resolved the enclave graph and moved PCR0, which clients
-pin. Now an EIF's inputs are its own `Cargo.toml`, the `Cargo.lock` beside it, and the path
-crates they name.
+`flamingo-verifier-client` is the only published crate. Consumers use its `api_types`,
+`protocol` and `sealed_types` modules alongside `FlamingoVerifierClient`:
 
-`attested-channel`, `flamingo-verifier-protocol`, `flamingo-verifier-sealed-types` and
-`flamingo-verifier-enclave-types` are in both an enclave
-graph and the host-side one. They are members of the root workspace but inherit nothing from it
-— not `[workspace.dependencies]`, not `[workspace.package]` — so the root manifest cannot reach
-an enclave graph either. Treat them as standalone crates: write the version, and the `edition`,
-in their own manifest. `flamingo-verifier-api-types` is host-side only and inherits normally.
+```rust
+use flamingo_verifier_client::{FlamingoVerifierClient, Config};
+use flamingo_verifier_client::protocol::match_token::MatchClaims;
+use flamingo_verifier_client::sealed_types::MatchInputs;
+```
+
+The default `http` feature includes the attestation-verifying HTTP client and all types.
+With `default-features = false`, only `api_types` is enabled; `protocol` adds signed match
+claims, and `sealed-types` adds the encrypted payload types and enables `protocol`.
+The host uses API types only, and the enclave enables `sealed-types` without HTTP or
+attestation-verifier dependencies. All crates share the root workspace and lockfile.
 
 ## Development
 

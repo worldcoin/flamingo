@@ -10,7 +10,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use flamingo_verifier_api_types::{ApiErrorResponse, ErrorBody};
+use flamingo_verifier_client::api_types::{ApiErrorResponse, ErrorBody};
 use flamingo_verifier_enclave_types as enclave_types;
 
 use crate::enclave;

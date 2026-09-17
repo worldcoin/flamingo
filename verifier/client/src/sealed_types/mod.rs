@@ -19,4 +19,4 @@ pub use messages::*;
 pub use serde_bytes::ByteBuf;
 
 /// Bound on sealed match bytes before decryption.
-pub use flamingo_verifier_api_types::MAX_MATCH_BODY_BYTES;
+pub use crate::api_types::MAX_MATCH_BODY_BYTES;

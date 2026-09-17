@@ -10,7 +10,7 @@ use face_engine::{
     matchers::cosine_similarity::CosineSimilarity,
     nodes::{subject_extraction::SubjectFace, template_generation::EmbeddingVector},
 };
-use flamingo_verifier_sealed_types::{
+use flamingo_verifier_client::sealed_types::{
     ComparisonRole, FailureReason, ImageFailureReason, ImageRole, valid_similarity,
 };
 use image::ImageReader;

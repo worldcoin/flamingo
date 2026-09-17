@@ -5,11 +5,11 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use flamingo_verifier_api_types::MATCH_CONTENT_TYPE;
+use flamingo_verifier_client::api_types::MATCH_CONTENT_TYPE;
 use flamingo_verifier_enclave_types as enclave;
 
 /// Maximum sealed binary body, independent of HTTP transfer encoding.
-pub const MAX_BODY_BYTES: usize = flamingo_verifier_api_types::MAX_MATCH_BODY_BYTES;
+pub const MAX_BODY_BYTES: usize = flamingo_verifier_client::api_types::MAX_MATCH_BODY_BYTES;
 
 /// Relay ciphertext without a JSON/base64 buffer or a copy into a Vec.
 pub async fn handler(

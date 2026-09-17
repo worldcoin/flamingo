@@ -1,7 +1,7 @@
 //! The HTTP contract between the `Verifier` client and its host.
 //!
-//! One definition per message, so the two ends cannot drift apart. Host-side only: the contract
-//! stops at the host, so no enclave links it.
+//! One definition per message, so the two ends cannot drift apart. Shared limits also apply
+//! to the sealed payload handled by the enclave.
 
 #![deny(
     clippy::all,

@@ -1,14 +1,14 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use flamingo_verifier_client::protocol::match_token::{self, EdDSAPublicKey};
+use flamingo_verifier_client::sealed_types::{
+    DeepFaceInputs, GrayBadgeInputs, LiveCapture, MatchInputs, MatchResult,
+};
 use flamingo_verifier_client::{
     Config, FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, VerifiedMatchResult,
 };
 use flamingo_verifier_enclave_types::MatchRequest;
-use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey};
-use flamingo_verifier_sealed_types::{
-    DeepFaceInputs, GrayBadgeInputs, LiveCapture, MatchInputs, MatchResult,
-};
 use pontifex::client::ConnectionDetails;
 use sha2::{Digest, Sha256};
 

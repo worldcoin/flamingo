@@ -1,5 +1,5 @@
 //! Allocation regression for the maximum-size encoded-image request (not model/RGB memory).
-use flamingo_verifier_sealed_types::{DeepFaceInputs, LiveCapture, MatchInputs};
+use flamingo_verifier_client::sealed_types::{DeepFaceInputs, LiveCapture, MatchInputs};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 static LIVE: AtomicUsize = AtomicUsize::new(0);

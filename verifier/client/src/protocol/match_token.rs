@@ -14,7 +14,7 @@ use coset::{
 use eddsa_babyjubjub::EdDSASignature;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Error;
+use crate::protocol::error::Error;
 // Re-exported so consumers holding attested bytes can build the key `verify` takes, without
 // depending on eddsa-babyjubjub directly.
 pub use eddsa_babyjubjub::EdDSAPublicKey;

@@ -2,12 +2,12 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use flamingo_verifier_api_types::{
+use crate::api_types::{
     ApiErrorResponse, EnclaveAssignmentResponse, MATCH_CONTENT_TYPE, MAX_MATCH_BODY_BYTES,
     MAX_MATCH_RESPONSE_BYTES,
 };
-use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
-use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use crate::protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
+use crate::sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -219,7 +219,7 @@ impl FlamingoVerifierClient {
     pub async fn deep_face(
         &self,
         assignment: &VerifiedAssignment,
-        inputs: flamingo_verifier_sealed_types::DeepFaceInputs,
+        inputs: crate::sealed_types::DeepFaceInputs,
     ) -> Result<VerifiedMatchResult, Error> {
         self.request_match(assignment, &MatchInputs::DeepFace(inputs))
             .await
@@ -232,7 +232,7 @@ impl FlamingoVerifierClient {
     pub async fn gray_badge(
         &self,
         assignment: &VerifiedAssignment,
-        inputs: flamingo_verifier_sealed_types::GrayBadgeInputs,
+        inputs: crate::sealed_types::GrayBadgeInputs,
     ) -> Result<VerifiedMatchResult, Error> {
         self.request_match(assignment, &MatchInputs::GrayBadge(inputs))
             .await
@@ -348,7 +348,7 @@ async fn bounded_response(response: &mut reqwest::Response) -> Result<Vec<u8>, E
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedMatch {
     /// Encoded statement and attestation for proof consumers.
-    pub statement: flamingo_verifier_sealed_types::AttestedStatement,
+    pub statement: crate::sealed_types::AttestedStatement,
     /// Already-verified operation-specific claims.
     pub claims: MatchClaims,
 }
@@ -358,29 +358,29 @@ pub enum VerifiedMatchResult {
     /// Attested signed result and parsed claims.
     Success(Box<VerifiedMatch>),
     /// No statement issued.
-    Failed(flamingo_verifier_sealed_types::FailureReason),
+    Failed(crate::sealed_types::FailureReason),
 }
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
 
+    use crate::protocol::match_token::MatchToken;
+    use crate::sealed_types::{
+        AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult,
+    };
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::routing::post;
     use axum::{Json, Router};
-    use flamingo_verifier_protocol::match_token::MatchToken;
-    use flamingo_verifier_sealed_types::{
-        AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult,
-    };
     use hex_literal::hex;
     use pontifex::{ChannelConsumer, ChannelDomain, ChannelEnclave};
     use serde_json::json;
 
     use super::{FlamingoVerifierClient, VerifiedMatchResult};
+    use crate::api_types::MATCH_CONTENT_TYPE;
     use crate::{Config, Error, PcrMeasurement};
     use axum::body::Bytes;
-    use flamingo_verifier_api_types::MATCH_CONTENT_TYPE;
 
     fn config(base_url: &str) -> Config {
         let pcrs = vec![PcrMeasurement::new(
@@ -394,8 +394,8 @@ mod tests {
     }
 
     fn inputs() -> MatchInputs {
-        MatchInputs::GrayBadge(flamingo_verifier_sealed_types::GrayBadgeInputs {
-            live: flamingo_verifier_sealed_types::LiveCapture::Vanilla(b"live".to_vec().into()),
+        MatchInputs::GrayBadge(crate::sealed_types::GrayBadgeInputs {
+            live: crate::sealed_types::LiveCapture::Vanilla(b"live".to_vec().into()),
             rtms_challenge: b"challenge".to_vec().into(),
             match_threshold: 0.5,
         })
@@ -541,7 +541,7 @@ mod tests {
     #[tokio::test]
     async fn a_sealed_rejection_round_trips() {
         let answer = MatchResult::Failed(FailureReason::MatchBelowThreshold(
-            flamingo_verifier_sealed_types::ComparisonRole::SelfieChallenge,
+            crate::sealed_types::ComparisonRole::SelfieChallenge,
         ));
         let (base_url, responder, seen) = serve_enclave(answer.clone(), false).await;
         let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");

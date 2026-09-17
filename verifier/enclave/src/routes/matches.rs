@@ -1,10 +1,10 @@
 use crate::{pcp, state::EnclaveState};
-use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
-use flamingo_verifier_protocol::match_token::MatchClaims;
-use flamingo_verifier_sealed_types::{
+use flamingo_verifier_client::protocol::match_token::MatchClaims;
+use flamingo_verifier_client::sealed_types::{
     AttestedStatement, ComparisonRole, FailureReason, LiveCapture, MatchInputs, MatchResult,
     valid_similarity,
 };
+use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ pub async fn handler(
     state: Arc<EnclaveState>,
     request: MatchRequest,
 ) -> Result<MatchResponse, enclave_types::Error> {
-    if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES {
+    if request.body.len() > flamingo_verifier_client::sealed_types::MAX_MATCH_BODY_BYTES {
         return Err(enclave_types::Error::RequestNotOpened);
     }
     let (plaintext, sealer) = state
@@ -103,8 +103,8 @@ mod tests {
         face_engine::{DeepFaceScores, FaceComparator, GrayBadgeScores},
         test_support::{EchoAttestor, UnusedFaceEngine},
     };
-    use flamingo_verifier_protocol::match_token;
-    use flamingo_verifier_sealed_types::{
+    use flamingo_verifier_client::protocol::match_token;
+    use flamingo_verifier_client::sealed_types::{
         DeepFaceInputs, GrayBadgeInputs, LightGuardMatchingFrame, MATCH_CHANNEL_DOMAIN,
     };
     use pontifex::{ChannelConsumer, ChannelDomain};
