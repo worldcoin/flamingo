@@ -8,10 +8,11 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use flamingo_verifier_worker_protocol::{ComparisonScores, WorkerResult};
-#[cfg(target_os = "linux")]
-use flamingo_verifier_worker_rpc::{WorkerServerConfig, serve_worker};
-
+use biometric_engines_protocol::{
+    Failure, Operation, Response, ResponseBody,
+    face::{DeepFaceResult, Failure as FaceFailure, FailureCode},
+    framing, protobuf,
+};
 #[cfg(target_os = "linux")]
 #[used]
 #[unsafe(link_section = ".init_array")]
@@ -22,8 +23,8 @@ static CHECK_EARLY_SANDBOX: extern "C" fn() = {
         // SAFETY: These queries do not retain pointers or modify process state.
         unsafe {
             if libc::getpid() != 1
-                || libc::getuid() != flamingo_verifier_worker_process::WORKER_UID
-                || libc::getgid() != flamingo_verifier_worker_process::WORKER_UID
+                || libc::getuid() != 65532
+                || libc::getgid() != 65532
                 || libc::getgroups(0, std::ptr::null_mut()) != 0
                 || libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1
                 || libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) != 2
@@ -71,10 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "visible host path: {path}"
         );
     }
-    assert_eq!(
-        std::fs::read("/models/fixture-data")?,
-        b"approved model data"
-    );
+    assert!(std::fs::File::open("/bin/verifier-worker").is_ok());
     assert_eq!(std::env::current_dir()?, std::path::Path::new("/"));
     let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     assert_eq!(
@@ -102,19 +100,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable exclusively owns inherited FD 3.
     let socket = unsafe { UnixStream::from_raw_fd(3) };
     assert!(socket.local_addr()?.is_unnamed());
-    let mut first = true;
-    serve_worker(
-        socket,
-        WorkerServerConfig {
-            max_request_bytes: 1024,
-            max_image_bytes: 100,
-        },
-        |request| {
-            if first {
-                std::thread::sleep(Duration::from_millis(400));
-                first = false;
-            }
-            match request.credential_image[0] {
+    assert!(socket.peer_addr()?.is_unnamed());
+    // Model initialization happens before the readiness acknowledgment.
+    std::thread::sleep(Duration::from_millis(400));
+    let mut socket = socket;
+    framing::write_frame(&mut socket, &protobuf::encode_ready())?;
+    while let Some(bytes) = framing::read_frame(&mut socket)? {
+        let request = protobuf::decode_request(&bytes)?;
+        let Operation::DeepFace(input) = request.operation else {
+            panic!("expected DeepFace")
+        };
+        let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+            match input.orb_credential.0[0] {
                 200 => {
                     std::thread::spawn(|| {
                         loop {
@@ -133,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 205..=219 => {
                     // All calls must kill the whole process, even from a secondary thread.
                     unsafe {
-                        match request.credential_image[0] {
+                        match input.orb_credential.0[0] {
                             205 => {
                                 libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
                             }
@@ -164,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             212 => {
                                 libc::openat(
                                     libc::AT_FDCWD,
-                                    c"/models/fixture-data".as_ptr(),
+                                    c"/bin/verifier-worker".as_ptr(),
                                     libc::O_WRONLY,
                                 );
                             }
@@ -181,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             215 => {
                                 libc::syscall(
                                     libc::SYS_execve,
-                                    c"/models/fixture-data".as_ptr(),
+                                    c"/bin/verifier-worker".as_ptr(),
                                     0,
                                     0,
                                 );
@@ -274,7 +271,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         thread.join().unwrap();
                     }
                 }
-                250 => return Ok(WorkerResult::AnalysisFailed),
+                250 => {
+                    return Ok(Err(Failure::Face(FaceFailure::new(
+                        FailureCode::InvalidImage,
+                    ))));
+                }
                 252 => unsafe {
                     libc::signal(libc::SIGTERM, libc::SIG_IGN);
                     loop {
@@ -282,15 +283,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
                 253 => std::process::exit(42),
-                254 => return Err(Box::new(io::Error::other("fixture initialization failed"))),
+                254 => return Err(Box::new(io::Error::other("fixture model failed"))),
                 _ => {}
             }
-            Ok(WorkerResult::Compared(ComparisonScores {
-                live_similarity: 0.8,
-                challenge_similarity: 0.9,
-            }))
-        },
-    )?;
+            Ok(Ok(ResponseBody::DeepFace(DeepFaceResult {
+                similarity_orb_selfie: 0.8,
+                similarity_orb_challenge: 0.9,
+                similarity_selfie_challenge: 0.85,
+            })))
+        })()?;
+        framing::write_frame(
+            &mut socket,
+            &protobuf::encode_response(Response {
+                request_id: request.request_id,
+                outcome: result,
+            }),
+        )?;
+    }
     Ok(())
 }
 

@@ -4,28 +4,36 @@
 use std::{fs::File, os::unix::fs::PermissionsExt, path::Path, process::Command, time::Duration};
 
 #[cfg(target_os = "linux")]
+use biometric_engines_protocol::{
+    Operation, ResponseBody,
+    face::{DeepFaceRequest, DeepFaceResult, ImageBytes, LiveCapture},
+};
+#[cfg(target_os = "linux")]
 use flamingo_verifier_worker_process::{SandboxConfig, WORKER_UID, Worker, WorkerError};
 #[cfg(target_os = "linux")]
-use flamingo_verifier_worker_protocol::{CompareRequest, ComparisonScores};
-#[cfg(target_os = "linux")]
-use flamingo_verifier_worker_rpc::{WorkerClientConfig, WorkerClientError};
+use flamingo_verifier_worker_process::{WorkerClientConfig, WorkerClientError};
 
 #[cfg(target_os = "linux")]
-const PEER: &str = env!("CARGO_BIN_EXE_worker-process-test-peer");
+fn peer() -> String {
+    std::env::var("WORKER_TEST_PEER")
+        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_worker-process-test-peer").to_owned())
+}
 #[cfg(target_os = "linux")]
-const POLICY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/worker.policy");
+fn policy() -> String {
+    std::env::var("WORKER_TEST_POLICY")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/worker.policy").to_owned())
+}
 #[cfg(target_os = "linux")]
 const FATAL_EXIT: i32 = 70;
 
 #[cfg(target_os = "linux")]
-/// Allows lazy initialization while keeping deliberately stuck requests short.
+/// Allows startup initialization while keeping deliberately stuck comparisons short.
 fn config() -> WorkerClientConfig {
     WorkerClientConfig {
-        first_request_timeout: Duration::from_secs(2),
+        startup_timeout: Duration::from_secs(2),
         request_timeout: Duration::from_millis(300),
         max_request_bytes: 1024,
         max_image_bytes: 100,
-        score_range: -1.0..=1.0,
     }
 }
 
@@ -41,12 +49,12 @@ fn sandbox(root: &Path) -> SandboxConfig<'_> {
 
 #[cfg(target_os = "linux")]
 /// Chooses fixture behavior through the existing comparison message.
-fn images(id: u8) -> CompareRequest {
-    CompareRequest {
-        credential_image: vec![id; 8],
-        live_image: vec![2; 8],
-        challenge_image: vec![3; 8],
-    }
+fn images(id: u8) -> Operation {
+    Operation::DeepFace(DeepFaceRequest {
+        orb_credential: ImageBytes(vec![id; 8]),
+        live: LiveCapture::Vanilla(ImageBytes(vec![2; 8])),
+        rtms_challenge: ImageBytes(vec![3; 8]),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -60,14 +68,15 @@ fn fatal(error: WorkerClientError) -> ! {
 /// Executes one broker lifetime without libtest threads or in-process worker replacement.
 fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let binary = File::open(if case == "bad-executable" {
-        POLICY
+        policy()
     } else {
-        PEER
+        peer()
     })?;
-    let scores = ComparisonScores {
-        live_similarity: 0.8,
-        challenge_similarity: 0.9,
-    };
+    let scores = ResponseBody::DeepFace(DeepFaceResult {
+        similarity_orb_selfie: 0.8,
+        similarity_orb_challenge: 0.9,
+        similarity_selfie_challenge: 0.85,
+    });
 
     // The worker checks that unrelated descriptors do not survive launch.
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -187,60 +196,25 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
                 .success()
         );
     }
-    let verified_runtime = if case == "signed-runtime" {
-        use flamingo_verifier_worker_artifact::{Artifact, Manifest, Role, WORKER_PATH};
-        use p384::ecdsa::{Signature, SigningKey, signature::Signer};
+    let verified_runtime = if case == "provisioned-runtime" {
+        use flamingo_verifier_worker_artifact::{Manifest, WORKER_PATH};
         use sha2::{Digest, Sha384};
 
-        let mut artifacts = Vec::new();
-        let mut directories = vec![root.to_path_buf()];
-        while let Some(directory) = directories.pop() {
-            for entry in std::fs::read_dir(directory)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    directories.push(entry.path());
-                    continue;
-                }
-                assert!(
-                    entry.file_type()?.is_file(),
-                    "fixture must not contain symlinks"
-                );
-                let path = entry.path();
-                let logical_path = path.strip_prefix(root)?.to_str().unwrap().to_owned();
-                let bytes = std::fs::read(&path)?;
-                artifacts.push(Artifact {
-                    role: if logical_path == WORKER_PATH {
-                        Role::Worker
-                    } else if logical_path.starts_with("models/") {
-                        Role::Model
-                    } else {
-                        Role::Library
-                    },
-                    logical_path,
-                    sha384: hex::encode(Sha384::digest(&bytes)),
-                    size: bytes.len() as u64,
-                });
-            }
-        }
-        artifacts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+        let bytes = std::fs::read(root.join(WORKER_PATH))?;
         let manifest = serde_json::to_vec(&Manifest {
-            manifest_version: 1,
-            release_id: "signed-public-test-fixture".to_owned(),
-            artifacts,
+            manifest_version: 3,
+            release_id: "public-test-fixture".to_owned(),
+            sha384: hex::encode(Sha384::digest(&bytes)),
+            size: bytes.len() as u64,
         })?;
-        // Test-only publisher secret; never included in the measured production trust file.
-        let signing_key = SigningKey::from_slice(&[0x42; 48]).expect("valid test publisher scalar");
-        let signature: Signature = signing_key.sign(&manifest);
         let mut bundle = Vec::new();
         flamingo_verifier_worker_artifact::package(
             &mut bundle,
             &manifest,
-            signature.to_der().as_bytes(),
-            root,
+            &root.join(WORKER_PATH),
         )?;
         Some(flamingo_verifier_worker_artifact::receive(
             &mut std::io::Cursor::new(bundle),
-            std::slice::from_ref(signing_key.verifying_key()),
             1 << 30,
             root.parent().unwrap(),
         )?)
@@ -253,30 +227,38 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
     let runtime_root = verified_runtime
         .as_ref()
         .map_or(root, |runtime| runtime.root.path());
-    let mut worker = Worker::spawn(executable, sandbox(runtime_root), config(), fatal)?;
+    let mut limits = config();
+    if case == "startup-timeout" {
+        limits.startup_timeout = Duration::from_millis(50);
+    }
+    let mut worker = match Worker::spawn(executable, sandbox(runtime_root), limits, fatal) {
+        Ok(worker) => worker,
+        Err(WorkerError::Rpc(error)) => fatal(error),
+        Err(error) => return Err(error.into()),
+    };
 
-    if case == "signed-runtime" {
+    if case == "provisioned-runtime" {
         assert_eq!(
             verified_runtime.as_ref().unwrap().release_id,
-            "signed-public-test-fixture"
+            "public-test-fixture"
         );
         worker.check_alive();
-        assert_eq!(worker.compare(images(1))?, scores);
+        assert_eq!(worker.evaluate(images(1))?, scores);
         assert!(matches!(
-            worker.compare(images(250)),
-            Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed))
+            worker.evaluate(images(250)),
+            Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed(_)))
         ));
-        assert_eq!(worker.compare(images(2))?, scores);
-        worker.compare(images(253))?;
-        panic!("signed worker crash must terminate the broker");
+        assert_eq!(worker.evaluate(images(2))?, scores);
+        worker.evaluate(images(253))?;
+        panic!("provisioned worker crash must terminate the broker");
     }
 
     if case == "moved-owner" {
         worker.check_alive();
         std::thread::spawn(move || {
-            assert_eq!(worker.compare(images(1)).unwrap(), scores);
+            assert_eq!(worker.evaluate(images(1)).unwrap(), scores);
             worker.check_alive();
-            assert_eq!(worker.compare(images(2)).unwrap(), scores);
+            assert_eq!(worker.evaluate(images(2)).unwrap(), scores);
         })
         .join()
         .expect("worker ownership transfer failed");
@@ -285,31 +267,34 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
 
     if matches!(case, "recoverable" | "nitro-root") {
         let mut invalid = images(1);
-        invalid.credential_image.clear();
+        let Operation::DeepFace(ref mut input) = invalid else {
+            unreachable!()
+        };
+        input.orb_credential.0.clear();
         assert!(matches!(
-            worker.compare(invalid),
+            worker.evaluate(invalid),
             Err(WorkerError::Rpc(WorkerClientError::InvalidImages))
         ));
         for id in 1..=3 {
-            assert_eq!(worker.compare(images(id))?, scores);
+            assert_eq!(worker.evaluate(images(id))?, scores);
         }
         assert!(matches!(
-            worker.compare(images(250)),
-            Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed))
+            worker.evaluate(images(250)),
+            Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed(_)))
         ));
         assert_eq!(
-            worker.compare(images(201))?,
+            worker.evaluate(images(201))?,
             scores,
             "model threads must work"
         );
         for id in 220..=222 {
             assert_eq!(
-                worker.compare(images(id))?,
+                worker.evaluate(images(id))?,
                 scores,
                 "resource limit check {id}"
             );
         }
-        assert_eq!(worker.compare(images(200))?, scores);
+        assert_eq!(worker.evaluate(images(200))?, scores);
         let children_path = format!("/proc/self/task/{}/children", unsafe { libc::getpid() });
         let pid = std::fs::read_to_string(children_path)?
             .trim()
@@ -338,9 +323,12 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
     }
 
     // An inference thread remains alive during the warm timeout case.
-    if !matches!(case, "cold-timeout" | "initialization" | "bad-executable") {
+    if !matches!(
+        case,
+        "first-comparison-timeout" | "model-error" | "bad-executable"
+    ) {
         assert_eq!(
-            worker.compare(images(if case == "timeout" { 200 } else { 1 }))?,
+            worker.evaluate(images(if case == "timeout" { 200 } else { 1 }))?,
             scores
         );
     }
@@ -382,12 +370,12 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         "chroot-escape" => 217,
         "set-hostname" => 218,
         "read-hostname" => 219,
-        "timeout" | "cold-timeout" | "kill-failure" => 252,
-        "initialization" => 254,
+        "timeout" | "first-comparison-timeout" | "kill-failure" => 252,
+        "model-error" => 254,
         "bad-executable" => 1,
         _ => panic!("unknown broker case: {case}"),
     };
-    let result = worker.compare(images(mode));
+    let result = worker.evaluate(images(mode));
     panic!("fatal comparison returned to the broker: {result:?}");
 }
 
@@ -404,8 +392,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return broker(&case, Path::new(&root));
     }
 
-    // Only inspect our own trusted build with ldd, never a provisioned private executable.
-    // Copy its exact loader/library dependencies, not the host /lib or /nix/store trees.
+    // The provisioned-runtime test uses exactly one static executable, as production does.
+    let headers = Command::new("readelf").args(["-lW", &peer()]).output()?;
+    let dynamic = Command::new("readelf").args(["-dW", &peer()]).output()?;
+    assert!(headers.status.success() && dynamic.status.success());
+    assert!(
+        !String::from_utf8_lossy(&headers.stdout).contains("INTERP"),
+        "build the fixture with -C target-feature=+crt-static"
+    );
+    assert!(!String::from_utf8_lossy(&dynamic.stdout).contains("(NEEDED)"));
     let temp = Command::new("mktemp")
         .args(["-d", "/tmp/worker-process-test.XXXXXXXX"])
         .output()?;
@@ -414,37 +409,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = temp.join("root");
     std::fs::create_dir(&root)?;
     std::fs::create_dir(root.join("bin"))?;
-    std::fs::create_dir(root.join("lib"))?;
-    std::fs::create_dir(root.join("models"))?;
     std::fs::create_dir(root.join("proc"))?;
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))?;
-    let libraries = Command::new("ldd").arg(PEER).output()?;
-    assert!(
-        libraries.status.success(),
-        "ldd failed: {}",
-        String::from_utf8_lossy(&libraries.stderr)
-    );
-    for library in String::from_utf8(libraries.stdout)?
-        .split_whitespace()
-        .filter(|word| word.starts_with('/'))
-    {
-        let target = root.join(library.trim_start_matches('/'));
-        std::fs::create_dir_all(target.parent().unwrap())?;
-        std::fs::copy(library, target)?;
-    }
-    std::fs::copy(PEER, root.join("bin/verifier-worker"))?;
-    std::fs::write(root.join("models/fixture-data"), b"approved model data")?;
-    std::fs::set_permissions(
-        root.join("models/fixture-data"),
-        std::fs::Permissions::from_mode(0o644),
-    )?;
+    std::fs::copy(peer(), root.join("bin/verifier-worker"))?;
     std::fs::write(temp.join("broker-secret"), b"must not be visible")?;
 
     for (case, expected_error) in [
         ("recoverable", None),
+        ("startup-timeout", Some("worker startup timed out")),
         ("nitro-root", None),
-        ("signed-runtime", Some("worker socket I/O failed")),
+        ("provisioned-runtime", Some("worker socket I/O failed")),
         ("moved-owner", None),
         ("idle-exit", Some("worker socket I/O failed")),
         ("seccomp", Some("worker socket I/O failed")),
@@ -463,10 +438,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("chroot-escape", Some("worker socket I/O failed")),
         ("set-hostname", Some("worker socket I/O failed")),
         ("read-hostname", Some("worker socket I/O failed")),
-        ("timeout", Some("worker comparison timed out")),
-        ("cold-timeout", Some("worker comparison timed out")),
-        ("kill-failure", Some("worker comparison timed out")),
-        ("initialization", Some("worker socket I/O failed")),
+        ("timeout", Some("worker request timed out")),
+        ("first-comparison-timeout", Some("worker request timed out")),
+        ("kill-failure", Some("worker request timed out")),
+        ("model-error", Some("worker socket I/O failed")),
         ("bad-executable", Some("worker socket I/O failed")),
     ] {
         let output = Command::new("timeout")

@@ -14,6 +14,7 @@ pub const MAX_BODY_BYTES: usize = flamingo_verifier_api_types::MAX_MATCH_BODY_BY
 /// Relay ciphertext without a JSON/base64 buffer or a copy into a Vec.
 pub async fn handler(
     State(state): State<AppState>,
+    _permit: UploadPermit,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, AppError> {
@@ -68,4 +69,38 @@ pub async fn handler(
         response.ciphertext,
     )
         .into_response())
+}
+
+/// Admission guard acquired before the body extractor and retained through the relay.
+pub struct UploadPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl axum::extract::FromRequestParts<AppState> for UploadPermit {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        _: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        if state.is_draining() {
+            return Err(AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "not_ready",
+                "The verifier is not ready",
+                true,
+            ));
+        }
+        let permit = std::sync::Arc::clone(&state.uploads)
+            .try_acquire_owned()
+            .map_err(|_| {
+                AppError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "not_ready",
+                    "The verifier is at capacity or draining",
+                    true,
+                )
+            })?;
+        Ok(Self { _permit: permit })
+    }
 }

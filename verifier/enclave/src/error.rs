@@ -1,82 +1,78 @@
-//! Conversion from engine errors to public match failures.
-use face_engine::io::errors::ValidationError;
-use flamingo_verifier_sealed_types::{FailureReason, ImageFailureReason, ImageRole};
-
-/// Attach the input image to an approved reason, omitting engine diagnostics.
-pub const fn image_failure(error: &ValidationError, image: ImageRole) -> FailureReason {
-    let reason = match error {
-        ValidationError::TooManyFacesError { .. } => ImageFailureReason::TooManyFaces,
-        ValidationError::ImageTooDarkError { .. } => ImageFailureReason::ImageTooDark,
-        ValidationError::ImageTooBrightError { .. } => ImageFailureReason::ImageTooBright,
-        ValidationError::IlluminationVarianceError { .. } => {
-            ImageFailureReason::IlluminationVariance
-        }
-        ValidationError::FaceTooSmallError { .. } => ImageFailureReason::FaceTooSmall,
-        ValidationError::FaceTooBigError { .. } => ImageFailureReason::FaceTooBig,
-        ValidationError::FaceResolutionTooLowError { .. } => {
-            ImageFailureReason::FaceResolutionTooLow
-        }
-        ValidationError::FaceTooHighError { .. } => ImageFailureReason::FaceTooHigh,
-        ValidationError::FaceTooLowError { .. } => ImageFailureReason::FaceTooLow,
-        ValidationError::FaceTooFarLeftError { .. } => ImageFailureReason::FaceTooFarLeft,
-        ValidationError::FaceTooFarRightError { .. } => ImageFailureReason::FaceTooFarRight,
-        ValidationError::HeadPoseYawError { .. } => ImageFailureReason::HeadPoseYaw,
-        ValidationError::HeadPosePitchTooHighError { .. } => {
-            ImageFailureReason::HeadPosePitchTooHigh
-        }
-        ValidationError::HeadPosePitchTooLowError { .. } => ImageFailureReason::HeadPosePitchTooLow,
-        ValidationError::HeadPoseRollError { .. } => ImageFailureReason::HeadPoseRoll,
-        ValidationError::LowQualityError { .. } => ImageFailureReason::LowQuality,
-        ValidationError::SunglassesOcclusionDetectedError { .. } => {
-            ImageFailureReason::SunglassesOcclusionDetected
-        }
-        ValidationError::GlassesOcclusionDetectedError { .. } => {
-            ImageFailureReason::GlassesOcclusionDetected
-        }
-        ValidationError::MaskOcclusionDetectedError { .. } => {
-            ImageFailureReason::MaskOcclusionDetected
-        }
-        ValidationError::OtherOcclusionDetectedError { .. } => {
-            ImageFailureReason::OtherOcclusionDetected
-        }
-        ValidationError::HairOcclusionDetectedError { .. } => {
-            ImageFailureReason::HairOcclusionDetected
-        }
-        ValidationError::FasOcclusionDetectedError { .. } => {
-            ImageFailureReason::FasOcclusionDetected
-        }
-        ValidationError::SpoofDetectedError { .. } => ImageFailureReason::SpoofDetected,
-        ValidationError::DepthSpoofDetectedError { .. } => ImageFailureReason::DepthSpoofDetected,
-        ValidationError::ThermalSpoofDetectedError { .. } => {
-            ImageFailureReason::ThermalSpoofDetected
-        }
-        ValidationError::AgeBelowThresholdError { .. } => ImageFailureReason::AgeBelowThreshold,
-        ValidationError::NoFaceDetectedError => ImageFailureReason::NoFaceDetected,
-        ValidationError::EyesClosedError { .. } => ImageFailureReason::EyesClosed,
-        ValidationError::NonNeutralExpressionError { .. } => {
-            ImageFailureReason::NonNeutralExpression
-        }
-        ValidationError::LandmarksAlignmentError { .. } => ImageFailureReason::LandmarksAlignment,
-        ValidationError::FaceOverexposedError { .. } => ImageFailureReason::FaceOverexposed,
-        ValidationError::FaceUnderexposedError { .. } => ImageFailureReason::FaceUnderexposed,
-        ValidationError::SegmentationOcclusionProportionError { .. } => {
-            ImageFailureReason::SegmentationOcclusionProportion
-        }
-        ValidationError::BrightArtifactsError { .. } => ImageFailureReason::BrightArtifacts,
-        ValidationError::LightGuardScoreTooLowError { .. } => {
-            ImageFailureReason::LightGuardScoreTooLow
-        }
-        ValidationError::LowContrastError { .. } => ImageFailureReason::LowContrast,
-        ValidationError::MeshExpressionScoreError { .. } => ImageFailureReason::MeshExpressionScore,
-        ValidationError::HighColorDistortionError { .. } => ImageFailureReason::HighColorDistortion,
-        ValidationError::UnevenLightingError { .. } => ImageFailureReason::UnevenLighting,
-        ValidationError::BlurryFaceError { .. } => ImageFailureReason::BlurryFace,
-        ValidationError::NoisyThermalImageError { .. } => ImageFailureReason::NoisyThermalImage,
-        ValidationError::UnknownError
-        | ValidationError::RocTemplateError { .. }
-        | ValidationError::ValidatorUpdateParametersError { .. } => {
-            return FailureReason::Internal;
-        }
+//! Conversion from public worker failures to sealed API failures.
+use biometric_engines_protocol::face::{self, FailureCode, FailureLocation};
+use flamingo_verifier_sealed_types::{ComparisonRole, FailureReason, ImageFailureReason, ImageRole};
+/// Preserve semantic locations while keeping backend infrastructure failures distinct.
+#[must_use]
+pub const fn worker_failure(failure: face::Failure) -> FailureReason {
+    let reason = match failure.code {
+        FailureCode::Internal => return FailureReason::Internal,
+        FailureCode::InvalidRequest(reason) => return match reason {
+            face::InvalidRequestReason::EmptyImage => FailureReason::EmptyImage,
+            face::InvalidRequestReason::ImageTooLarge { .. } | face::InvalidRequestReason::TotalImagesTooLarge { .. } => FailureReason::InputTooLarge,
+            _ => FailureReason::MalformedInputs,
+        },
+        FailureCode::MatchingFailed => return match failure.location {
+            Some(FailureLocation::Comparison(role)) => FailureReason::MatchingFailed(match role {
+                face::ComparisonRole::OrbSelfie => ComparisonRole::OrbSelfie,
+                face::ComparisonRole::OrbChallenge => ComparisonRole::OrbChallenge,
+                face::ComparisonRole::SelfieChallenge => ComparisonRole::SelfieChallenge,
+            }),
+            _ => FailureReason::Internal,
+        },
+        FailureCode::InvalidImage => ImageFailureReason::InvalidImage,
+        FailureCode::TemplateFailed => ImageFailureReason::TemplateFailed,
+        FailureCode::ValidationFailed(validation) => match validation.reason {
+            face::ValidationReason::TooManyFaces => ImageFailureReason::TooManyFaces,
+            face::ValidationReason::ImageTooDark => ImageFailureReason::ImageTooDark,
+            face::ValidationReason::ImageTooBright => ImageFailureReason::ImageTooBright,
+            face::ValidationReason::IlluminationVariance => ImageFailureReason::IlluminationVariance,
+            face::ValidationReason::FaceTooSmall => ImageFailureReason::FaceTooSmall,
+            face::ValidationReason::FaceTooBig => ImageFailureReason::FaceTooBig,
+            face::ValidationReason::FaceResolutionTooLow => ImageFailureReason::FaceResolutionTooLow,
+            face::ValidationReason::FaceTooHigh => ImageFailureReason::FaceTooHigh,
+            face::ValidationReason::FaceTooLow => ImageFailureReason::FaceTooLow,
+            face::ValidationReason::FaceTooFarLeft => ImageFailureReason::FaceTooFarLeft,
+            face::ValidationReason::FaceTooFarRight => ImageFailureReason::FaceTooFarRight,
+            face::ValidationReason::HeadPoseYaw => ImageFailureReason::HeadPoseYaw,
+            face::ValidationReason::HeadPosePitchTooHigh => ImageFailureReason::HeadPosePitchTooHigh,
+            face::ValidationReason::HeadPosePitchTooLow => ImageFailureReason::HeadPosePitchTooLow,
+            face::ValidationReason::HeadPoseRoll => ImageFailureReason::HeadPoseRoll,
+            face::ValidationReason::LowQuality => ImageFailureReason::LowQuality,
+            face::ValidationReason::SunglassesOcclusionDetected => ImageFailureReason::SunglassesOcclusionDetected,
+            face::ValidationReason::GlassesOcclusionDetected => ImageFailureReason::GlassesOcclusionDetected,
+            face::ValidationReason::MaskOcclusionDetected => ImageFailureReason::MaskOcclusionDetected,
+            face::ValidationReason::OtherOcclusionDetected => ImageFailureReason::OtherOcclusionDetected,
+            face::ValidationReason::HairOcclusionDetected => ImageFailureReason::HairOcclusionDetected,
+            face::ValidationReason::FasOcclusionDetected => ImageFailureReason::FasOcclusionDetected,
+            face::ValidationReason::SpoofDetected => ImageFailureReason::SpoofDetected,
+            face::ValidationReason::DepthSpoofDetected => ImageFailureReason::DepthSpoofDetected,
+            face::ValidationReason::ThermalSpoofDetected => ImageFailureReason::ThermalSpoofDetected,
+            face::ValidationReason::AgeBelowThreshold => ImageFailureReason::AgeBelowThreshold,
+            face::ValidationReason::NoFaceDetected => ImageFailureReason::NoFaceDetected,
+            face::ValidationReason::EyesClosed => ImageFailureReason::EyesClosed,
+            face::ValidationReason::NonNeutralExpression => ImageFailureReason::NonNeutralExpression,
+            face::ValidationReason::LandmarksAlignment => ImageFailureReason::LandmarksAlignment,
+            face::ValidationReason::FaceOverexposed => ImageFailureReason::FaceOverexposed,
+            face::ValidationReason::FaceUnderexposed => ImageFailureReason::FaceUnderexposed,
+            face::ValidationReason::SegmentationOcclusionProportion => ImageFailureReason::SegmentationOcclusionProportion,
+            face::ValidationReason::BrightArtifacts => ImageFailureReason::BrightArtifacts,
+            face::ValidationReason::LightGuardScoreTooLow => ImageFailureReason::LightGuardScoreTooLow,
+            face::ValidationReason::LowContrast => ImageFailureReason::LowContrast,
+            face::ValidationReason::MeshExpressionScore => ImageFailureReason::MeshExpressionScore,
+            face::ValidationReason::HighColorDistortion => ImageFailureReason::HighColorDistortion,
+            face::ValidationReason::UnevenLighting => ImageFailureReason::UnevenLighting,
+            face::ValidationReason::BlurryFace => ImageFailureReason::BlurryFace,
+            face::ValidationReason::NoisyThermalImage => ImageFailureReason::NoisyThermalImage,
+        },
+    };
+    let image = match failure.location {
+        Some(FailureLocation::Image(role)) => match role {
+            face::ImageRole::OrbCredential => ImageRole::OrbCredential,
+            face::ImageRole::LiveSelfie => ImageRole::LiveSelfie,
+            face::ImageRole::RtmsChallenge => ImageRole::RtmsChallenge,
+            face::ImageRole::EmbeddingInput => return FailureReason::Internal,
+        },
+        _ => return FailureReason::Internal,
     };
     FailureReason::ImageRejected { image, reason }
 }

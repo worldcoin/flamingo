@@ -1,4 +1,4 @@
-//! Offline release inventory/packaging and one-shot host-to-enclave provisioning.
+//! Executable integrity metadata/packaging and one-shot host-to-enclave provisioning.
 //! Socket timeouts bound individual I/O operations. The supervisor owns the overall
 //! startup timeout, including connection establishment, and enclave cleanup before retry.
 
@@ -9,12 +9,11 @@ use std::{
 };
 
 use flamingo_verifier_worker_artifact::{
-    Artifact, BootstrapConfig, MAX_BUNDLE_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, Manifest,
-    Role, WORKER_PATH,
+    BootstrapConfig, MAX_BUNDLE_BYTES, MAX_MANIFEST_BYTES, Manifest,
 };
 use sha2::{Digest, Sha384};
 
-/// Never handles a signing secret; the publisher signs the exact emitted manifest offline.
+/// Deployment pipelines pin the emitted executable digest.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -22,104 +21,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             BootstrapConfig::load_from(Path::new(&args[2]))?.validate()?;
         }
         Some("manifest") if args.len() == 4 => {
-            let root = Path::new(&args[3]);
-            if !fs::symlink_metadata(root)?.is_dir() {
-                return Err("artifact root must be a directory, not a symlink".into());
+            let executable = Path::new(&args[3]);
+            if !fs::symlink_metadata(executable)?.is_file() {
+                return Err(
+                    "worker must be a regular executable, not a directory or symlink".into(),
+                );
             }
-            let mut manifest = Manifest {
-                manifest_version: 1,
+            let mut file = File::open(executable)?;
+            let size = file.metadata()?.len();
+            if size == 0 || size > MAX_BUNDLE_BYTES {
+                return Err("executable size exceeds format limits".into());
+            }
+            let mut hash = Sha384::new();
+            let mut buffer = [0; 64 * 1024];
+            let mut remaining = size;
+            while remaining != 0 {
+                let length = remaining.min(buffer.len() as u64) as usize;
+                file.read_exact(&mut buffer[..length])?;
+                hash.update(&buffer[..length]);
+                remaining -= length as u64;
+            }
+            if file.read(&mut [0])? != 0 {
+                return Err("executable changed during hashing".into());
+            }
+            let manifest = Manifest {
+                manifest_version: 3,
                 release_id: args[2].clone(),
-                artifacts: Vec::new(),
+                sha384: hex::encode(hash.finalize()),
+                size,
             };
-            let mut pending = vec![root.to_path_buf()];
-            let mut entries = 0;
-            let mut aggregate_bytes = 0_u64;
-            while let Some(directory) = pending.pop() {
-                for entry in fs::read_dir(directory)? {
-                    entries += 1;
-                    if entries > 2048 {
-                        return Err("too many runtime entries".into());
-                    }
-                    let entry = entry?;
-                    let path = entry.path();
-                    let relative = path
-                        .strip_prefix(root)?
-                        .to_str()
-                        .ok_or("non-UTF-8 artifact path")?
-                        .to_owned();
-                    if relative.len() > 256 || relative.split('/').count() > 16 {
-                        return Err("runtime path exceeds limits".into());
-                    }
-                    if entry.file_type()?.is_dir() {
-                        pending.push(path);
-                        continue;
-                    }
-                    if !entry.file_type()?.is_file() {
-                        return Err(
-                            "stage regular files only; symlinks/devices are not supported".into(),
-                        );
-                    }
-                    let mut file = File::open(path)?;
-                    let size = file.metadata()?.len();
-                    if size == 0 || size > MAX_BUNDLE_BYTES {
-                        return Err("artifact size exceeds format limits".into());
-                    }
-                    aggregate_bytes = aggregate_bytes
-                        .checked_add(size)
-                        .ok_or("runtime size overflow")?;
-                    if manifest.artifacts.len() >= 128 || aggregate_bytes > MAX_BUNDLE_BYTES {
-                        return Err("runtime inventory exceeds artifact or byte limits".into());
-                    }
-                    let mut hash = Sha384::new();
-                    let mut buffer = [0; 64 * 1024];
-                    let mut total = 0_u64;
-                    loop {
-                        let count = file.read(&mut buffer)?;
-                        if count == 0 {
-                            break;
-                        }
-                        total += count as u64;
-                        if total > size {
-                            return Err("artifact changed during hashing".into());
-                        }
-                        hash.update(&buffer[..count]);
-                    }
-                    if total != size {
-                        return Err("artifact changed during hashing".into());
-                    }
-                    manifest.artifacts.push(Artifact {
-                        role: if relative == WORKER_PATH {
-                            Role::Worker
-                        } else if relative.starts_with("models/") {
-                            Role::Model
-                        } else if relative.starts_with("config/") {
-                            Role::Configuration
-                        } else {
-                            Role::Library
-                        },
-                        logical_path: relative,
-                        sha384: hex::encode(hash.finalize()),
-                        size,
-                    });
-                }
-            }
-            manifest
-                .artifacts
-                .sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
             manifest.validate(MAX_BUNDLE_BYTES)?;
-            // No trailing newline: these exact bytes are what the publisher must sign.
+            // Emit exact metadata bytes for the bundle.
             std::io::stdout().write_all(&serde_json::to_vec(&manifest)?)?;
         }
-        Some("pack") if args.len() == 6 => {
+        Some("pack") if args.len() == 5 => {
             let mut manifest = Vec::new();
             File::open(&args[2])?
                 .take(MAX_MANIFEST_BYTES as u64 + 1)
                 .read_to_end(&mut manifest)?;
-            let mut signature = Vec::new();
-            File::open(&args[3])?
-                .take(MAX_SIGNATURE_BYTES as u64 + 1)
-                .read_to_end(&mut signature)?;
-            let output = Path::new(&args[5]);
+            let output = Path::new(&args[4]);
             let parent = output
                 .parent()
                 .filter(|path| !path.as_os_str().is_empty())
@@ -128,18 +68,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             flamingo_verifier_worker_artifact::package(
                 &mut temporary,
                 &manifest,
-                &signature,
-                Path::new(&args[4]),
+                Path::new(&args[3]),
             )?;
             temporary.as_file().sync_all()?;
             temporary.persist_noclobber(output)?;
         }
+        Some("health") if args.len() == 3 => health(&args[2])?,
         Some("send") if args.len() == 5 => send(&args[2], &args[3], &args[4])?,
         _ => {
             return Err(concat!(
-                "usage: worker-bundle manifest RELEASE_ID ARTIFACT_ROOT | ",
-                "pack MANIFEST SIGNATURE_DER ARTIFACT_ROOT OUTPUT | ",
-                "send CID BUNDLE IO_TIMEOUT_SECONDS | validate-config CONFIG_PATH"
+                "usage: worker-bundle manifest RELEASE_ID EXECUTABLE | ",
+                "pack MANIFEST EXECUTABLE OUTPUT | ",
+                "send CID BUNDLE IO_TIMEOUT_SECONDS | health CID | validate-config CONFIG_PATH"
             )
             .into());
         }
@@ -158,10 +98,20 @@ fn send(cid: &str, bundle: &str, io_timeout: &str) -> Result<(), Box<dyn std::er
     }
     let mut bundle = File::open(bundle)?;
     let metadata = bundle.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_BUNDLE_BYTES + MAX_MANIFEST_BYTES as u64 + 112 {
+    if !metadata.is_file() || metadata.len() > MAX_BUNDLE_BYTES + MAX_MANIFEST_BYTES as u64 + 4 {
         return Err("invalid bundle file or size".into());
     }
-    let mut stream = vsock::VsockStream::connect_with_cid_port(cid, 1001)?;
+    // Only retry connection refusal before transferring any bytes. The carrier watchdog
+    // covers this loop as well as transfer and model initialization.
+    let mut stream = loop {
+        match vsock::VsockStream::connect_with_cid_port(cid, 1001) {
+            Ok(stream) => break stream,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::thread::sleep(Duration::from_millis(200))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     let timeout = Some(Duration::from_secs(io_timeout));
     stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(timeout)?;
@@ -185,4 +135,31 @@ fn send(cid: &str, bundle: &str, io_timeout: &str) -> Result<(), Box<dyn std::er
 /// No TCP or unsandboxed substitution for Nitro vsock provisioning.
 fn send(_: &str, _: &str, _: &str) -> Result<(), Box<dyn std::error::Error>> {
     Err("worker provisioning requires x86_64 Linux vsock".into())
+}
+
+#[cfg(target_os = "linux")]
+fn health(cid: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cid: u32 = cid.parse()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pontifex::client::send(
+                pontifex::client::ConnectionDetails::new(cid, 1000),
+                &flamingo_verifier_enclave_types::HealthRequest,
+            ),
+        )
+        .await?;
+        result
+            .map_err(|_| "broker transport unavailable")?
+            .map_err(|_| "broker not ready")?;
+        Ok(())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn health(_: &str) -> Result<(), Box<dyn std::error::Error>> {
+    Err("worker health requires Linux vsock".into())
 }

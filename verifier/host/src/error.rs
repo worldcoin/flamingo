@@ -159,7 +159,8 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        if self.status.is_server_error() {
+        // Expected busy responses do not need a log per call.
+        if self.status.is_server_error() && self.code != "enclave_not_ready" {
             tracing::error!(
                 code = self.code,
                 status = %self.status,
@@ -167,7 +168,7 @@ impl IntoResponse for AppError {
                 dependency = "enclave",
                 "request failed"
             );
-        } else {
+        } else if !self.status.is_server_error() {
             tracing::warn!(
                 code = self.code,
                 status = %self.status,

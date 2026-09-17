@@ -1,4 +1,4 @@
-//! Signed byte fixtures only; these are not runnable workers or model substitutes.
+//! Executable byte fixtures only; these are not runnable workers or model substitutes.
 
 use std::{
     fs,
@@ -8,202 +8,115 @@ use std::{
 };
 
 use flamingo_verifier_worker_artifact::{
-    Artifact, Error, MAX_BUNDLE_BYTES, Manifest, Role, WORKER_PATH, package, receive,
+    Error, MAX_BUNDLE_BYTES, Manifest, WORKER_PATH, package, receive,
 };
-use p384::ecdsa::{Signature, SigningKey, signature::Signer};
 use sha2::{Digest, Sha384};
 
-/// Small signed inventory for verification tests, never executed.
+/// Small executable for verification tests, never executed.
 struct Fixture {
-    /// Mutated and re-signed by structural validation tests.
+    /// Mutated by structural validation tests.
     manifest: Manifest,
-    /// Bytes in manifest order.
-    files: Vec<Vec<u8>>,
-    /// Test-only publisher, never included in measured image configuration.
-    key: SigningKey,
+    /// Executable bytes covered by the manifest.
+    binary: Vec<u8>,
 }
 
 impl Fixture {
-    /// Builds a minimal architecture header and one library data file.
+    /// Builds a minimal executable architecture header.
     fn new() -> Self {
         let mut elf = vec![0; 64];
         elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         elf[16] = 2;
         elf[18] = 62;
-        let files = vec![
-            elf,
-            b"library-fixture".to_vec(),
-            b"model-fixture".to_vec(),
-            b"config-fixture".to_vec(),
-        ];
-        let artifacts = [
-            WORKER_PATH,
-            "lib/fixture.so",
-            "models/rgbnet.onnx",
-            "config/model.yaml",
-        ]
-        .iter()
-        .enumerate()
-        .map(|(index, path)| Artifact {
-            logical_path: (*path).to_owned(),
-            role: [
-                Role::Worker,
-                Role::Library,
-                Role::Model,
-                Role::Configuration,
-            ][index],
-            sha384: hex::encode(Sha384::digest(&files[index])),
-            size: files[index].len() as u64,
-        })
-        .collect();
         Self {
             manifest: Manifest {
-                manifest_version: 1,
+                manifest_version: 3,
                 release_id: "test-release".into(),
-                artifacts,
+                sha384: hex::encode(Sha384::digest(&elf)),
+                size: elf.len() as u64,
             },
-            files,
-            key: SigningKey::from_slice(&[1; 48]).unwrap(),
+            binary: elf,
         }
     }
 
-    /// Signs exact JSON and appends raw file bytes without archive metadata.
+    /// Frames exact JSON and appends raw file bytes without archive metadata.
     fn bundle(&self) -> Vec<u8> {
         let manifest = serde_json::to_vec(&self.manifest).unwrap();
-        let signature: Signature = self.key.sign(&manifest);
-        let signature = signature.to_der();
         let mut bytes = Vec::new();
-        for field in [manifest.as_slice(), signature.as_bytes()] {
-            bytes.extend_from_slice(&(field.len() as u32).to_be_bytes());
-            bytes.extend_from_slice(field);
-        }
-        for file in &self.files {
-            bytes.extend_from_slice(file);
-        }
+        bytes.extend_from_slice(&(manifest.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&manifest);
+        bytes.extend_from_slice(&self.binary);
         bytes
     }
 }
 
 /// Only verified regular files and a read-only worker descriptor survive a successful transfer.
 #[test]
-fn exact_signed_release_round_trips() {
+fn exact_release_round_trips() {
     let fixture = Fixture::new();
     let parent = tempfile::tempdir().unwrap();
-    let runtime = receive(
-        &mut Cursor::new(fixture.bundle()),
-        &[*fixture.key.verifying_key()],
-        1024,
-        parent.path(),
-    )
-    .unwrap();
+    let runtime = receive(&mut Cursor::new(fixture.bundle()), 1024, parent.path()).unwrap();
     assert_eq!(runtime.release_id, "test-release");
-    for (artifact, expected) in fixture.manifest.artifacts.iter().zip(&fixture.files) {
-        let path = runtime.root.path().join(&artifact.logical_path);
-        assert_eq!(fs::read(&path).unwrap(), *expected);
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o555
-        );
-    }
+    let path = runtime.root.path().join(WORKER_PATH);
+    assert_eq!(fs::read(&path).unwrap(), fixture.binary);
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o555
+    );
+    assert_eq!(fs::read_dir(runtime.root.path()).unwrap().count(), 1);
+    assert_eq!(
+        fs::read_dir(runtime.root.path().join("bin"))
+            .unwrap()
+            .count(),
+        1
+    );
     let mut read_only = &runtime.binary;
     assert!(std::io::Write::write_all(&mut read_only, b"overwrite").is_err());
     drop(runtime);
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
-/// Signature verification precedes creating runtime files or trusting manifest metadata.
+/// Publishers cannot select filesystem paths or supply the old multi-file format.
 #[test]
-fn untrusted_publishers_and_changed_metadata_are_rejected() {
+fn old_format_and_publisher_paths_are_rejected() {
     let fixture = Fixture::new();
-    let other = SigningKey::from_slice(&[2; 48]).unwrap();
-    let parent = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        receive(
-            &mut Cursor::new(fixture.bundle()),
-            &[*other.verifying_key()],
-            1024,
-            parent.path()
-        ),
-        Err(Error::InvalidSignature)
-    ));
-    let mut changed = fixture.bundle();
-    let position = changed
-        .windows(12)
-        .position(|bytes| bytes == b"test-release")
-        .unwrap();
-    changed[position] = b'b';
-    assert!(matches!(
-        receive(
-            &mut Cursor::new(changed),
-            &[*fixture.key.verifying_key()],
-            1024,
-            parent.path()
-        ),
-        Err(Error::InvalidSignature)
-    ));
-    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    let mut old = fixture.manifest.clone();
+    old.manifest_version = 1;
+    assert!(old.validate(1024).is_err());
+    for (field, value) in [
+        ("logical_path", serde_json::json!("../escape")),
+        ("role", serde_json::json!("library")),
+        ("artifacts", serde_json::json!([])),
+    ] {
+        let mut value_with_field = serde_json::to_value(&fixture.manifest).unwrap();
+        value_with_field[field] = value;
+        assert!(serde_json::from_value::<Manifest>(value_with_field).is_err());
+    }
     assert!(
-        receive(
-            &mut Cursor::new(fixture.bundle()),
-            &[*other.verifying_key(), *fixture.key.verifying_key()],
-            1024,
-            parent.path()
+        serde_json::from_str::<Manifest>(
+            r#"{"manifest_version":1,"release_id":"old","artifacts":[]}"#
         )
-        .is_ok()
+        .is_err()
     );
 }
 
-/// Path traversal, alternate entry points, duplicate files and file/directory collisions fail closed.
-#[test]
-fn unsafe_signed_inventories_are_rejected() {
-    let mut fixture = Fixture::new();
-    for path in [
-        "../escape",
-        "/lib/escape",
-        "lib//escape",
-        "lib/../escape",
-        "lib/./escape",
-        "models/model.onnx",
-        "lib/a\\b",
-        "lib/a\0b",
-    ] {
-        fixture.manifest.artifacts[1].logical_path = path.into();
-        assert!(fixture.manifest.validate(1024).is_err(), "{path:?}");
-    }
-    fixture.manifest.artifacts[1].logical_path = WORKER_PATH.into();
-    assert!(fixture.manifest.validate(1024).is_err());
-    fixture.manifest.artifacts[1].logical_path = "lib/file".into();
-    let mut child = fixture.manifest.artifacts[1].clone();
-    child.logical_path = "lib/file/nested".into();
-    fixture.manifest.artifacts.push(child);
-    assert!(fixture.manifest.validate(1024).is_err());
-    fixture.manifest.artifacts.reverse();
-    assert!(fixture.manifest.validate(1024).is_err());
-}
-
-/// Missing configuration, aggregate exhaustion and integer overflow never allocate artifact bodies.
+/// Missing configuration and oversized executables never allocate artifact bodies.
 #[test]
 fn format_and_resource_limits_are_checked_before_copying() {
     let mut fixture = Fixture::new();
     assert!(fixture.manifest.validate(0).is_err());
     assert!(fixture.manifest.validate(MAX_BUNDLE_BYTES + 1).is_err());
-    assert!(fixture.manifest.validate(64).is_err());
-    fixture.manifest.artifacts[0].size = u64::MAX;
+    assert!(fixture.manifest.validate(63).is_err());
+    fixture.manifest.size = u64::MAX;
     assert!(fixture.manifest.validate(MAX_BUNDLE_BYTES).is_err());
     let parent = tempfile::tempdir().unwrap();
     for header in [0_u32, u32::MAX, 65537] {
         assert!(matches!(
-            receive(
-                &mut Cursor::new(header.to_be_bytes()),
-                &[*fixture.key.verifying_key()],
-                1024,
-                parent.path()
-            ),
+            receive(&mut Cursor::new(header.to_be_bytes()), 1024, parent.path()),
             Err(Error::InvalidManifest)
         ));
     }
     assert!(matches!(
-        receive(&mut Cursor::new([]), &[], 1024, parent.path()),
+        receive(&mut Cursor::new([]), 0, parent.path()),
         Err(Error::InvalidConfig)
     ));
 }
@@ -215,37 +128,19 @@ fn incomplete_or_tampered_bundles_are_cleaned_up() {
     let bundle = fixture.bundle();
     let parent = tempfile::tempdir().unwrap();
     for length in [0, 3, 4, 25, bundle.len() - 25, bundle.len() - 1] {
-        assert!(
-            receive(
-                &mut Cursor::new(&bundle[..length]),
-                &[*fixture.key.verifying_key()],
-                1024,
-                parent.path()
-            )
-            .is_err()
-        );
+        assert!(receive(&mut Cursor::new(&bundle[..length]), 1024, parent.path()).is_err());
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
     let mut corrupt = bundle.clone();
     *corrupt.last_mut().unwrap() ^= 1;
     assert!(matches!(
-        receive(
-            &mut Cursor::new(corrupt),
-            &[*fixture.key.verifying_key()],
-            1024,
-            parent.path()
-        ),
+        receive(&mut Cursor::new(corrupt), 1024, parent.path()),
         Err(Error::DigestMismatch)
     ));
     let mut trailing = bundle;
     trailing.push(0);
     assert!(matches!(
-        receive(
-            &mut Cursor::new(trailing),
-            &[*fixture.key.verifying_key()],
-            1024,
-            parent.path()
-        ),
+        receive(&mut Cursor::new(trailing), 1024, parent.path()),
         Err(Error::TrailingData)
     ));
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
@@ -265,12 +160,7 @@ fn stalled_socket_receives_are_abandoned_and_cleaned_up() {
             .unwrap();
         sender.write_all(&bundle[..length]).unwrap();
         // Keep the peer open without sending more bytes or signalling EOF.
-        let result = receive(
-            &mut receiver,
-            &[*fixture.key.verifying_key()],
-            1024,
-            parent.path(),
-        );
+        let result = receive(&mut receiver, 1024, parent.path());
         assert!(matches!(
             result,
             Err(Error::Io(ref error))
@@ -285,27 +175,18 @@ fn stalled_socket_receives_are_abandoned_and_cleaned_up() {
 #[test]
 fn blocked_socket_upload_is_abandoned() {
     let mut fixture = Fixture::new();
-    fixture.files[2] = vec![1; 8 * 1024 * 1024];
-    fixture.manifest.artifacts[2].size = fixture.files[2].len() as u64;
-    fixture.manifest.artifacts[2].sha384 = hex::encode(Sha384::digest(&fixture.files[2]));
+    fixture.binary.resize(8 * 1024 * 1024, 1);
+    fixture.manifest.size = fixture.binary.len() as u64;
+    fixture.manifest.sha384 = hex::encode(Sha384::digest(&fixture.binary));
     let root = tempfile::tempdir().unwrap();
-    for (artifact, bytes) in fixture.manifest.artifacts.iter().zip(&fixture.files) {
-        let path = root.path().join(&artifact.logical_path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, bytes).unwrap();
-    }
+    let executable = root.path().join("worker");
+    fs::write(&executable, &fixture.binary).unwrap();
     let manifest = serde_json::to_vec(&fixture.manifest).unwrap();
-    let signature: Signature = fixture.key.sign(&manifest);
     let (mut sender, receiver) = UnixStream::pair().unwrap();
     sender
         .set_write_timeout(Some(Duration::from_millis(50)))
         .unwrap();
-    let result = package(
-        &mut sender,
-        &manifest,
-        signature.to_der().as_bytes(),
-        root.path(),
-    );
+    let result = package(&mut sender, &manifest, &executable);
     assert!(matches!(
         result,
         Err(Error::Io(ref error))
@@ -314,20 +195,15 @@ fn blocked_socket_upload_is_abandoned() {
     drop(receiver);
 }
 
-/// Valid signatures do not authorize a different executable architecture or an unknown role.
+/// Valid hashes do not allow a different executable architecture or unknown metadata.
 #[test]
 fn wrong_architecture_and_unknown_fields_are_rejected() {
     let mut fixture = Fixture::new();
-    fixture.files[0][18] = 183; // AArch64, not the reviewed x86_64 seccomp target.
-    fixture.manifest.artifacts[0].sha384 = hex::encode(Sha384::digest(&fixture.files[0]));
+    fixture.binary[18] = 183; // AArch64, not the reviewed x86_64 seccomp target.
+    fixture.manifest.sha384 = hex::encode(Sha384::digest(&fixture.binary));
     let parent = tempfile::tempdir().unwrap();
     assert!(matches!(
-        receive(
-            &mut Cursor::new(fixture.bundle()),
-            &[*fixture.key.verifying_key()],
-            1024,
-            parent.path()
-        ),
+        receive(&mut Cursor::new(fixture.bundle()), 1024, parent.path()),
         Err(Error::InvalidExecutable)
     ));
     let mut value = serde_json::to_value(&fixture.manifest).unwrap();
@@ -340,58 +216,41 @@ fn wrong_architecture_and_unknown_fields_are_rejected() {
 fn packaging_matches_the_receiver_and_rejects_changed_files() {
     let fixture = Fixture::new();
     let source = tempfile::tempdir().unwrap();
-    for (artifact, data) in fixture.manifest.artifacts.iter().zip(&fixture.files) {
-        let path = source.path().join(&artifact.logical_path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, data).unwrap();
-    }
+    let executable = source.path().join("worker");
+    fs::write(&executable, &fixture.binary).unwrap();
     let generated = std::process::Command::new(env!("CARGO_BIN_EXE_worker-bundle"))
         .args(["manifest", &fixture.manifest.release_id])
-        .arg(source.path())
+        .arg(&executable)
         .output()
         .unwrap();
     assert!(generated.status.success(), "{:?}", generated.stderr);
     let manifest: Manifest = serde_json::from_slice(&generated.stdout).unwrap();
-    let mut expected = fixture.manifest.artifacts.clone();
-    expected.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
     assert_eq!(
-        serde_json::to_value(&manifest.artifacts).unwrap(),
-        serde_json::to_value(expected).unwrap()
+        serde_json::to_value(manifest).unwrap(),
+        serde_json::to_value(&fixture.manifest).unwrap()
     );
     let manifest = serde_json::to_vec(&fixture.manifest).unwrap();
-    let signature: Signature = fixture.key.sign(&manifest);
     let mut bytes = Vec::new();
-    package(
-        &mut bytes,
-        &manifest,
-        signature.to_der().as_bytes(),
-        source.path(),
-    )
-    .unwrap();
+    package(&mut bytes, &manifest, &executable).unwrap();
     assert_eq!(bytes, fixture.bundle());
-    fs::write(source.path().join("lib/fixture.so"), b"changed").unwrap();
-    assert!(
-        package(
-            &mut Vec::new(),
-            &manifest,
-            signature.to_der().as_bytes(),
-            source.path()
-        )
-        .is_err()
-    );
-    fs::remove_file(source.path().join("lib/fixture.so")).unwrap();
-    std::os::unix::fs::symlink(
-        source.path().join(WORKER_PATH),
-        source.path().join("lib/fixture.so"),
-    )
-    .unwrap();
+
+    let manifest_path = source.path().join("manifest.json");
+    let bundle_path = source.path().join("worker.bundle");
+    fs::write(&manifest_path, &manifest).unwrap();
+    let packed = std::process::Command::new(env!("CARGO_BIN_EXE_worker-bundle"))
+        .arg("pack")
+        .args([&manifest_path, &executable, &bundle_path])
+        .output()
+        .unwrap();
+    assert!(packed.status.success(), "{:?}", packed.stderr);
+    assert_eq!(fs::read(&bundle_path).unwrap(), bytes);
+
+    fs::write(&executable, b"changed").unwrap();
+    assert!(package(&mut Vec::new(), &manifest, &executable).is_err());
+    fs::remove_file(&executable).unwrap();
+    std::os::unix::fs::symlink(source.path().join(WORKER_PATH), &executable).unwrap();
     assert!(matches!(
-        package(
-            &mut Vec::new(),
-            &manifest,
-            signature.to_der().as_bytes(),
-            source.path()
-        ),
+        package(&mut Vec::new(), &manifest, &executable),
         Err(Error::InvalidManifest)
     ));
 }

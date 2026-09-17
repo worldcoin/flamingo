@@ -25,7 +25,11 @@ pub(crate) fn remaining(deadline: Instant) -> io::Result<Duration> {
 }
 
 /// Reads exactly these bytes without allowing partial progress to reset the deadline.
-fn read_all(stream: &mut UnixStream, mut bytes: &mut [u8], deadline: Instant) -> io::Result<()> {
+pub(crate) fn read_all(
+    stream: &mut UnixStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> io::Result<()> {
     while !bytes.is_empty() {
         stream.set_read_timeout(Some(remaining(deadline)?))?;
         match stream.read(bytes) {
@@ -64,7 +68,7 @@ fn write_all(stream: &mut UnixStream, mut bytes: &[u8], deadline: Instant) -> io
     remaining(deadline).map(|_| ())
 }
 
-/// Writes a four-byte big-endian length followed by the bounded CBOR payload.
+/// Writes a four-byte big-endian length followed by the bounded protobuf payload.
 pub(crate) fn write_frame(
     stream: &mut UnixStream,
     payload: &[u8],
