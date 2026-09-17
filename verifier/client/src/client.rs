@@ -50,6 +50,13 @@ pub struct FlamingoVerifierClient {
     verifier: Verifier,
 }
 
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        clippy::future_not_send,
+        reason = "Fetch and JavaScript futures stay on their originating browser worker"
+    )
+)]
 impl FlamingoVerifierClient {
     /// Builds a client from `config`.
     ///
@@ -62,8 +69,8 @@ impl FlamingoVerifierClient {
 
     /// Builds a client using an externally configured HTTP client builder.
     ///
-    /// The configured cookie store, connection timeout, and request timeout are applied to the
-    /// supplied builder.
+    /// Native clients use a cookie store and connection/request timeouts. Browser clients
+    /// use Fetch credentials and a per-request deadline; the browser manages connections.
     ///
     /// # Errors
     ///
@@ -72,13 +79,13 @@ impl FlamingoVerifierClient {
         config: Config,
         http: reqwest::ClientBuilder,
     ) -> Result<Self, Error> {
+        #[cfg(not(target_arch = "wasm32"))]
         let http = http
             // Replays the ALB's affinity cookie, so the match reaches the enclave that was assigned.
             .cookie_store(true)
             .connect_timeout(config.connect_timeout())
-            .timeout(config.request_timeout())
-            .build()
-            .map_err(Error::Transport)?;
+            .timeout(config.request_timeout());
+        let http = http.build().map_err(Error::Transport)?;
 
         Ok(Self {
             verifier: config.verifier()?,
@@ -91,12 +98,13 @@ impl FlamingoVerifierClient {
     ///
     /// Callers may customize the returned builder before passing it to
     /// [`Self::request_assignment_with`].
+    #[must_use]
     pub fn build_assignment_request(&self) -> reqwest::RequestBuilder {
         let url = format!(
             "{}/v1/enclave-assignment",
             self.config.host_url().as_str().trim_end_matches('/')
         );
-        self.http.post(url)
+        self.configure_request(self.http.post(url))
     }
 
     /// Requests an assignment and returns it only if its attestation verifies.
@@ -180,8 +188,7 @@ impl FlamingoVerifierClient {
         }
 
         let request = self
-            .http
-            .post(url)
+            .configure_request(self.http.post(url))
             .header(reqwest::header::CONTENT_TYPE, MATCH_CONTENT_TYPE)
             .header(reqwest::header::ACCEPT, MATCH_CONTENT_TYPE)
             .body(sealed);
@@ -327,6 +334,12 @@ impl FlamingoVerifierClient {
             allow_retry: envelope.allow_retry,
         }
     }
+
+    fn configure_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        #[cfg(target_arch = "wasm32")]
+        let request = request.fetch_credentials_include().fetch_cache_no_store();
+        request.timeout(self.config.request_timeout())
+    }
 }
 
 async fn bounded_response(response: &mut reqwest::Response) -> Result<Vec<u8>, Error> {
@@ -366,7 +379,7 @@ pub enum VerifiedMatchResult {
     Failed(flamingo_verifier_sealed_types::FailureReason),
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
@@ -664,3 +677,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+#[path = "browser_tests.rs"]
+mod browser_tests;
