@@ -147,13 +147,16 @@ VERIFIER_CONFIG=./client.json cargo run --bin flamingo-verifier-e2e -- <credenti
 `POST /v1/matches` accepts and returns raw encrypted bytes with
 `Content-Type: application/octet-stream`. There is no JSON/base64 match envelope.
 The plaintext remains CBOR, with exactly one `deep_face` or `gray_badge` operation.
-DeepFace returns all three Orb/live/challenge similarities; GrayBadge compares live and
-challenge without credential fields. Both use explicit vanilla/LightGuard capture variants.
-The current in-process backend rejects LightGuard with an encrypted `unsupported_capture`.
+DeepFace requires all three Orb/live/challenge similarities to meet a normalized `[0, 1]`
+threshold. Both operations have explicit vanilla/LightGuard capture variants. GrayBadge
+currently returns encrypted `unsupported_operation` pending its signed-token contract;
+LightGuard returns encrypted `unsupported_capture`.
 
-A `200` response contains a padded encrypted success or failure. Successful statements bind
-the operation, exact input commitments, every score and the applied threshold. The client
-returns parsed, verified claims alongside the token and signing-key attestation. Infrastructure
+A `200` response contains a padded encrypted success or failure. Successful DeepFace
+statements retain the legacy token format: live and challenge image hashes, a hash of the
+credential claims, and the credential/live score. The threshold and other two scores are
+not included in the signed token. The client returns parsed, verified claims alongside the
+token and signing-key attestation. Infrastructure
 errors retain the JSON error envelope; `409 reassign_required` requires fresh assignment and
 resealing, with at most one retry. `415` rejects the old JSON transport and `413` enforces the
 binary body limit.
