@@ -37,6 +37,8 @@ allow = [
     "Unicode-3.0",
 ]
 exceptions = [
+    # Upstream protocol generation reaches foldhash through prost-build/petgraph.
+    { allow = ["Zlib"], name = "foldhash", version = "0.1.5" },
     # telemetry-batteries uses this public-domain instrumentation helper for HTTP spans.
     { allow = ["CC0-1.0"], name = "tracing-opentelemetry-instrumentation-sdk", version = "0.38.3" },
     # telemetry-batteries reaches option-ext through dirs; MPL's copyleft is file-scoped.
