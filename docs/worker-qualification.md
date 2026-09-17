@@ -18,9 +18,14 @@ Verified on x86_64 Linux with the production Minijail policy:
   response, signed result and input binding checks.
 - Approximately 5.0s from carrier launch to serving readiness, 1.0s for the first
   encrypted request, and 1.2 / 1.8 / 2.5s for three concurrent encrypted requests.
-- Carrier shutdown removes readiness and terminates its owned enclave. Fake carrier
-  tests cover interrupted startup, uploader watchdog cleanup and serving health
-  after provisioning acknowledgement.
+- Carrier shutdown removes readiness and terminates its owned enclave. After an
+  externally terminated enclave, the carrier bootstrapped a replacement with fresh
+  keys and passed another encrypted request (about 12s recovery). Four fake carrier
+  tests cover shutdown, disappeared enclaves, uploader watchdog cleanup and serving
+  health after provisioning acknowledgement.
+- One repeated-start run saw transient connection resets before a successful retry.
+  Subsequent connection traces and restart qualification succeeded; the reset phase
+  was not captured. The carrier safely removed each failed boot before retrying.
 
 Portable workspace tests, bounded protocol client tests, formatting and Clippy passed.
 The EIF and uploader were built using Nix. Kubernetes manifests were rendered against

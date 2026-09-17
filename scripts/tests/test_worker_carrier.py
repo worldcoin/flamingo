@@ -28,6 +28,7 @@ if Path(sys.argv[0]).name == 'nitro-cli':
     elif args[0] == 'terminate-enclave':
         assert args[-1] == 'owned', 'terminated another enclave'
         (root/'terminated').touch()
+        if not (root/'owned.json').exists(): sys.exit(1)
         (root/'owned.json').unlink(missing_ok=True)
 else:
     if args[0] == 'send' and (root/'hang').exists():
@@ -79,6 +80,14 @@ class CarrierTests(unittest.TestCase):
         self.assertFalse((self.root/'ready').exists())
         self.assertTrue((self.root/'terminated').exists())
         self.assertFalse((self.root/'owned.json').exists())
+
+    def test_disappeared_enclave_is_replaced(self):
+        self.start(); self.wait_for('ready')
+        (self.root/'owned.json').unlink()
+        self.wait_for('terminated')
+        self.wait_for('owned.json')
+        self.wait_for('ready')
+        self.assertIsNone(self.process.poll())
 
     def test_watchdog_kills_uploader_and_cleans_owned_enclave(self):
         (self.root/'hang').touch(); self.start(); self.wait_for('uploader-pid')
