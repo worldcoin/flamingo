@@ -1,10 +1,13 @@
 [workspace]
 members = [
+    "verifier/api-types",
     "verifier/client",
     "verifier/e2e",
     "verifier/enclave-types",
+    "verifier/sealed-types",
     "verifier/enclave",
     "verifier/host",
+    "verifier/protocol",
     "di/enclave",
     "verifier/worker-rpc",
     "verifier/worker-protocol",
@@ -33,8 +36,11 @@ base64 = "0.22"
 bytes = { version = "1", features = ["serde"] }
 ciborium = "0.2"
 coset = "0.4.2"
-flamingo-verifier-client = { path = "verifier/client", default-features = false }
+flamingo-verifier-api-types = { path = "verifier/api-types" }
+flamingo-verifier-client = { path = "verifier/client" }
 flamingo-verifier-enclave-types = { path = "verifier/enclave-types" }
+flamingo-verifier-protocol = { path = "verifier/protocol" }
+flamingo-verifier-sealed-types = { path = "verifier/sealed-types" }
 eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
 face-engine = { git = "https://github.com/worldcoin/biometric-engines", rev = "face-engine-v2.16.0", default-features = false, features = ["tract"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }

@@ -6,7 +6,7 @@
 //! [`crate::state::EnclaveState`].
 
 use eddsa_babyjubjub::{EdDSAPrivateKey, EdDSAPublicKey};
-use flamingo_verifier_client::protocol::match_token::{MatchClaims, MatchToken, build_token};
+use flamingo_verifier_protocol::match_token::{MatchClaims, MatchToken, build_token};
 
 /// The field element a `BabyJubJub` `EdDSA` signature commits to.
 type SigningMessage = ark_babyjubjub::Fq;
@@ -40,12 +40,12 @@ impl SigningKey {
     ///
     /// # Errors
     ///
-    /// Propagates [`flamingo_verifier_client::protocol::Error`] if the claims cannot be lowered to a digest or the
+    /// Propagates [`flamingo_verifier_protocol::Error`] if the claims cannot be lowered to a digest or the
     /// token cannot be encoded.
     pub fn sign_claims(
         &self,
         claims: &MatchClaims,
-    ) -> Result<MatchToken, flamingo_verifier_client::protocol::Error> {
+    ) -> Result<MatchToken, flamingo_verifier_protocol::Error> {
         let signature = self.sign(claims.message_hash()?);
 
         build_token(claims, &signature, &self.public_key)

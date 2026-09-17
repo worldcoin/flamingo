@@ -11,10 +11,11 @@ name = "verifier-enclave"
 path = "src/main.rs"
 
 [dependencies]
-flamingo-verifier-client = { workspace = true, features = ["sealed-types"] }
 anyhow.workspace = true
 ark-babyjubjub.workspace = true
 flamingo-verifier-enclave-types.workspace = true
+flamingo-verifier-protocol.workspace = true
+flamingo-verifier-sealed-types.workspace = true
 eddsa-babyjubjub.workspace = true
 face-engine.workspace = true
 hex.workspace = true

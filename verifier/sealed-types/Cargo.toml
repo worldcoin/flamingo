@@ -1,0 +1,19 @@
+[package]
+name = "flamingo-verifier-sealed-types"
+description = "Sealed client-to-enclave match payload for the Flamingo verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+flamingo-verifier-api-types.workspace = true
+sha2.workspace = true
+ciborium.workspace = true
+flamingo-verifier-protocol.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+zeroize.workspace = true

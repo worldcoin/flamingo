@@ -61,12 +61,8 @@ jobs:
           private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - name: tests
         run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-worker-process --verbose
-      - name: Client feature boundaries and package
-        run: |
-          cargo test --locked -p flamingo-verifier-client --no-default-features
-          cargo test --locked -p flamingo-verifier-client --no-default-features --features protocol
-          cargo test --locked -p flamingo-verifier-client --no-default-features --features sealed-types
-          cargo package --locked -p flamingo-verifier-client
+      - name: Standalone client package
+        run: cargo package --locked -p flamingo-verifier-client
       - name: Minijail process tests
         run: |
           cargo test --locked -p flamingo-verifier-worker-process --all-features --no-run \

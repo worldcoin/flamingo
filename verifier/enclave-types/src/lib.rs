@@ -1,7 +1,7 @@
 //! The vsock contract between the `Verifier` host and its enclave.
 //!
-//! The client↔host HTTP contract is `flamingo_verifier_client::api_types`; the sealed client↔enclave payload is
-//! `flamingo_verifier_client::sealed_types`.
+//! The client↔host HTTP contract is `flamingo-verifier-api-types`; the sealed client↔enclave payload is
+//! `flamingo-verifier-sealed-types`.
 
 #![deny(
     clippy::all,

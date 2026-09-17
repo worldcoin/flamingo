@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use eddsa_babyjubjub::EdDSAPublicKey;
-use flamingo_verifier_client::sealed_types::MATCH_CHANNEL_DOMAIN;
 use flamingo_verifier_enclave_types as enclave_types;
+use flamingo_verifier_sealed_types::MATCH_CHANNEL_DOMAIN;
 use pontifex::{ChannelDomain, ChannelEnclave};
 use tokio::task::JoinHandle;
 

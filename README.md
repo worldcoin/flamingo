@@ -19,6 +19,9 @@ verifier/
 │   ├── host/              # Axum HTTP API — the untrusted side of the boundary
 │   ├── enclave/           # Nitro enclave workload — the trusted side. Own workspace -> own Cargo.lock
 │   ├── enclave-types/     # Host↔enclave vsock contract: health, errors, key attestation, the match exchange
+│   ├── api-types/         # Unpublished wrapper for shared HTTP types
+│   ├── protocol/          # Unpublished wrapper for shared signed claims
+│   ├── sealed-types/      # Unpublished wrapper for shared sealed payloads
 │   ├── client/            # Published client, HTTP API, signed protocol and sealed payload types
 │   └── e2e/               # End-to-end harness driving host and enclave together
 └── di/                    # Skeleton — dirs and crates only, no behaviour yet
@@ -44,11 +47,15 @@ use flamingo_verifier_client::protocol::match_token::MatchClaims;
 use flamingo_verifier_client::sealed_types::MatchInputs;
 ```
 
-The default `http` feature includes the attestation-verifying HTTP client and all types.
-With `default-features = false`, only `api_types` is enabled; `protocol` adds signed match
-claims, and `sealed-types` adds the encrypted payload types and enables `protocol`.
-The host uses API types only, and the enclave enables `sealed-types` without HTTP or
-attestation-verifier dependencies. All crates share the root workspace and lockfile.
+The host and enclave depend on unpublished `api-types`, `protocol` and `sealed-types`
+crates. These crates use `#[path]` modules to compile the same source files shipped inside
+`client/src`; neither depends on the client. Keep shared implementations in that directory
+so the published client package is self-contained. There is no source copying or build-time
+code generation.
+
+The internal crates and client compile separate Rust types from the shared source. Use one
+family consistently within a process; the host/enclave boundary uses serialized messages.
+External dependency versions are shared through the workspace manifests.
 
 ## Development
 

@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-flamingo-verifier-client = { workspace = true, features = ["http"] }
+flamingo-verifier-client.workspace = true
 anyhow.workspace = true
 flamingo-verifier-enclave-types.workspace = true
 hex.workspace = true

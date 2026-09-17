@@ -1,6 +1,6 @@
 //! Conversion from engine errors to public match failures.
 use face_engine::io::errors::ValidationError;
-use flamingo_verifier_client::sealed_types::{FailureReason, ImageFailureReason, ImageRole};
+use flamingo_verifier_sealed_types::{FailureReason, ImageFailureReason, ImageRole};
 
 /// Attach the input image to an approved reason, omitting engine diagnostics.
 pub const fn image_failure(error: &ValidationError, image: ImageRole) -> FailureReason {

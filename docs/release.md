@@ -95,5 +95,6 @@ the measurements from source and compare against `manifest.json`.
 
 `release-crates.yml` uses `release-plz.toml` to publish only `flamingo-verifier-client`.
 The API, protocol and sealed payload types ship as modules inside that package; no other
-Flamingo crate is needed by consumers. Changes to these modules are included in the client
+Flamingo crate is needed by consumers. Unpublished internal crates compile the same source
+files through `#[path]` modules, so the enclave does not depend on the client. Changes to these modules are included in the client
 release and changelog.
