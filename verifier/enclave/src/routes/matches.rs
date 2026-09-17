@@ -20,9 +20,8 @@ pub async fn handler(
         .channel()
         .open(&request.body)
         .map_err(|_| enclave_types::Error::RequestNotOpened)?;
-    let inputs = MatchInputs::from_cbor(&plaintext).map_err(|_| enclave_types::Error::Internal)?;
-
-    let result = match evaluate(&state, &inputs) {
+    let claims = MatchInputs::from_cbor(&plaintext).and_then(|inputs| evaluate(&state, &inputs));
+    let result = match claims {
         Ok(claims) => MatchResult::Success(AttestedStatement {
             token: state
                 .signing_key()
