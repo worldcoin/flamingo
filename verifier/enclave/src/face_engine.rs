@@ -21,7 +21,7 @@ const FACE_TEMPLATE_GENERATOR_CONFIG: &str = include_str!("../config/face_templa
 
 // TODO: Inject production Face Engine configs and model artifacts at runtime instead of compiling
 // the prototype configs and fixed `/models` paths into the enclave.
-/// Inference results mirror Tobi's operation-specific results.
+/// Inference results mirror the operation-specific engine results.
 pub enum ComparisonScores {
     /// All three pairwise scores.
     DeepFace(DeepFaceScores),
@@ -52,7 +52,7 @@ impl Default for FaceEngine {
             analyzer: CapturedImageAnalyzer::new(FACE_ANALYZER_CONFIG)
                 .expect("built-in Face Engine analyzer config and model should load"),
             matcher: CosineSimilarity {
-                normalize_score: false,
+                normalize_score: true,
             },
         }
     }

@@ -20,22 +20,19 @@ pub enum MatchInputs {
     /// Live/challenge comparison without PCP.
     GrayBadge(GrayBadgeInputs),
 }
-/// `DeepFace` fields mirror Tobi's operation plus broker-owned PCP and policy.
+/// `DeepFace` fields mirror the engine operation plus broker-owned PCP and policy.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeepFaceInputs {
     /// Encoded Orb thumbnail.
-    #[serde(deserialize_with = "image_bytes")]
     pub orb_credential: ByteBuf,
     /// Explicit capture variant.
     pub live: LiveCapture,
     /// Encoded relying-party challenge.
-    #[serde(deserialize_with = "image_bytes")]
     pub rtms_challenge: ByteBuf,
     /// Exact original PCP hashes.json bytes.
-    #[serde(deserialize_with = "hashes_bytes")]
     pub hashes_json: ByteBuf,
-    /// Minimum raw cosine score for all three comparisons.
+    /// Minimum normalized cosine score for all three comparisons.
     pub match_threshold: f64,
 }
 /// `GrayBadge` has no credential or PCP fields.
@@ -45,9 +42,8 @@ pub struct GrayBadgeInputs {
     /// Explicit capture variant.
     pub live: LiveCapture,
     /// Encoded relying-party challenge.
-    #[serde(deserialize_with = "image_bytes")]
     pub rtms_challenge: ByteBuf,
-    /// Minimum raw cosine score.
+    /// Minimum normalized cosine score.
     pub match_threshold: f64,
 }
 /// Capture bytes are deliberately not Debug or Clone.
@@ -55,49 +51,16 @@ pub struct GrayBadgeInputs {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LiveCapture {
     /// Single vanilla image.
-    Vanilla(#[serde(deserialize_with = "image_bytes")] ByteBuf),
+    Vanilla(ByteBuf),
     /// Explicit challenge-response pair.
     LightGuard {
         /// Illuminated frame.
-        #[serde(deserialize_with = "image_bytes")]
         illuminated: ByteBuf,
         /// Unilluminated frame.
-        #[serde(deserialize_with = "image_bytes")]
         unilluminated: ByteBuf,
         /// Frame selected for matching.
         matching_frame: LightGuardMatchingFrame,
     },
-}
-// Accept CBOR byte strings only. Reject sequence/string encodings and check before ownership copy.
-fn bounded_bytes<'de, D: serde::Deserializer<'de>, const LIMIT: usize>(
-    decoder: D,
-) -> Result<ByteBuf, D::Error> {
-    struct Visitor<const N: usize>;
-    impl<const N: usize> serde::de::Visitor<'_> for Visitor<N> {
-        type Value = ByteBuf;
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a bounded CBOR byte string")
-        }
-        fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<ByteBuf, E> {
-            if bytes.len() > N {
-                return Err(E::custom("byte limit exceeded"));
-            }
-            Ok(ByteBuf::from(bytes))
-        }
-        fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<ByteBuf, E> {
-            if bytes.len() > N {
-                return Err(E::custom("byte limit exceeded"));
-            }
-            Ok(bytes.into())
-        }
-    }
-    decoder.deserialize_byte_buf(Visitor::<LIMIT>)
-}
-fn image_bytes<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<ByteBuf, D::Error> {
-    bounded_bytes::<D, MAX_IMAGE_BYTES>(decoder)
-}
-fn hashes_bytes<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<ByteBuf, D::Error> {
-    bounded_bytes::<D, MAX_HASHES_JSON_BYTES>(decoder)
 }
 
 impl LiveCapture {
@@ -458,7 +421,7 @@ mod tests {
     }
     #[test]
     fn nonfinite_threshold_and_oversized_images_fail_before_encoding() {
-        for value in [f64::NAN, f64::INFINITY, 1.01, -1.01] {
+        for value in [f64::NAN, f64::INFINITY, 1.01, -0.01] {
             let MatchInputs::GrayBadge(mut inputs) = request() else {
                 unreachable!()
             };
@@ -469,10 +432,13 @@ mod tests {
             unreachable!()
         };
         inputs.rtms_challenge = vec![0; MAX_IMAGE_BYTES + 1].into();
-        assert_eq!(
-            MatchInputs::GrayBadge(inputs).validate(),
-            Err(FailureReason::InputTooLarge)
-        );
+        let inputs = MatchInputs::GrayBadge(inputs);
+        assert_eq!(inputs.validate(), Err(FailureReason::InputTooLarge));
+        // A caller can bypass our encoder; the enclave must validate decoded fields too.
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&inputs, &mut encoded).unwrap();
+        let decoded = MatchInputs::from_cbor(&encoded).unwrap();
+        assert_eq!(decoded.validate(), Err(FailureReason::InputTooLarge));
     }
     #[test]
     fn every_outcome_has_identical_envelope_size() {

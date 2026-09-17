@@ -232,9 +232,9 @@ mod tests {
         assert_eq!(success_len, failure_len);
     }
     #[tokio::test]
-    async fn gray_badge_accepts_negative_cosine_without_pcp() {
-        let state = state(Engine { third: -0.25 });
-        let (result, _) = exchange(Arc::clone(&state), &gray(-0.5)).await;
+    async fn gray_badge_accepts_normalized_cosine_without_pcp() {
+        let state = state(Engine { third: 0.625 });
+        let (result, _) = exchange(Arc::clone(&state), &gray(0.5)).await;
         let MatchResult::Success(statement) = result else {
             panic!("expected success")
         };
@@ -307,7 +307,7 @@ mod tests {
     }
     #[test]
     fn invalid_backend_scores_fail_as_infrastructure_errors() {
-        for third in [f64::NAN, f64::INFINITY, 1.1, -1.1] {
+        for third in [f64::NAN, f64::INFINITY, 1.01, -0.01] {
             assert!(matches!(
                 evaluate(&state(Engine { third }), inputs()),
                 Err(FailureReason::Internal)

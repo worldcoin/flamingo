@@ -158,9 +158,6 @@ errors retain the JSON error envelope; `409 reassign_required` requires fresh as
 resealing, with at most one retry. `415` rejects the old JSON transport and `413` enforces the
 binary body limit.
 
-See [the match contract](docs/matches-api.md) for payloads, byte budgets, memory ownership,
-claim encoding, and the proof-consumer integration boundary.
-
 ## Nitro-enabled development host
 
 Use an Amazon Linux 2023 EC2 instance type that supports Nitro Enclaves and launch it with

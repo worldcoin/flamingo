@@ -1,4 +1,4 @@
-//! Operation-specific match statements. See `docs/matches-api.md` for the signed encoding.
+//! Operation-specific match statements.
 use crate::error::Error;
 use ark_babyjubjub::Fq;
 use ark_ff::PrimeField;
@@ -43,7 +43,7 @@ pub enum CaptureCommitment {
     },
 }
 
-/// Scores use Tobi's names and raw cosine scale, [-1, 1].
+/// Scores use the engine comparison names and normalized cosine scale, [0, 1].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeepFaceScores {
@@ -71,7 +71,7 @@ pub struct MatchContext {
     pub live: CaptureCommitment,
     /// SHA-256 of the RTMS challenge bytes.
     pub rtms_challenge: [u8; 32],
-    /// Minimum raw cosine similarity applied to every comparison.
+    /// Minimum normalized cosine similarity applied to every comparison.
     pub match_threshold: f64,
 }
 
@@ -87,14 +87,14 @@ pub enum MatchClaims {
         orb_credential: [u8; 32],
         /// SHA-256 of the exact PCP hashes.json bytes (not proof of issuance).
         credential_claim: [u8; 32],
-        /// All three raw cosine scores.
+        /// All three normalized cosine scores.
         scores: DeepFaceScores,
     },
     /// Live/challenge comparison without a credential.
     GrayBadge {
         /// Common request context.
         context: MatchContext,
-        /// Raw cosine score.
+        /// Normalized cosine score.
         scores: GrayBadgeScores,
     },
 }
@@ -156,10 +156,10 @@ impl MatchClaims {
     }
 }
 
-/// Whether a raw cosine value is finite and within [-1, 1].
+/// Whether a normalized cosine value is finite and within [0, 1].
 #[must_use]
 pub fn valid_similarity(value: f64) -> bool {
-    value.is_finite() && (-1.0..=1.0).contains(&value)
+    value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
 /// A signed match token: an untagged `COSE_Sign1` over [`MatchClaims`].
@@ -301,15 +301,15 @@ mod tests {
             context: MatchContext {
                 live: CaptureCommitment::Vanilla([1; 32]),
                 rtms_challenge: [2; 32],
-                match_threshold: -0.5,
+                match_threshold: 0.5,
             },
             scores: GrayBadgeScores {
-                similarity_selfie_challenge: -0.25,
+                similarity_selfie_challenge: 0.625,
             },
         }
     }
     #[test]
-    fn signed_negative_score_round_trips() {
+    fn signed_normalized_score_round_trips() {
         let key = EdDSAPrivateKey::random(&mut rand::rngs::OsRng);
         let claims = claims();
         let token = build_token(
@@ -319,6 +319,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verify(&token, &key.public()), Ok(claims));
+    }
+    #[test]
+    fn normalized_threshold_range_includes_both_endpoints() {
+        for threshold in [0.0, 1.0] {
+            let mut c = claims();
+            let MatchClaims::GrayBadge { context, scores } = &mut c else {
+                unreachable!()
+            };
+            context.match_threshold = threshold;
+            scores.similarity_selfie_challenge = threshold;
+            assert!(c.validate().is_ok());
+        }
+        for threshold in [-0.01, 1.01, f64::NAN, f64::INFINITY] {
+            let mut c = claims();
+            let MatchClaims::GrayBadge { context, .. } = &mut c else {
+                unreachable!()
+            };
+            context.match_threshold = threshold;
+            assert!(c.validate().is_err());
+        }
     }
     #[test]
     fn every_context_and_score_is_bound() {
@@ -332,7 +352,7 @@ mod tests {
             match field {
                 0 => context.live = CaptureCommitment::Vanilla([3; 32]),
                 1 => context.rtms_challenge = [3; 32],
-                2 => context.match_threshold = -0.75,
+                2 => context.match_threshold = 0.25,
                 _ => scores.similarity_selfie_challenge = 0.5,
             }
             variants.push(changed);
@@ -343,7 +363,7 @@ mod tests {
     }
     #[test]
     fn invalid_scores_cannot_be_signed() {
-        for value in [f64::NAN, f64::INFINITY, -1.1, 1.1, -0.75] {
+        for value in [f64::NAN, f64::INFINITY, -0.01, 1.01, 0.25] {
             let mut c = claims();
             let MatchClaims::GrayBadge { scores, .. } = &mut c else {
                 unreachable!()
@@ -388,13 +408,13 @@ mod tests {
         let vectors = [
             (
                 gray,
-                "4d92c1e2ccd876ae8938949db3e92560928eebfb2dc6d02a1b238e0240abc57e",
-                "14491240167894508522494218986162224629619844214970339047621988342487863332047",
+                "bb6e873957098c7cc5ed3e00754f70577caa5407d12f3fae399da8a13b3d7511",
+                "21318305651465481687108769807629788145336186714684437845654127774188764944089",
             ),
             (
                 deep,
-                "54bf24073aaeaa91814cda0545fc98e0913dd062bb973b371051fa76ec741245",
-                "19811348251815745611443440052035379723738992838256880595205668972482548281469",
+                "3fd2a53ed4d7a1a6f9f09ce929a737fb2911bc1c137018261bd6b26554b8c468",
+                "14780987756678047732454878635769489174829054508045879701007718474688438038072",
             ),
         ];
         for (claim, expected_payload_hash, expected_field) in vectors {

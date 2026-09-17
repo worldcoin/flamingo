@@ -1,4 +1,4 @@
-//! Approved validation feedback matching Tobi's face protocol.
+//! Approved validation feedback matching the biometric engine protocol.
 use face_engine::io::errors::ValidationError;
 use flamingo_verifier_sealed_types::{
     AnalysisFailure, FailureReason, ImageRole, ValidationFailure, ValidationReason,
