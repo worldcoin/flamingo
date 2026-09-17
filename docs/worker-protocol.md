@@ -18,9 +18,9 @@ Biological failures retain upstream structured details and keep IPC usable.
 Internal engine failures, malformed replies, crashes and timeouts terminate the
 enclave. A new worker requires a fresh enclave boot; there is no fallback.
 
-The current public match adapter still consumes two credential comparison scores;
-the public API/claim migration owns exposing and authenticating three-way DeepFace
-and GrayBadge. `Worker::evaluate` already returns all three DeepFace scores or the
+The public adapter checks all three normalized DeepFace scores while retaining the
+existing signed coefficient and input commitments. Public GrayBadge remains explicitly
+unsupported until its claim contract is agreed. `Worker::evaluate` returns all three DeepFace scores or the
 GrayBadge score, without dummy credential inputs. It does not apply thresholds.
 
 ## Provisioning format
@@ -52,6 +52,7 @@ PCP checks happen before taking the inference mutex. The mutex and admission per
 remain owned by the blocking exchange even if its async caller disconnects. Host
 match timeout remains 30s. Idle worker health is checked without waiting on busy IPC.
 
-The JSON/base64 route budget derives from the ciphertext limit. Each image is capped
-at 8 MiB by the broker, below upstream's ceiling. The carrier readiness marker closes
+The binary route and decrypted payload use the shared API limits: 4 MiB per image
+and 7 MiB total. Worker frame bounds follow the same aggregate budget. Raw worker
+cosines are normalized using the existing engine policy before threshold checks. The carrier readiness marker closes
 admission during startup/shutdown; active relays get a 35s drain before enclave teardown.

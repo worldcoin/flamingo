@@ -24,7 +24,7 @@ impl Attestor for EchoAttestor {
 pub struct FailingAttestor;
 
 impl Attestor for FailingAttestor {
-    fn attest_public_key(&mut self, _: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
+    fn attest_public_key(&self, _: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
         Err(enclave_types::Error::AttestationFailed)
     }
 }

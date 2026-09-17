@@ -8,47 +8,89 @@ use flamingo_verifier_sealed_types::{
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use std::time::Duration;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use tokio::time::timeout;
 use crate::face_engine::DeepFaceScores;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::Duration;
+use tokio::time::timeout;
 const WORKER_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Decrypt and validate before taking the worker lock; seal every input-derived outcome.
-pub async fn handler(state: Arc<EnclaveState>, request: MatchRequest) -> Result<MatchResponse, enclave_types::Error> {
-    if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES { return Err(enclave_types::Error::RequestNotOpened); }
-    let admission = Arc::clone(&state.admission).try_acquire_owned().map_err(|_| enclave_types::Error::NotReady)?;
+pub async fn handler(
+    state: Arc<EnclaveState>,
+    request: MatchRequest,
+) -> Result<MatchResponse, enclave_types::Error> {
+    if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES {
+        return Err(enclave_types::Error::RequestNotOpened);
+    }
+    let admission = Arc::clone(&state.admission)
+        .try_acquire_owned()
+        .map_err(|_| enclave_types::Error::NotReady)?;
     let preparation_state = Arc::clone(&state);
     let (sealer, prepared, admission) = blocking(move || {
-        let (plaintext, sealer) = preparation_state.channel().open(&request.body).map_err(|_| enclave_types::Error::RequestNotOpened)?;
+        let (plaintext, sealer) = preparation_state
+            .channel()
+            .open(&request.body)
+            .map_err(|_| enclave_types::Error::RequestNotOpened)?;
         let prepared = MatchInputs::from_cbor(&plaintext).and_then(prepare);
         Ok((sealer, prepared, admission))
-    }).await?;
+    })
+    .await?;
     let prepared = match prepared {
         Ok(prepared) => prepared,
-        Err(reason) => return blocking(move || {
-            let _admission = admission;
-            let encoded = MatchResult::Failed(reason).to_padded_cbor().map_err(|_| enclave_types::Error::Internal)?;
-            Ok(MatchResponse { ciphertext: sealer.seal(&encoded).map_err(|_| enclave_types::Error::Internal)? })
-        }).await,
+        Err(reason) => {
+            return blocking(move || {
+                let _admission = admission;
+                let encoded = MatchResult::Failed(reason)
+                    .to_padded_cbor()
+                    .map_err(|_| enclave_types::Error::Internal)?;
+                Ok(MatchResponse {
+                    ciphertext: sealer
+                        .seal(&encoded)
+                        .map_err(|_| enclave_types::Error::Internal)?,
+                })
+            })
+            .await;
+        }
     };
     let signing_key_attestation = state.signing_key_attestation().await;
-    let mut worker = timeout(WORKER_QUEUE_TIMEOUT, Arc::clone(&state.comparator).lock_owned()).await.map_err(|_| enclave_types::Error::NotReady)?;
+    let mut worker = timeout(
+        WORKER_QUEUE_TIMEOUT,
+        Arc::clone(&state.comparator).lock_owned(),
+    )
+    .await
+    .map_err(|_| enclave_types::Error::NotReady)?;
     blocking(move || {
         let _admission = admission;
         let (inputs, credential_claim) = prepared;
-        let LiveCapture::Vanilla(live) = &inputs.live else { unreachable!("validated capture") };
-        let scores = exit_on_panic(|| worker.deep_face(&inputs.orb_credential, live, &inputs.rtms_challenge));
+        let LiveCapture::Vanilla(live) = &inputs.live else {
+            unreachable!("validated capture")
+        };
+        let scores = exit_on_panic(|| {
+            worker.deep_face(&inputs.orb_credential, live, &inputs.rtms_challenge)
+        });
         drop(worker);
         let claims = scores.and_then(|scores| evaluate(&inputs, credential_claim, scores));
         let result = match claims {
-            Ok(claims) => MatchResult::Success(AttestedStatement { token: state.signing_key().sign_claims(&claims).map_err(|_| enclave_types::Error::Internal)?, signing_key_attestation }),
+            Ok(claims) => MatchResult::Success(AttestedStatement {
+                token: state
+                    .signing_key()
+                    .sign_claims(&claims)
+                    .map_err(|_| enclave_types::Error::Internal)?,
+                signing_key_attestation,
+            }),
             Err(FailureReason::Internal) => return Err(enclave_types::Error::Internal),
             Err(reason) => MatchResult::Failed(reason),
         };
-        let encoded = result.to_padded_cbor().map_err(|_| enclave_types::Error::Internal)?;
-        Ok(MatchResponse { ciphertext: sealer.seal(&encoded).map_err(|_| enclave_types::Error::Internal)? })
-    }).await
+        let encoded = result
+            .to_padded_cbor()
+            .map_err(|_| enclave_types::Error::Internal)?;
+        Ok(MatchResponse {
+            ciphertext: sealer
+                .seal(&encoded)
+                .map_err(|_| enclave_types::Error::Internal)?,
+        })
+    })
+    .await
 }
 /// Runs synchronous work off the executor, retaining tracing and terminal panic handling.
 async fn blocking<T: Send + 'static>(
@@ -74,16 +116,31 @@ fn exit_on_panic<T>(work: impl FnOnce() -> T) -> T {
     })
 }
 
-fn prepare(inputs: MatchInputs) -> Result<(flamingo_verifier_sealed_types::DeepFaceInputs, [u8; 32]), FailureReason> {
+fn prepare(
+    inputs: MatchInputs,
+) -> Result<(flamingo_verifier_sealed_types::DeepFaceInputs, [u8; 32]), FailureReason> {
     inputs.validate()?;
-    let live = match &inputs { MatchInputs::DeepFace(i) => &i.live, MatchInputs::GrayBadge(i) => &i.live };
-    if !matches!(live, LiveCapture::Vanilla(_)) { return Err(FailureReason::UnsupportedCapture); }
-    let MatchInputs::DeepFace(i) = inputs else { return Err(FailureReason::UnsupportedOperation); };
+    let live = match &inputs {
+        MatchInputs::DeepFace(i) => &i.live,
+        MatchInputs::GrayBadge(i) => &i.live,
+    };
+    if !matches!(live, LiveCapture::Vanilla(_)) {
+        return Err(FailureReason::UnsupportedCapture);
+    }
+    let MatchInputs::DeepFace(i) = inputs else {
+        return Err(FailureReason::UnsupportedOperation);
+    };
     let credential_claim = pcp::bind_credential_claim(&i.orb_credential, &i.hashes_json)?;
     Ok((i, credential_claim))
 }
-fn evaluate(i: &flamingo_verifier_sealed_types::DeepFaceInputs, credential_claim: [u8; 32], scores: DeepFaceScores) -> Result<MatchClaims, FailureReason> {
-    let LiveCapture::Vanilla(live) = &i.live else { unreachable!("validated capture") };
+fn evaluate(
+    i: &flamingo_verifier_sealed_types::DeepFaceInputs,
+    credential_claim: [u8; 32],
+    scores: DeepFaceScores,
+) -> Result<MatchClaims, FailureReason> {
+    let LiveCapture::Vanilla(live) = &i.live else {
+        unreachable!("validated capture")
+    };
     let threshold = i.match_threshold;
     let live_image_hash = Sha256::digest(live).into();
     let challenger_image_hash = Sha256::digest(&i.rtms_challenge).into();
@@ -318,9 +375,252 @@ mod tests {
     fn invalid_backend_scores_fail_as_infrastructure_errors() {
         for third in [f64::NAN, f64::INFINITY, 1.01, -0.01] {
             assert!(matches!(
-                evaluate(&prepare(inputs()).unwrap().0, [0; 32], DeepFaceScores { similarity_orb_selfie: 0.95, similarity_orb_challenge: 0.9, similarity_selfie_challenge: third }),
+                evaluate(
+                    &prepare(inputs()).unwrap().0,
+                    [0; 32],
+                    DeepFaceScores {
+                        similarity_orb_selfie: 0.95,
+                        similarity_orb_challenge: 0.9,
+                        similarity_selfie_challenge: third
+                    }
+                ),
                 Err(FailureReason::Internal)
             ));
         }
+    }
+
+    use std::sync::{Mutex, mpsc};
+    use tokio::sync::Notify;
+    fn request_for(
+        state: &EnclaveState,
+        inputs: &MatchInputs,
+    ) -> (pontifex::ResponseOpener, MatchRequest) {
+        let consumer = ChannelConsumer::from_unverified_public_key(
+            ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
+            &state.channel().public_key(),
+        )
+        .unwrap();
+        let (sealed, opener) = consumer
+            .seal_to_enclave(&inputs.to_cbor().unwrap())
+            .unwrap();
+        (
+            opener,
+            MatchRequest {
+                body: sealed.into(),
+            },
+        )
+    }
+    #[tokio::test]
+    async fn invalid_requests_do_not_wait_for_worker() {
+        let state = state(UnusedFaceEngine);
+        let _guard = state.comparator.lock().await;
+        let (result, _) = timeout(
+            Duration::from_secs(10),
+            exchange(Arc::clone(&state), &gray(0.5)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            MatchResult::Failed(FailureReason::UnsupportedOperation)
+        );
+        let MatchInputs::DeepFace(mut input) = inputs() else {
+            unreachable!()
+        };
+        input.orb_credential = b"wrong".to_vec().into();
+        let (result, _) = timeout(
+            Duration::from_secs(10),
+            exchange(Arc::clone(&state), &MatchInputs::DeepFace(input)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            MatchResult::Failed(FailureReason::ThumbnailHashMismatch)
+        );
+    }
+    /// Holds one comparison until the test allows it to finish.
+    struct BlockingFaceEngine {
+        /// Signals when the synchronous worker comparison starts.
+        entered: Arc<Notify>,
+        /// A bounded wait that cannot strand the test runtime on assertion failure.
+        release: Mutex<mpsc::Receiver<()>>,
+        /// Exercises terminal panic handling without any model dependencies.
+        panic: bool,
+    }
+
+    impl FaceComparator for BlockingFaceEngine {
+        fn gray_badge(&mut self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
+            unreachable!()
+        }
+
+        /// Blocks off the async executor, optionally panicking after caller cancellation.
+        fn deep_face(
+            &mut self,
+            _: &[u8],
+            _: &[u8],
+            _: &[u8],
+        ) -> Result<DeepFaceScores, FailureReason> {
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| FailureReason::Internal)?;
+            assert!(!self.panic, "test comparator panic");
+
+            Ok(DeepFaceScores {
+                similarity_orb_selfie: 0.9,
+                similarity_orb_challenge: 0.9,
+                similarity_selfie_challenge: 0.9,
+            })
+        }
+    }
+
+    /// Requests wait asynchronously; disconnecting an active caller does not unlock its worker.
+    #[tokio::test]
+    async fn concurrent_matches_wait_and_cancellation_keeps_worker_locked() {
+        let entered = Arc::new(Notify::new());
+        let (release, receiver) = mpsc::sync_channel(1);
+        let state = state(BlockingFaceEngine {
+            entered: Arc::clone(&entered),
+            release: Mutex::new(receiver),
+            panic: false,
+        });
+        let (_, request) = request_for(&state, &inputs());
+        let first = tokio::spawn(handler(Arc::clone(&state), request));
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("comparison must start off the current-thread runtime");
+
+        timeout(
+            Duration::from_secs(1),
+            crate::routes::health::handler(
+                Arc::clone(&state),
+                flamingo_verifier_enclave_types::HealthRequest,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let (opener, request) = request_for(&state, &inputs());
+        let mut second = tokio::spawn(handler(Arc::clone(&state), request));
+        assert!(
+            timeout(Duration::from_millis(100), &mut second)
+                .await
+                .is_err()
+        );
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(state.comparator.try_lock().is_err());
+        assert!(
+            timeout(Duration::from_millis(100), entered.notified())
+                .await
+                .is_err()
+        );
+
+        release.send(()).unwrap();
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        let response = timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let plaintext = opener.open_from_enclave(&response.ciphertext).unwrap();
+        assert!(matches!(
+            MatchResult::from_padded_cbor(&plaintext).unwrap(),
+            MatchResult::Success(_)
+        ));
+        assert!(state.comparator.try_lock().is_ok());
+    }
+
+    /// Cancelling a queued request must not start it later or strand the mutex.
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_use_worker() {
+        let state = state(crate::test_support::UnusedFaceEngine);
+        let guard = state.comparator.lock().await;
+        let (_, request) = request_for(&state, &inputs());
+        let mut waiting = tokio::spawn(handler(Arc::clone(&state), request));
+        assert!(
+            timeout(Duration::from_millis(100), &mut waiting)
+                .await
+                .is_err()
+        );
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        drop(guard);
+        let _guard = timeout(Duration::from_secs(1), state.comparator.lock())
+            .await
+            .unwrap();
+    }
+
+    /// Valid requests receive a bounded wait instead of an immediate busy response.
+    #[tokio::test]
+    async fn worker_queue_times_out() {
+        let state = state(crate::test_support::UnusedFaceEngine);
+        let guard = state.comparator.lock().await;
+        let (_, request) = request_for(&state, &inputs());
+        assert_eq!(
+            timeout(
+                super::WORKER_QUEUE_TIMEOUT + Duration::from_secs(2),
+                handler(Arc::clone(&state), request)
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            enclave_types::Error::NotReady,
+        );
+        drop(guard);
+        assert!(state.comparator.try_lock().is_ok());
+    }
+    /// A panic after disconnect must exit the broker, not silently release the worker.
+    #[test]
+    fn detached_match_panic_is_terminal() {
+        const CHILD_ENV: &str = "FLAMINGO_TEST_DETACHED_MATCH_PANIC";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let entered = Arc::new(Notify::new());
+                let (release, receiver) = mpsc::sync_channel(1);
+                let state = state(BlockingFaceEngine {
+                    entered: Arc::clone(&entered),
+                    release: Mutex::new(receiver),
+                    panic: true,
+                });
+                let (_, request) = request_for(&state, &inputs());
+                let task = tokio::spawn(handler(Arc::clone(&state), request));
+                timeout(Duration::from_secs(2), entered.notified())
+                    .await
+                    .unwrap();
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                release.send(()).unwrap();
+                // If panic handling is broken, the child returns normally and fails the parent.
+                let _guard = timeout(
+                    Duration::from_secs(2),
+                    Arc::clone(&state.comparator).lock_owned(),
+                )
+                .await
+                .unwrap();
+            });
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "routes::matches::tests::detached_match_panic_is_terminal",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(1));
     }
 }
