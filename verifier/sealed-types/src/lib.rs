@@ -12,9 +12,15 @@ mod error;
 mod messages;
 
 /// Pontifex channel domain shared by the consumer and enclave.
-pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v1";
+pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v2";
 
 pub use error::Error;
-pub use messages::{
-    AttestedStatement, FailureReason, MATCH_RESULT_ENVELOPE_LEN, MatchInputs, MatchResult,
-};
+pub use flamingo_verifier_protocol::match_token::LightGuardMatchingFrame;
+pub use messages::*;
+pub use serde_bytes::ByteBuf;
+
+mod validation;
+pub use validation::{ValidationFailure, ValidationReason, ValidationTarget};
+
+/// Bound on sealed match bytes before decryption.
+pub use flamingo_verifier_api_types::MAX_MATCH_BODY_BYTES;

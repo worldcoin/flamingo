@@ -34,7 +34,7 @@ impl EnclaveClient for StubEnclaveClient {
 
     async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, enclave::Error> {
         if let Some(expected) = &self.expected_body {
-            assert_eq!(&request.body, expected);
+            assert_eq!(request.body.as_ref(), expected.as_slice());
         }
 
         self.match_result

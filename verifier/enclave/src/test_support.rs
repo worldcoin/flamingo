@@ -94,11 +94,9 @@ impl Attestor for FailsAfterSuccessesAttestor {
 pub struct UnusedFaceEngine;
 
 impl FaceComparator for UnusedFaceEngine {
-    fn compare_reference_to_probes(
+    fn evaluate(
         &self,
-        _: &[u8],
-        _: &[u8],
-        _: &[u8],
+        _: flamingo_verifier_sealed_types::MatchInputs,
     ) -> Result<ComparisonScores, FailureReason> {
         panic!("Face Engine was called unexpectedly")
     }
