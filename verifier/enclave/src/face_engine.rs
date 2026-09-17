@@ -10,33 +10,50 @@ use face_engine::{
     matchers::cosine_similarity::CosineSimilarity,
     nodes::{subject_extraction::SubjectFace, template_generation::EmbeddingVector},
 };
-use flamingo_verifier_protocol::match_token::{DeepFaceScores, GrayBadgeScores, valid_similarity};
 use flamingo_verifier_sealed_types::{
-    ComparisonRole, FailureReason, ImageFailureReason, ImageRole, LiveCapture, MatchInputs,
+    ComparisonRole, FailureReason, ImageFailureReason, ImageRole, valid_similarity,
 };
 use image::ImageReader;
 
 const FACE_ANALYZER_CONFIG: &str = include_str!("../config/face_analyzer.yaml");
 const FACE_TEMPLATE_GENERATOR_CONFIG: &str = include_str!("../config/face_template_generator.yaml");
 
-// TODO: Inject production Face Engine configs and model artifacts at runtime instead of compiling
-// the prototype configs and fixed `/models` paths into the enclave.
-/// Inference results mirror the operation-specific engine results.
-pub enum ComparisonScores {
-    /// All three pairwise scores.
-    DeepFace(DeepFaceScores),
-    /// Live versus challenge.
-    GrayBadge(GrayBadgeScores),
+/// Internal normalized scores; these do not define the signed-token contract.
+pub struct DeepFaceScores {
+    /// Orb credential versus live selfie.
+    pub similarity_orb_selfie: f64,
+    /// Orb credential versus RTMS challenge.
+    pub similarity_orb_challenge: f64,
+    /// Live selfie versus RTMS challenge.
+    pub similarity_selfie_challenge: f64,
 }
 
-/// Small execution seam: the public request survives a future worker replacement unchanged.
+/// Internal normalized score for the credential-free operation.
+pub struct GrayBadgeScores {
+    /// Live selfie versus RTMS challenge.
+    pub similarity_selfie_challenge: f64,
+}
+
+/// Image-only inference operations. PCP verification and threshold policy belong to the caller.
 pub trait FaceComparator: Send + Sync {
-    /// Consume input buffers without cloning them. PCP and policy stay in the broker.
+    /// Compare the credential, live selfie and challenge without copying input buffers.
     /// # Errors
     /// Returns structured analysis failures or infrastructure faults.
-    fn evaluate(&self, inputs: MatchInputs) -> Result<ComparisonScores, FailureReason>;
+    fn deep_face(
+        &self,
+        credential: &[u8],
+        live: &[u8],
+        challenge: &[u8],
+    ) -> Result<DeepFaceScores, FailureReason>;
+
+    /// Compare the live selfie and challenge without copying input buffers.
+    /// # Errors
+    /// Returns structured analysis failures or infrastructure faults.
+    fn gray_badge(&self, live: &[u8], challenge: &[u8]) -> Result<GrayBadgeScores, FailureReason>;
 }
 
+// TODO: Inject production Face Engine configs and model artifacts at runtime instead of compiling
+// the prototype configs and fixed `/models` paths into the enclave.
 /// Face Engine implementation backed by the configured ONNX models.
 pub struct FaceEngine {
     template_generator: TemplateGenerator,
@@ -121,56 +138,43 @@ impl FaceEngine {
         }
         Ok(score)
     }
-    fn live_embedding(&self, live: LiveCapture) -> Result<EmbeddingVector, FailureReason> {
-        match live {
-            LiveCapture::Vanilla(bytes) => self.generate_embedding(&bytes, ImageRole::LiveSelfie),
-            LiveCapture::LightGuard { .. } => Err(FailureReason::UnsupportedCapture),
-        }
-    }
 }
 
 impl FaceComparator for FaceEngine {
-    fn evaluate(&self, inputs: MatchInputs) -> Result<ComparisonScores, FailureReason> {
-        match inputs {
-            MatchInputs::DeepFace(inputs) => {
-                let orb =
-                    self.generate_embedding(&inputs.orb_credential, ImageRole::OrbCredential)?;
-                drop(inputs.orb_credential);
-                drop(inputs.hashes_json);
-                let live = self.live_embedding(inputs.live)?;
-                let challenge =
-                    self.generate_embedding(&inputs.rtms_challenge, ImageRole::RtmsChallenge)?;
-                Ok(ComparisonScores::DeepFace(DeepFaceScores {
-                    similarity_orb_selfie: self.compute_score(
-                        &orb,
-                        &live,
-                        ComparisonRole::OrbSelfie,
-                    )?,
-                    similarity_orb_challenge: self.compute_score(
-                        &orb,
-                        &challenge,
-                        ComparisonRole::OrbChallenge,
-                    )?,
-                    similarity_selfie_challenge: self.compute_score(
-                        &live,
-                        &challenge,
-                        ComparisonRole::SelfieChallenge,
-                    )?,
-                }))
-            }
-            MatchInputs::GrayBadge(inputs) => {
-                let live = self.live_embedding(inputs.live)?;
-                let challenge =
-                    self.generate_embedding(&inputs.rtms_challenge, ImageRole::RtmsChallenge)?;
-                Ok(ComparisonScores::GrayBadge(GrayBadgeScores {
-                    similarity_selfie_challenge: self.compute_score(
-                        &live,
-                        &challenge,
-                        ComparisonRole::SelfieChallenge,
-                    )?,
-                }))
-            }
-        }
+    fn deep_face(
+        &self,
+        credential: &[u8],
+        live: &[u8],
+        challenge: &[u8],
+    ) -> Result<DeepFaceScores, FailureReason> {
+        let orb = self.generate_embedding(credential, ImageRole::OrbCredential)?;
+        let live = self.generate_embedding(live, ImageRole::LiveSelfie)?;
+        let challenge = self.generate_embedding(challenge, ImageRole::RtmsChallenge)?;
+        Ok(DeepFaceScores {
+            similarity_orb_selfie: self.compute_score(&orb, &live, ComparisonRole::OrbSelfie)?,
+            similarity_orb_challenge: self.compute_score(
+                &orb,
+                &challenge,
+                ComparisonRole::OrbChallenge,
+            )?,
+            similarity_selfie_challenge: self.compute_score(
+                &live,
+                &challenge,
+                ComparisonRole::SelfieChallenge,
+            )?,
+        })
+    }
+
+    fn gray_badge(&self, live: &[u8], challenge: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
+        let live = self.generate_embedding(live, ImageRole::LiveSelfie)?;
+        let challenge = self.generate_embedding(challenge, ImageRole::RtmsChallenge)?;
+        Ok(GrayBadgeScores {
+            similarity_selfie_challenge: self.compute_score(
+                &live,
+                &challenge,
+                ComparisonRole::SelfieChallenge,
+            )?,
+        })
     }
 }
 

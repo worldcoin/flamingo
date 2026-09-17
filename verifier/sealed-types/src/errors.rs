@@ -53,6 +53,8 @@ pub enum FailureReason {
     InputTooLarge,
     /// Recognized capture is not implemented by this backend.
     UnsupportedCapture,
+    /// Recognized operation has no agreed match-token contract yet.
+    UnsupportedOperation,
     /// A named comparison did not meet policy.
     MatchBelowThreshold(ComparisonRole),
     /// Image analysis rejection with semantic location.

@@ -175,7 +175,6 @@ impl FlamingoVerifierClient {
             "{}/v1/matches",
             self.config.host_url().as_str().trim_end_matches('/')
         );
-        drop(plaintext);
         if sealed.len() > MAX_MATCH_BODY_BYTES {
             return Err(Error::MalformedResult);
         }
@@ -226,7 +225,8 @@ impl FlamingoVerifierClient {
             .await
     }
 
-    /// Execute a typed `GrayBadge` request without credential fields.
+    /// Submit a typed `GrayBadge` request without credential fields.
+    /// Currently returns `UnsupportedOperation` until its token contract is agreed.
     /// # Errors
     /// Returns transport, attestation or contract errors.
     pub async fn gray_badge(

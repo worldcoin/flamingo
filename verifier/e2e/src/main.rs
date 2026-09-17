@@ -72,13 +72,9 @@ async fn main() -> Result<()> {
     };
     ensure!(
         inputs.matches_claims(&verified.claims),
-        "statement did not bind the supplied inputs and threshold"
+        "legacy statement's input hashes or live score did not match the request"
     );
-    verified
-        .claims
-        .validate()
-        .map_err(|error| anyhow!("invalid signed scores: {error:?}"))?;
-    println!("attested match succeeded; input binding and all required comparisons verified");
+    println!("attested match succeeded; legacy input commitments and live score verified");
     Ok(())
 }
 

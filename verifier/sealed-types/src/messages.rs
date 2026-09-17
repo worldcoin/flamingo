@@ -3,9 +3,7 @@ use crate::{Error, FailureReason};
 use flamingo_verifier_api_types::{
     MAX_HASHES_JSON_BYTES, MAX_IMAGE_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_IMAGE_BYTES,
 };
-use flamingo_verifier_protocol::match_token::{
-    CaptureCommitment, LightGuardMatchingFrame, MatchContext, MatchToken, valid_similarity,
-};
+use flamingo_verifier_protocol::match_token::{MatchClaims, MatchToken};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -46,6 +44,23 @@ pub struct GrayBadgeInputs {
     /// Minimum normalized cosine score.
     pub match_threshold: f64,
 }
+
+/// Which `LightGuard` frame supplies the matching embedding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightGuardMatchingFrame {
+    /// Illuminated frame.
+    Illuminated,
+    /// Unilluminated frame.
+    Unilluminated,
+}
+
+/// Whether a normalized cosine value is finite and within [0, 1].
+#[must_use]
+pub fn valid_similarity(value: f64) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
 /// Capture bytes are deliberately not Debug or Clone.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -64,22 +79,6 @@ pub enum LiveCapture {
 }
 
 impl LiveCapture {
-    /// Compute input commitments without cloning image buffers.
-    #[must_use]
-    pub fn commitment(&self) -> CaptureCommitment {
-        match self {
-            Self::Vanilla(image) => CaptureCommitment::Vanilla(Sha256::digest(image).into()),
-            Self::LightGuard {
-                illuminated,
-                unilluminated,
-                matching_frame,
-            } => CaptureCommitment::LightGuard {
-                illuminated: Sha256::digest(illuminated).into(),
-                unilluminated: Sha256::digest(unilluminated).into(),
-                matching_frame: *matching_frame,
-            },
-        }
-    }
     fn images(&self) -> impl Iterator<Item = &ByteBuf> {
         let (first, second) = match self {
             Self::Vanilla(image) => (image, None),
@@ -118,15 +117,16 @@ impl MatchInputs {
     }
     /// Decode one complete bounded CBOR request. Semantic validation is broker-owned.
     /// # Errors
-    /// Rejects oversized, malformed or trailing data.
-    pub fn from_cbor(bytes: &[u8]) -> Result<Self, Error> {
+    /// Returns [`FailureReason::MalformedInputs`] for oversized, malformed or trailing data.
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, FailureReason> {
         if bytes.len() > MAX_MATCH_PLAINTEXT_BYTES {
-            return Err(Error::Malformed);
+            return Err(FailureReason::MalformedInputs);
         }
         let mut reader = bytes;
-        let result = ciborium::from_reader(&mut reader).map_err(|_| Error::Malformed)?;
+        let result =
+            ciborium::from_reader(&mut reader).map_err(|_| FailureReason::MalformedInputs)?;
         if !reader.is_empty() {
-            return Err(Error::Malformed);
+            return Err(FailureReason::MalformedInputs);
         }
         Ok(result)
     }
@@ -169,45 +169,23 @@ impl MatchInputs {
         }
         Ok(())
     }
-    /// Check a verified statement against the exact request, including the PCP bytes.
+    /// Check the legacy statement's input hashes and live score against a `DeepFace` request.
+    /// Other operations and capture modes have no agreed token contract yet.
     #[must_use]
-    pub fn matches_claims(
-        &self,
-        claims: &flamingo_verifier_protocol::match_token::MatchClaims,
-    ) -> bool {
-        use flamingo_verifier_protocol::match_token::MatchClaims;
-        if claims.context() != &self.context() {
+    pub fn matches_claims(&self, claims: &MatchClaims) -> bool {
+        let Self::DeepFace(inputs) = self else {
             return false;
-        }
-        match (self, claims) {
-            (
-                Self::DeepFace(i),
-                MatchClaims::DeepFace {
-                    orb_credential,
-                    credential_claim,
-                    ..
-                },
-            ) => {
-                *orb_credential == <[u8; 32]>::from(Sha256::digest(&i.orb_credential))
-                    && *credential_claim == <[u8; 32]>::from(Sha256::digest(&i.hashes_json))
-            }
-            (Self::GrayBadge(_), MatchClaims::GrayBadge { .. }) => true,
-            _ => false,
-        }
-    }
-
-    /// Compute shared context without copying images.
-    #[must_use]
-    pub fn context(&self) -> MatchContext {
-        let (live, challenge, threshold) = match self {
-            Self::DeepFace(i) => (&i.live, &i.rtms_challenge, i.match_threshold),
-            Self::GrayBadge(i) => (&i.live, &i.rtms_challenge, i.match_threshold),
         };
-        MatchContext {
-            live: live.commitment(),
-            rtms_challenge: Sha256::digest(challenge).into(),
-            match_threshold: threshold,
-        }
+        let LiveCapture::Vanilla(live) = &inputs.live else {
+            return false;
+        };
+        let score = f64::from(claims.match_coefficient);
+        claims.live_image_hash == <[u8; 32]>::from(Sha256::digest(live))
+            && claims.challenger_image_hash
+                == <[u8; 32]>::from(Sha256::digest(&inputs.rtms_challenge))
+            && claims.credential_claim == <[u8; 32]>::from(Sha256::digest(&inputs.hashes_json))
+            && valid_similarity(score)
+            && score >= inputs.match_threshold
     }
 }
 
@@ -322,6 +300,58 @@ impl MatchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_claims_bind_input_hashes_and_enforce_the_live_threshold() {
+        let inputs = MatchInputs::DeepFace(DeepFaceInputs {
+            orb_credential: b"orb".to_vec().into(),
+            live: LiveCapture::Vanilla(b"live".to_vec().into()),
+            rtms_challenge: b"challenge".to_vec().into(),
+            hashes_json: b"hashes".to_vec().into(),
+            match_threshold: 0.5,
+        });
+        let claims = MatchClaims {
+            live_image_hash: Sha256::digest(b"live").into(),
+            credential_claim: Sha256::digest(b"hashes").into(),
+            challenger_image_hash: Sha256::digest(b"challenge").into(),
+            match_coefficient: 0.75,
+        };
+        assert!(inputs.matches_claims(&claims));
+        for changed in [
+            MatchClaims {
+                live_image_hash: [0; 32],
+                ..claims
+            },
+            MatchClaims {
+                credential_claim: [0; 32],
+                ..claims
+            },
+            MatchClaims {
+                challenger_image_hash: [0; 32],
+                ..claims
+            },
+        ] {
+            assert!(!inputs.matches_claims(&changed));
+        }
+        for score in [0.25, -0.1, 1.1, f32::NAN, f32::INFINITY] {
+            assert!(!inputs.matches_claims(&MatchClaims {
+                match_coefficient: score,
+                ..claims
+            }));
+        }
+        // Neither unsupported mode may accept a legacy token as its result.
+        assert!(!request().matches_claims(&claims));
+        let MatchInputs::DeepFace(mut inputs) = inputs else {
+            unreachable!()
+        };
+        inputs.live = LiveCapture::LightGuard {
+            illuminated: b"live".to_vec().into(),
+            unilluminated: b"other".to_vec().into(),
+            matching_frame: LightGuardMatchingFrame::Illuminated,
+        };
+        assert!(!MatchInputs::DeepFace(inputs).matches_claims(&claims));
+    }
+
     fn request() -> MatchInputs {
         MatchInputs::GrayBadge(GrayBadgeInputs {
             live: LiveCapture::Vanilla(vec![1, 2, 3].into()),

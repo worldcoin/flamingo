@@ -1,8 +1,9 @@
-use crate::{face_engine::ComparisonScores, pcp, state::EnclaveState};
+use crate::{pcp, state::EnclaveState};
 use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
-use flamingo_verifier_protocol::match_token::{MatchClaims, valid_similarity};
+use flamingo_verifier_protocol::match_token::MatchClaims;
 use flamingo_verifier_sealed_types::{
     AttestedStatement, ComparisonRole, FailureReason, LiveCapture, MatchInputs, MatchResult,
+    valid_similarity,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -19,27 +20,24 @@ pub async fn handler(
         .channel()
         .open(&request.body)
         .map_err(|_| enclave_types::Error::RequestNotOpened)?;
-    drop(request);
-    let inputs = MatchInputs::from_cbor(&plaintext);
-    // The typed buffers now own image bytes. Release the serialized plaintext before inference.
-    drop(plaintext);
-    let result = match inputs {
-        Err(_) => MatchResult::Failed(FailureReason::MalformedInputs),
-        Ok(inputs) => match evaluate(&state, inputs) {
-            Ok(claims) => MatchResult::Success(AttestedStatement {
-                token: state
-                    .signing_key()
-                    .sign_claims(&claims)
-                    .map_err(|_| enclave_types::Error::Internal)?,
-                signing_key_attestation: state.signing_key_attestation().await,
-            }),
-            Err(FailureReason::Internal) => return Err(enclave_types::Error::Internal),
-            Err(reason) => MatchResult::Failed(reason),
-        },
+    let inputs = MatchInputs::from_cbor(&plaintext).map_err(|_| enclave_types::Error::Internal)?;
+
+    let result = match evaluate(&state, &inputs) {
+        Ok(claims) => MatchResult::Success(AttestedStatement {
+            token: state
+                .signing_key()
+                .sign_claims(&claims)
+                .map_err(|_| enclave_types::Error::Internal)?,
+            signing_key_attestation: state.signing_key_attestation().await,
+        }),
+        Err(FailureReason::Internal) => return Err(enclave_types::Error::Internal),
+        Err(reason) => MatchResult::Failed(reason),
     };
+
     let encoded = result
         .to_padded_cbor()
         .map_err(|_| enclave_types::Error::Internal)?;
+
     Ok(MatchResponse {
         ciphertext: sealer
             .seal(&encoded)
@@ -47,70 +45,66 @@ pub async fn handler(
     })
 }
 
-fn evaluate(state: &EnclaveState, inputs: MatchInputs) -> Result<MatchClaims, FailureReason> {
+fn evaluate(state: &EnclaveState, inputs: &MatchInputs) -> Result<MatchClaims, FailureReason> {
     inputs.validate()?;
-    let live = match &inputs {
+    let live = match inputs {
         MatchInputs::DeepFace(i) => &i.live,
         MatchInputs::GrayBadge(i) => &i.live,
     };
-    if matches!(live, LiveCapture::LightGuard { .. }) {
+    let LiveCapture::Vanilla(live) = live else {
         return Err(FailureReason::UnsupportedCapture);
-    }
-    let context = inputs.context();
-    let credential = match &inputs {
-        MatchInputs::DeepFace(i) => Some((
-            Sha256::digest(&i.orb_credential).into(),
-            pcp::bind_credential_claim(&i.orb_credential, &i.hashes_json)?,
-        )),
-        MatchInputs::GrayBadge(_) => None,
     };
+    let MatchInputs::DeepFace(i) = inputs else {
+        return Err(FailureReason::UnsupportedOperation);
+    };
+    let threshold = i.match_threshold;
+    let live_image_hash = Sha256::digest(live).into();
+    let credential_claim = pcp::bind_credential_claim(&i.orb_credential, &i.hashes_json)?;
+    let challenger_image_hash = Sha256::digest(&i.rtms_challenge).into();
     let check = |score: f64, comparison| {
         if !valid_similarity(score) {
             return Err(FailureReason::Internal);
         }
-        if score < context.match_threshold {
+        if score < threshold {
             return Err(FailureReason::MatchBelowThreshold(comparison));
         }
         Ok(())
     };
-    // Ownership moves to the execution adapter; no image clone.
-    match (state.face_engine().evaluate(inputs)?, credential) {
-        (ComparisonScores::DeepFace(scores), Some((orb_credential, credential_claim))) => {
-            check(scores.similarity_orb_selfie, ComparisonRole::OrbSelfie)?;
-            check(
-                scores.similarity_orb_challenge,
-                ComparisonRole::OrbChallenge,
-            )?;
-            check(
-                scores.similarity_selfie_challenge,
-                ComparisonRole::SelfieChallenge,
-            )?;
-            Ok(MatchClaims::DeepFace {
-                context,
-                orb_credential,
-                credential_claim,
-                scores,
-            })
-        }
-        (ComparisonScores::GrayBadge(scores), None) => {
-            check(
-                scores.similarity_selfie_challenge,
-                ComparisonRole::SelfieChallenge,
-            )?;
-            Ok(MatchClaims::GrayBadge { context, scores })
-        }
-        _ => Err(FailureReason::Internal),
-    }
+    let scores = state
+        .face_engine()
+        .deep_face(&i.orb_credential, live, &i.rtms_challenge)?;
+    check(scores.similarity_orb_selfie, ComparisonRole::OrbSelfie)?;
+    check(
+        scores.similarity_orb_challenge,
+        ComparisonRole::OrbChallenge,
+    )?;
+    check(
+        scores.similarity_selfie_challenge,
+        ComparisonRole::SelfieChallenge,
+    )?;
+    // Preserve the legacy score representation and signed statement. Other scores
+    // remain enclave policy checks until the expanded protocol is agreed.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the legacy token uses f32; the engine's normalized score was widened from f32"
+    )]
+    let match_coefficient = scores.similarity_orb_selfie as f32;
+    Ok(MatchClaims {
+        live_image_hash,
+        credential_claim,
+        challenger_image_hash,
+        match_coefficient,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        face_engine::FaceComparator,
+        face_engine::{DeepFaceScores, FaceComparator, GrayBadgeScores},
         test_support::{EchoAttestor, UnusedFaceEngine},
     };
-    use flamingo_verifier_protocol::match_token::{self, DeepFaceScores, GrayBadgeScores};
+    use flamingo_verifier_protocol::match_token;
     use flamingo_verifier_sealed_types::{
         DeepFaceInputs, GrayBadgeInputs, LightGuardMatchingFrame, MATCH_CHANNEL_DOMAIN,
     };
@@ -120,24 +114,24 @@ mod tests {
         third: f64,
     }
     impl FaceComparator for Engine {
-        fn evaluate(&self, inputs: MatchInputs) -> Result<ComparisonScores, FailureReason> {
-            Ok(match inputs {
-                MatchInputs::DeepFace(i) => {
-                    assert_eq!(i.orb_credential.as_ref(), b"orb");
-                    assert_eq!(i.rtms_challenge.as_ref(), b"challenge");
-                    ComparisonScores::DeepFace(DeepFaceScores {
-                        similarity_orb_selfie: 0.95,
-                        similarity_orb_challenge: 0.9,
-                        similarity_selfie_challenge: self.third,
-                    })
-                }
-                MatchInputs::GrayBadge(i) => {
-                    assert_eq!(i.rtms_challenge.as_ref(), b"challenge");
-                    ComparisonScores::GrayBadge(GrayBadgeScores {
-                        similarity_selfie_challenge: self.third,
-                    })
-                }
+        fn deep_face(
+            &self,
+            credential: &[u8],
+            live: &[u8],
+            challenge: &[u8],
+        ) -> Result<DeepFaceScores, FailureReason> {
+            assert_eq!(credential, b"orb");
+            assert_eq!(live, b"live");
+            assert_eq!(challenge, b"challenge");
+            Ok(DeepFaceScores {
+                similarity_orb_selfie: 0.95,
+                similarity_orb_challenge: 0.9,
+                similarity_selfie_challenge: self.third,
             })
+        }
+
+        fn gray_badge(&self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
+            panic!("GrayBadge must be rejected before inference")
         }
     }
     fn inputs() -> MatchInputs {
@@ -187,7 +181,7 @@ mod tests {
         )
     }
     #[tokio::test]
-    async fn deep_face_authenticates_every_score_and_input() {
+    async fn deep_face_returns_the_legacy_claims_bound_to_the_request() {
         let state = state(Engine { third: 0.85 });
         let inputs = inputs();
         let (result, _) = exchange(Arc::clone(&state), &inputs).await;
@@ -195,28 +189,23 @@ mod tests {
             panic!("expected signed result")
         };
         let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
-        assert_eq!(claims.context(), &inputs.context());
-        let MatchClaims::DeepFace {
-            orb_credential,
-            credential_claim,
-            scores,
-            ..
-        } = claims
-        else {
-            panic!("wrong operation")
-        };
-        assert_eq!(orb_credential, <[u8; 32]>::from(Sha256::digest(b"orb")));
+        assert!(inputs.matches_claims(&claims));
+        assert_eq!(
+            claims.live_image_hash,
+            <[u8; 32]>::from(Sha256::digest(b"live"))
+        );
+        assert_eq!(
+            claims.challenger_image_hash,
+            <[u8; 32]>::from(Sha256::digest(b"challenge"))
+        );
         let MatchInputs::DeepFace(inputs) = inputs else {
             unreachable!()
         };
         assert_eq!(
-            credential_claim,
+            claims.credential_claim,
             <[u8; 32]>::from(Sha256::digest(&inputs.hashes_json))
         );
-        assert_eq!(
-            scores.similarity_selfie_challenge.to_bits(),
-            0.85f64.to_bits()
-        );
+        assert_eq!(claims.match_coefficient.to_bits(), 0.95f32.to_bits());
     }
     #[tokio::test]
     async fn third_comparison_is_a_required_gate_and_failure_is_padded() {
@@ -232,16 +221,14 @@ mod tests {
         assert_eq!(success_len, failure_len);
     }
     #[tokio::test]
-    async fn gray_badge_accepts_normalized_cosine_without_pcp() {
-        let state = state(Engine { third: 0.625 });
-        let (result, _) = exchange(Arc::clone(&state), &gray(0.5)).await;
-        let MatchResult::Success(statement) = result else {
-            panic!("expected success")
-        };
-        assert!(matches!(
-            match_token::verify(&statement.token, state.signing_public_key()).unwrap(),
-            MatchClaims::GrayBadge { .. }
-        ));
+    async fn gray_badge_rejects_before_inference_until_its_token_is_agreed() {
+        let (result, length) = exchange(state(UnusedFaceEngine), &gray(0.5)).await;
+        assert_eq!(
+            result,
+            MatchResult::Failed(FailureReason::UnsupportedOperation)
+        );
+        let (_, success_length) = exchange(state(Engine { third: 0.9 }), &inputs()).await;
+        assert_eq!(length, success_length);
     }
     #[tokio::test]
     async fn bad_pcp_and_light_guard_reject_before_inference() {
@@ -309,7 +296,7 @@ mod tests {
     fn invalid_backend_scores_fail_as_infrastructure_errors() {
         for third in [f64::NAN, f64::INFINITY, 1.01, -0.01] {
             assert!(matches!(
-                evaluate(&state(Engine { third }), inputs()),
+                evaluate(&state(Engine { third }), &inputs()),
                 Err(FailureReason::Internal)
             ));
         }

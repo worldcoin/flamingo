@@ -15,7 +15,6 @@ mod messages;
 pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v2";
 
 pub use errors::{ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole};
-pub use flamingo_verifier_protocol::match_token::LightGuardMatchingFrame;
 pub use messages::*;
 pub use serde_bytes::ByteBuf;
 
