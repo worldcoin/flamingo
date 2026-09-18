@@ -8,7 +8,6 @@ on:
   pull_request:
     paths:
       - "verifier/**"
-      - "di/**"
       - "shared/**"
       - "scripts/**"
       - "Cargo.toml"
@@ -77,8 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           all='[
-            {"name":"flamingo-verifier-host","dockerfile":"verifier/host/Dockerfile","image":"flamingo-verifier","workload":"verifier"},
-            {"name":"di-host","dockerfile":"di/host/Dockerfile","image":"flamingo-verifier-di-host","workload":"di"}
+            {"name":"flamingo-verifier-host","dockerfile":"verifier/host/Dockerfile","image":"flamingo-verifier","workload":"verifier"}
           ]'
           if [[ -n "${WORKLOAD:-}" ]]; then
             include=$(jq -c --arg w "$WORKLOAD" 'map(select(.workload == $w))' <<<"$all")

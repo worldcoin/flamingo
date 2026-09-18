@@ -4,14 +4,13 @@ on:
   push:
     tags:
       - "flamingo-verifier-host/v*"
-      - "di-host/v*"
   workflow_dispatch:
     inputs:
       workload:
         description: "Host to release."
         required: true
         type: choice
-        options: [verifier, di]
+        options: [verifier]
       ref:
         description: "Branch, tag, or commit SHA to build."
         required: true

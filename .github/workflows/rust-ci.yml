@@ -101,10 +101,10 @@ jobs:
           GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          for output in di-enclave verifier-enclave di-oci verifier-oci di-eif verifier-eif; do
+          for output in verifier-enclave verifier-oci verifier-eif; do
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
-      # Build the small DI image so evaluation-only errors do not slip through.
-      - name: Build the di enclave image
-        run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.di-oci
+      # No image is built here. The DI enclave used to be the cheap build smoke test; with it
+      # gone the only remaining image is the verifier's ~90-minute build, so build errors that
+      # evaluation does not catch now surface first in release-enclaves.yml.

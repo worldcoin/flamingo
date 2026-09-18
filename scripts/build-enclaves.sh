@@ -19,7 +19,7 @@ set -euo pipefail
 #      yet — read access to the model repositories).
 
 # A new workload is an entry here plus a `<name>-eif` output in flake.nix.
-WORKLOADS=("verifier" "di")
+WORKLOADS=("verifier")
 
 usage() {
   printf '%s\n' \

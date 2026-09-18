@@ -1,6 +1,6 @@
 # Releasing an enclave
 
-Each workload releases on its own tag: `verifier/vX.Y.Z`, `di/vX.Y.Z`. The tag is handled by
+The enclave releases on a `verifier/vX.Y.Z` tag. The tag is handled by
 [`.github/workflows/release-enclaves.yml`](../.github/workflows/release-enclaves.yml).
 
 ## Cutting a release
@@ -27,7 +27,7 @@ Each workload releases on its own tag: `verifier/vX.Y.Z`, `di/vX.Y.Z`. The tag i
 To exercise the pipeline without a tag, dispatch it:
 
 ```
-gh workflow run release-enclaves.yml -f workload=di -f ref=main -f version=0.1.0 -f dry_run=true
+gh workflow run release-enclaves.yml -f workload=verifier -f ref=main -f version=0.1.0 -f dry_run=true
 ```
 
 A dry run builds, verifies and publishes nothing.
@@ -45,16 +45,13 @@ PCR2 the application ramdisk. The EIF metadata section — which carries a wall-
 ## Building and measuring locally
 
 Needs x86_64-linux with Nix and Git credentials that can read
-`worldcoin/biometric-engines`. Verifier also needs a `HUGGING_FACE_TOKEN` for its private
-models. Expect ~90 minutes cold for verifier.
+`worldcoin/biometric-engines`, plus a `HUGGING_FACE_TOKEN` for the private models. Expect
+~90 minutes cold.
 
 ```
 scripts/build-enclaves.sh --workload verifier target/eif
 jq . target/eif/flamingo-verifier-pcr.json
 ```
-
-`di` needs no model token, but the unified workspace vendor set currently still requires
-Git access to `worldcoin/biometric-engines`.
 
 ## Rotating a measurement in production
 
@@ -86,7 +83,5 @@ the measurements from source and compare against `manifest.json`.
 
 ## Notes
 
-- `di/host` and `di/enclave` are skeletons that exit with a failure code. A `di/v*` tag exercises
-  the release pipeline; it does not ship a working service.
 - The EIF is published publicly, and the verifier enclave links private face-engine code. Confirm
   with the `biometric-engines` owners before the first `verifier/v*` tag.

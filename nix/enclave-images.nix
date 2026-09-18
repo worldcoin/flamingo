@@ -81,10 +81,6 @@ let
       inherit eif;
     };
 
-  di = buildEnclaveImage {
-    workload = "di";
-    pname = "di-enclave";
-  };
   verifier = buildEnclaveImage {
     workload = "verifier";
     pname = "verifier-enclave";
@@ -92,8 +88,6 @@ let
   };
 in
 {
-  di-oci = di.oci;
-  di-eif = di.eif;
   verifier-oci = verifier.oci;
   verifier-eif = verifier.eif;
 }

@@ -1118,22 +1118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "di-enclave"
-version = "0.4.0"
-dependencies = [
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "di-host"
-version = "0.4.0"
-dependencies = [
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
