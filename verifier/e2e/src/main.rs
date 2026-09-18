@@ -135,7 +135,7 @@ async fn request_match_vsock(
     }
 }
 
-/// Loads the client configuration named by `VERIFIER_CONFIG`. Schema is in the README.
+/// Loads the client configuration named by `VERIFIER_CONFIG`; see `docs/api.md`.
 fn load_config() -> Result<Config> {
     let path = env::var("VERIFIER_CONFIG")
         .context("VERIFIER_CONFIG must name a JSON client configuration file")?;
