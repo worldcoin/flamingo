@@ -2,14 +2,14 @@ name: release enclaves
 
 on:
   push:
-    tags: ["verifier/v*", "di/v*"]
+    tags: ["verifier/v*"]
   workflow_dispatch:
     inputs:
       workload:
         description: "Enclave to release."
         required: true
         type: choice
-        options: [verifier, di]
+        options: [verifier]
       ref:
         description: "Branch, tag, or commit SHA to build."
         required: true

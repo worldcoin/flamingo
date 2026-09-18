@@ -5,7 +5,7 @@
 #
 # Shared by every workload; the EIF is baked in at build time, so each gets its own
 # image. Context is build-enclaves.sh's output dir, so EIF_FILE is a bare filename:
-#   docker build -f scripts/Dockerfile.carrier --build-arg EIF_FILE=di-enclave.eif target/eif
+#   docker build -f scripts/Dockerfile.carrier --build-arg EIF_FILE=verifier-enclave.eif target/eif
 
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023
 

@@ -6,35 +6,28 @@ Rust workspaces for the Flamingo Verifier host and secure enclave.
 
 ## Structure
 
-Two workloads over the same host/enclave shape — the `Verifier` verifier and the
-`DeepIdentifier` migration. Each owns a top-level directory; what both would duplicate
-lives in `shared/`. Crate names compose from the path: `verifier/host` is `flamingo-verifier-host`.
+One workload — the `Verifier` verifier — under `verifier/`. Crate names compose from the
+path: `verifier/host` is `flamingo-verifier-host`.
 
 ```text
-verifier/
+flamingo/
 ├── Cargo.toml             # Host-side workspace  -> Cargo.lock
-├── shared/
-│   └── attested-channel/  # Client↔enclave channel and the attestation it rests on; destined for pontifex
-├── verifier/
-│   ├── host/              # Axum HTTP API — the untrusted side of the boundary
-│   ├── enclave/           # Nitro enclave workload — the trusted side. Own workspace -> own Cargo.lock
-│   ├── api-types/         # Client↔host HTTP contract; stops at the host, so no enclave links it
-│   ├── enclave-types/     # Host↔enclave vsock contract: health, errors, key attestation, the match exchange
-│   ├── sealed-types/      # Sealed client↔enclave match payload; the host relays it, so the host does not link this
-│   ├── protocol/          # The signed match statement a held match produces. Will likely move to `world-id-protocol`.
-│   ├── client/            # Attestation-verifying client
-│   └── e2e/               # End-to-end harness driving host and enclave together
-└── di/                    # Skeleton — dirs and crates only, no behaviour yet
-    ├── host/
-    └── enclave/           # Own workspace -> own Cargo.lock
+└── verifier/
+    ├── host/              # Axum HTTP API — the untrusted side of the boundary
+    ├── enclave/           # Nitro enclave workload — the trusted side. Own workspace -> own Cargo.lock
+    ├── api-types/         # Client↔host HTTP contract; stops at the host, so no enclave links it
+    ├── enclave-types/     # Host↔enclave vsock contract: health, errors, key attestation, the match exchange
+    ├── sealed-types/      # Sealed client↔enclave match payload; the host relays it, so the host does not link this
+    ├── protocol/          # The signed match statement a held match produces. Will likely move to `world-id-protocol`.
+    ├── client/            # Attestation-verifying client
+    └── e2e/               # End-to-end harness driving host and enclave together
 ```
 
-One crate per boundary, in the graphs that boundary reaches. Nothing is shared between
-`verifier/` and `di/`, because a shared crate means a `flamingo-verifier` edit rotates `di`'s PCR0.
+One crate per boundary, in the graphs that boundary reaches.
 
-`di-host` and `di-enclave` log and exit non-zero — a skeleton that idled would read as healthy. See
-[Spec: DeepIdentifier Migration TEE Setup v1](https://app.notion.com/p/worldcoin/Spec-DeepIdentifier-Migration-TEE-Setup-v1-3c08614bdf8c8014b7ddf50f3cac4e4b)
-for what goes in them.
+The `DeepIdentifier` migration lives in
+[worldcoin/di-migration-tee](https://github.com/worldcoin/di-migration-tee). It shares no crate
+with this repository, because a shared crate means a `flamingo-verifier` edit rotates its PCR0.
 
 ### Three workspaces, three lockfiles
 
@@ -72,7 +65,7 @@ RUST_LOG=info cargo run --bin flamingo-verifier-enclave
 
 ## Building images
 
-Each workload has a host image, a reproducible OCI enclave image, and an AWS Nitro EIF.
+The verifier has a host image, a reproducible OCI enclave image, and an AWS Nitro EIF.
 Nix builds the OCI image and converts its root filesystem directly with aws-nitro-util.
 `build-docker.yml` only builds and publishes hosts.
 
@@ -80,20 +73,16 @@ Nix builds the OCI image and converts its root filesystem directly with aws-nitr
 # Reproducible OCI image -> deterministic EIF + PCRs.
 # Needs Linux x86_64; Nitro hardware is only needed to run.
 scripts/build-enclaves.sh --workload verifier   # -> target/eif/verifier-enclave.eif, verifier-pcr.json
-scripts/build-enclaves.sh --workload di         # -> target/eif/di-enclave.eif, di-pcr.json
 
 # Build or inspect only the reproducible OCI boundary.
-nix build .#di-oci
+nix build .#verifier-oci
 skopeo inspect \
-  "oci:$(readlink -f result):$(nix eval --raw .#packages.x86_64-linux.di-enclave.version)"
+  "oci:$(readlink -f result):$(nix eval --raw .#packages.x86_64-linux.verifier-enclave.version)"
 
 ```
 
-`GIT_HUB_TOKEN` and `HUGGING_FACE_TOKEN` are both `verifier`-only. The whole Cargo workspace
-is resolved from the root lockfile; `di` itself has no private dependencies or models.
-
-`di-enclave` exits non-zero on start, so its EIF builds and measures but will not stay
-running, until the boot sequence lands.
+The build needs `GIT_HUB_TOKEN` for the private `face-engine` dependency and
+`HUGGING_FACE_TOKEN` for the private models.
 
 ## Enclave assignment
 
@@ -198,7 +187,7 @@ Install Rust and the components these workspaces use:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 rustup component add rustfmt clippy
-for ws in . verifier/enclave di/enclave; do cargo test --manifest-path "$ws/Cargo.toml" --all; done
+cargo test --all
 ```
 
 For private repository access, install and authenticate the GitHub CLI using its

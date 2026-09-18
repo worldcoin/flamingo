@@ -117,9 +117,6 @@ let
     );
 in
 {
-  di-enclave = buildEnclaveBin {
-    pname = "di-enclave";
-  };
   verifier-enclave = buildEnclaveBin {
     pname = "verifier-enclave";
     extraArgs = faceEngineArgs;
