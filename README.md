@@ -1,33 +1,29 @@
 ```text
-                                                                     # #
-                                                                     # #
-                       __                                         #  : : #
-                     .^o ~\                                       #  : : #
-                    Y /'~) }      _____                        #. ':': : : #
-                    l/  / /    ,-~     ~~--.,_              #.  #  : :': : #
-                       ( (    /  ~-._         ^.             #  ':.: : :': :
-                        \ "--'--.    "-._       \            ':  ': :: : :':
-                         "-.________     ~--.,__ ^.           ':. ':::.:': :
-                                   \"~r-.,___.-'-. ^.          ':.. ::::.:.:
-                                    YI    \\      ~-.\       ..::..'::::::::
-                                    ||     \\        `\    .'  ':. '::::::::
-                                    ||     //                   '::.::::::::
-                                    ||    //                  .. :::::::::::
-                                    ()   //                 .'  ':::::::::::
-                                    ||  //                       .::::::::::
-                                    || ( c                      ' ::::::::::
-___ __  __   ___ _ __  ___._ __  ___I|__`--__._ __  ___ __  _   _'::::::::::
-   ~  ~~  ~~"   ~ ~  "~     ~  "~   ::  ~~"    ~  ~~   ~  ~~ "~~  ~~--~"---~
-                                    ::   ::
-                                    .:    .:
+                    __
+                  .^o ~\
+                 Y /'~) }      _____
+                 l/  / /    ,-~     ~~--.,_
+                    ( (    /  ~-._         ^.
+                     \ "--'--.    "-._       \
+                      "-.________     ~--.,__ ^.
+                                \"~r-.,___.-'-. ^.
+                                 ||    \\      ~-.\
+                                 ||     \\        `\
+                                 ||     //
+                                 ||    //
+                                 ()   //
+                                 ||  //
+                                 || ((
+                                 ||  `-'
+                              ___||___
 ```
 
 <h1 align="center">Flamingo</h1>
 
 <p align="center">
   <a href="https://github.com/worldcoin/flamingo/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/worldcoin/flamingo/rust-ci.yml?style=flat&labelColor=1C2C2E&label=ci&color=BEC5C9&logo=GitHub%20Actions&logoColor=BEC5C9" alt="CI"></a>
-  <a href="Cargo.toml"><img src="https://img.shields.io/badge/License-MIT-d1d1f6.svg?style=flat&labelColor=1C2C2E&color=BEC5C9&label=license&logoColor=BEC5C9" alt="License: MIT"></a>
-  <a href="https://world.org"><img src="https://img.shields.io/badge/World-854a15?style=flat&labelColor=1C2C2E&color=BEC5C9&logoColor=BEC5C9" alt="World"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-d1d1f6.svg?style=flat&labelColor=1C2C2E&color=BEC5C9&label=license&logoColor=BEC5C9" alt="License: MIT"></a>
+  <a href="https://deepwiki.com/worldcoin/flamingo"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 <p align="center">
@@ -36,6 +32,8 @@ ___ __  __   ___ _ __  ___._ __  ___I|__`--__._ __  ___ __  _   _'::::::::::
   <a href="docs/development.md">Development</a> ·
   <a href="docs/release.md">Releases</a>
 </p>
+
+⚠️ Active development. Not ready for production use. ⚠️
 
 Flamingo compares an Orb credential photo, a live selfie, and a challenge image
 inside an AWS Nitro Enclave. If all three face comparisons meet the requested
