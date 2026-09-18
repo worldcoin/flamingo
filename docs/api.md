@@ -1,0 +1,70 @@
+# API and client
+
+The HTTP host exposes four routes:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /health` | Host liveness. |
+| `GET /ready` | Returns `200` when the enclave answers a health request, otherwise `503`. |
+| `POST /v1/enclave-assignment` | Returns the enclave's encryption key and attestation. |
+| `POST /v1/matches` | Accepts encrypted inputs and returns an encrypted result. |
+
+## Client configuration
+
+Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encrypt requests, and check signed results. Save this configuration as `client.json`, replacing the PCR0 placeholder with the value from `target/eif/verifier-pcr.json` or a trusted release:
+
+```json
+{
+  "host_url": "http://localhost:8000",
+  "allowed_pcr_configs": [
+    [{ "index": 0, "value": "<96-character PCR0 hex>" }]
+  ],
+  "max_attestation_age_millis": 3600000,
+  "connect_timeout_millis": 5000,
+  "request_timeout_millis": 60000
+}
+```
+
+Only `host_url` and `allowed_pcr_configs` are required. The other fields default to the values shown. Each PCR configuration must include a nonzero, 48-byte PCR0; every measurement must be 48 bytes and each index must be unique. An attestation must match one complete configuration. Debug enclaves report zero measurements and are rejected.
+
+## Enclave assignment
+
+`POST /v1/enclave-assignment` takes no body and returns JSON:
+
+```json
+{
+  "attestation": "<base64 COSE_Sign1>",
+  "public_key": "<base64 encryption key>"
+}
+```
+
+The client verifies the document's signature, certificate chain, measurements, and age. It then checks the encryption key against the attested commitment. Identity and certificate expiry come from the verified document.
+
+Keep assignment and match requests on the same client instance. The Rust client retains load-balancer cookies so both requests can reach the same enclave.
+
+## Matches
+
+`POST /v1/matches` accepts and returns raw encrypted bytes with `Content-Type: application/octet-stream`. The plaintext is CBOR containing one operation:
+
+| Operation | Inputs | Current support |
+| --- | --- | --- |
+| `deep_face` | Orb photo, live capture, challenge image, raw `hashes.json`, and threshold. | Single-image (`vanilla`) capture. |
+| `gray_badge` | Live capture, challenge image, and threshold. | Returns encrypted `unsupported_operation` for vanilla capture. |
+
+Both operations define a `light_guard` capture with illuminated and unilluminated frames. The enclave currently rejects that capture with encrypted `unsupported_capture`.
+
+A `200` response contains a padded, encrypted success or rejection. A success includes the [signed match statement](architecture.md#match-statements) and signing-key attestation. The client verifies both and checks that the claims match the inputs. A rejection contains a failure reason and no signed statement.
+
+Image limits are 4 MiB per image and 7 MiB across all frames. `hashes.json` is limited to 64 KiB. The [API constants](../verifier/api-types/src/matches.rs) define the complete request and response limits, including encoding overhead.
+
+## Errors and retries
+
+Host and transport failures use the JSON error envelope defined in [`api-types`](../verifier/api-types/src/error.rs).
+
+| Status | Meaning | Caller action |
+| --- | --- | --- |
+| `409 reassign_required` | The enclave could not decrypt the request. | Get a fresh assignment, encrypt again, and retry at most once. |
+| `413 request_too_large` | The encrypted request exceeds the body limit. | Reduce the payload. |
+| `415 unsupported_media_type` | The content type is not `application/octet-stream`. | Send binary ciphertext. |
+
+The Rust client returns `ReassignRequired` to the caller; it does not retry automatically. The host allows 2 seconds for assignment and health calls, and 30 seconds for a match.
