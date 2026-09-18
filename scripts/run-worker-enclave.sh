@@ -3,7 +3,7 @@
 set -euo pipefail
 : "${EIF_PATH:=/home/enclave.eif}"
 : "${WORKER_BUNDLE:=/home/worker.bundle}"
-: "${WORKER_TOOL:=/home/worker-bundle}"
+: "${WORKER_TOOL:=/home/sandbox-bundle}"
 : "${WORKER_READY_FILE:=/run/flamingo/ready}"
 : "${ENCLAVE_CPU_COUNT:=2}"
 : "${ENCLAVE_MEMORY_SIZE:=4096}"

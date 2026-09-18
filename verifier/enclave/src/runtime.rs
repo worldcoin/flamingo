@@ -10,8 +10,8 @@ use flamingo_verifier_enclave::{
     rng, server,
     state::EnclaveState,
 };
-use flamingo_verifier_worker_process::{SandboxConfig, Worker};
-use flamingo_verifier_worker_process::{WorkerClientConfig, WorkerClientError};
+use flamingo_verifier_sandbox_client::{SandboxConfig, Worker};
+use flamingo_verifier_sandbox_client::{WorkerClientConfig, WorkerClientError};
 use pontifex::SecureModule;
 use tracing::error;
 use tracing_subscriber::EnvFilter;

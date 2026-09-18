@@ -8,8 +8,8 @@ members = [
     "verifier/enclave",
     "verifier/host",
     "verifier/protocol",
-    "verifier/worker-process",
-    "verifier/worker-artifact",
+    "verifier/sandbox-client",
+    "verifier/sandbox-bundle",
 ]
 resolver = "3"
 
@@ -39,8 +39,8 @@ flamingo-verifier-enclave-types = { path = "verifier/enclave-types" }
 flamingo-verifier-protocol = { version = "0.4.0", path = "verifier/protocol" }
 flamingo-verifier-sealed-types = { version = "0.4.0", path = "verifier/sealed-types" }
 eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
-flamingo-verifier-worker-process = { path = "verifier/worker-process" }
-flamingo-verifier-worker-artifact = { path = "verifier/worker-artifact" }
+flamingo-verifier-sandbox-client = { path = "verifier/sandbox-client" }
+flamingo-verifier-sandbox-bundle = { path = "verifier/sandbox-bundle" }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"

@@ -1,4 +1,6 @@
-//! Bounded external-worker IPC and Linux Minijail lifecycle.
+//! Verifier-enclave client for a sandboxed external worker.
+//!
+//! Owns worker launch under Linux Minijail, readiness, bounded IPC and teardown.
 mod client;
 mod transport;
 pub use client::{WorkerClient, WorkerClientConfig, WorkerClientError};

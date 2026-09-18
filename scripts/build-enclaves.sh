@@ -80,7 +80,7 @@ command -v nix >/dev/null || {
 
 if [[ "$workload" == "verifier" ]]; then
   # Use the exact broker parser and integer bounds, not a shell approximation.
-  nix run --no-update-lock-file .#worker-bundle -- validate-config config/worker-bootstrap.json
+  nix run --no-update-lock-file .#sandbox-bundle -- validate-config config/worker-bootstrap.json
 fi
 
 mkdir -p "$out_dir"
@@ -125,11 +125,11 @@ echo "Measurements: $out_dir/$workload-pcr.json"
 jq . "$out_dir/$workload-pcr.json"
 
 if [[ "$workload" == "verifier" ]]; then
-  tool_store=$(nix build .#worker-bundle --no-update-lock-file --no-link --print-out-paths)
+  tool_store=$(nix build .#sandbox-bundle --no-update-lock-file --no-link --print-out-paths)
   mkdir -p "$out_dir/nix/store"
   while IFS= read -r closure_path; do
     cp -a "$closure_path" "$out_dir/nix/store/"
   done < <(nix-store --query --requisites "$tool_store")
-  cp "$tool_store/bin/worker-bundle" "$out_dir/worker-bundle"
+  cp "$tool_store/bin/sandbox-bundle" "$out_dir/sandbox-bundle"
   install -m755 scripts/run-worker-enclave.sh "$out_dir/run-worker-enclave.sh"
 fi

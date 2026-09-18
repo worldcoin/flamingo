@@ -9,14 +9,14 @@ use biometric_engines_protocol::{
     face::{DeepFaceRequest, DeepFaceResult, ImageBytes, LiveCapture},
 };
 #[cfg(target_os = "linux")]
-use flamingo_verifier_worker_process::{SandboxConfig, WORKER_UID, Worker, WorkerError};
+use flamingo_verifier_sandbox_client::{SandboxConfig, WORKER_UID, Worker, WorkerError};
 #[cfg(target_os = "linux")]
-use flamingo_verifier_worker_process::{WorkerClientConfig, WorkerClientError};
+use flamingo_verifier_sandbox_client::{WorkerClientConfig, WorkerClientError};
 
 #[cfg(target_os = "linux")]
 fn peer() -> String {
     std::env::var("WORKER_TEST_PEER")
-        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_worker-process-test-peer").to_owned())
+        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_sandbox-client-test-peer").to_owned())
 }
 #[cfg(target_os = "linux")]
 fn policy() -> String {
@@ -197,7 +197,7 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         );
     }
     let verified_runtime = if case == "provisioned-runtime" {
-        use flamingo_verifier_worker_artifact::{Manifest, WORKER_PATH};
+        use flamingo_verifier_sandbox_bundle::{Manifest, WORKER_PATH};
         use sha2::{Digest, Sha384};
 
         let bytes = std::fs::read(root.join(WORKER_PATH))?;
@@ -208,12 +208,8 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
             size: bytes.len() as u64,
         })?;
         let mut bundle = Vec::new();
-        flamingo_verifier_worker_artifact::package(
-            &mut bundle,
-            &manifest,
-            &root.join(WORKER_PATH),
-        )?;
-        Some(flamingo_verifier_worker_artifact::receive(
+        flamingo_verifier_sandbox_bundle::package(&mut bundle, &manifest, &root.join(WORKER_PATH))?;
+        Some(flamingo_verifier_sandbox_bundle::receive(
             &mut std::io::Cursor::new(bundle),
             1 << 30,
             root.parent().unwrap(),
@@ -408,7 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(!String::from_utf8_lossy(&dynamic.stdout).contains("(NEEDED)"));
     let temp = Command::new("mktemp")
-        .args(["-d", "/tmp/worker-process-test.XXXXXXXX"])
+        .args(["-d", "/tmp/sandbox-client-test.XXXXXXXX"])
         .output()?;
     assert!(temp.status.success());
     let temp = std::path::PathBuf::from(String::from_utf8(temp.stdout)?.trim());
@@ -487,5 +483,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(target_os = "linux"))]
 /// The broker RPC tests remain portable; Minijail execution requires Linux.
 fn main() {
-    eprintln!("worker-process integration tests require Linux");
+    eprintln!("sandbox-client integration tests require Linux");
 }

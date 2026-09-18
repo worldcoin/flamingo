@@ -7,8 +7,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Operation, ResponseBody,
         face::{DeepFaceRequest, ImageBytes, LiveCapture},
     };
-    use flamingo_verifier_worker_process::{SandboxConfig, Worker, WorkerError};
-    use flamingo_verifier_worker_process::{WorkerClientConfig, WorkerClientError};
+    use flamingo_verifier_sandbox_client::{SandboxConfig, Worker, WorkerError};
+    use flamingo_verifier_sandbox_client::{WorkerClientConfig, WorkerClientError};
     use std::{fs::File, io::Read, path::Path, time::Duration};
 
     let args: Vec<_> = std::env::args().collect();
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "linux")]
 /// A terminal RPC error always ends this broker lifetime; no retry or worker restart.
-fn fatal(error: flamingo_verifier_worker_process::WorkerClientError) -> ! {
+fn fatal(error: flamingo_verifier_sandbox_client::WorkerClientError) -> ! {
     eprintln!("worker qualification failed: {error}");
     std::process::exit(1)
 }

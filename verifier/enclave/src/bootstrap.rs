@@ -1,7 +1,7 @@
 //! Single-threaded runtime provisioning before broker keys or serving threads.
 
 use anyhow::{Context, bail};
-pub use flamingo_verifier_worker_artifact::BootstrapConfig as Config;
+pub use flamingo_verifier_sandbox_bundle::BootstrapConfig as Config;
 
 /// Nitro uses CID 3 for the parent EC2 instance.
 const NITRO_PARENT_CID: u32 = 3;
@@ -9,7 +9,7 @@ const NITRO_PARENT_CID: u32 = 3;
 /// Owns the verified runtime and the unacknowledged startup transfer.
 pub struct BootWorker {
     /// Runtime bytes have been checked against their deployment-supplied digest.
-    pub runtime: flamingo_verifier_worker_artifact::VerifiedRuntime,
+    pub runtime: flamingo_verifier_sandbox_bundle::VerifiedRuntime,
     /// Public, measured address-space budget.
     pub address_space_bytes: u64,
     /// Public, measured thread budget.
@@ -88,7 +88,7 @@ pub fn receive() -> anyhow::Result<BootWorker> {
     let timeout = Some(Duration::from_secs(config.provisioning_io_timeout_seconds));
     provisioner.set_read_timeout(timeout)?;
     provisioner.set_write_timeout(timeout)?;
-    let runtime = flamingo_verifier_worker_artifact::receive(
+    let runtime = flamingo_verifier_sandbox_bundle::receive(
         &mut provisioner,
         config.max_bundle_bytes,
         runtime_parent,
