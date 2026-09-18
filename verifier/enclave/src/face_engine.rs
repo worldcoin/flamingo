@@ -65,7 +65,7 @@ mod sandboxed {
         Operation, ResponseBody,
         face::{DeepFaceRequest, GrayBadgeRequest, ImageBytes, LiveCapture},
     };
-    use flamingo_verifier_worker_process::{Worker, WorkerClientError, WorkerError};
+    use flamingo_verifier_sandbox_client::{Worker, WorkerClientError, WorkerError};
     /// Owns the eagerly initialized worker under the broker's exclusive mutex.
     pub struct FaceEngine {
         worker: Worker,

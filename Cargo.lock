@@ -1046,9 +1046,9 @@ dependencies = [
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",
  "flamingo-verifier-protocol",
+ "flamingo-verifier-sandbox-bundle",
+ "flamingo-verifier-sandbox-client",
  "flamingo-verifier-sealed-types",
- "flamingo-verifier-worker-artifact",
- "flamingo-verifier-worker-process",
  "hex",
  "libc",
  "pontifex",
@@ -1109,20 +1109,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flamingo-verifier-sealed-types"
-version = "0.4.0"
-dependencies = [
- "ciborium",
- "flamingo-verifier-api-types",
- "flamingo-verifier-protocol",
- "serde",
- "serde_bytes",
- "sha2 0.10.9",
- "zeroize",
-]
-
-[[package]]
-name = "flamingo-verifier-worker-artifact"
+name = "flamingo-verifier-sandbox-bundle"
 version = "0.4.0"
 dependencies = [
  "flamingo-verifier-enclave-types",
@@ -1138,11 +1125,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "flamingo-verifier-worker-process"
+name = "flamingo-verifier-sandbox-client"
 version = "0.1.0"
 dependencies = [
  "biometric-engines-protocol",
- "flamingo-verifier-worker-artifact",
+ "flamingo-verifier-sandbox-bundle",
  "hex",
  "libc",
  "minijail",
@@ -1150,6 +1137,19 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "flamingo-verifier-sealed-types"
+version = "0.4.0"
+dependencies = [
+ "ciborium",
+ "flamingo-verifier-api-types",
+ "flamingo-verifier-protocol",
+ "serde",
+ "serde_bytes",
+ "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,4 +1,6 @@
-//! Hash-checked single-executable bundles. No executable fallback.
+//! Packaging and provisioning for the sandboxed worker's single-executable bundle.
+//!
+//! Validates metadata, size and digest before staging the executable for launch.
 
 use std::{
     fs::{self, File, OpenOptions},

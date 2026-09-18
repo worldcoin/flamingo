@@ -9,8 +9,8 @@ allowed in Flamingo's dependency graph.
 ## Package and build
 
 ```sh
-worker-bundle manifest RELEASE_ID /path/to/biometric-engines-worker > worker-manifest.json
-worker-bundle pack worker-manifest.json /path/to/biometric-engines-worker worker.bundle
+sandbox-bundle manifest RELEASE_ID /path/to/biometric-engines-worker > worker-manifest.json
+sandbox-bundle pack worker-manifest.json /path/to/biometric-engines-worker worker.bundle
 scripts/build-enclaves.sh --workload verifier target/eif
 ```
 
@@ -47,8 +47,8 @@ PCR changes require clients to use the matching release record and reacquire ass
 ## Verification
 
 ```sh
-cargo test -p flamingo-verifier-worker-artifact
-cargo test -p flamingo-verifier-worker-process --test client
+cargo test -p flamingo-verifier-sandbox-bundle
+cargo test -p flamingo-verifier-sandbox-client --test client
 # Linux, root, using the static test binaries (see Rust CI):
 sudo timeout --kill-after=5s 60s /path/to/process-test-binary
 # Approved synthetic fixture, root-owned staged executable:

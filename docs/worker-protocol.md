@@ -1,16 +1,21 @@
 # External worker boundary
 
+The verifier enclave owns attestation, PCP, encryption, result policy and signing.
+Its `sandbox-client` component owns launching and communicating with the sandboxed
+worker, including readiness and teardown. `sandbox-bundle` packages, transfers and
+validates the worker executable. The external worker owns models and inference;
+its IPC messages and codec come from Tobi's `biometric-engines-protocol` crate.
+
 Flamingo pins `biometric-engines-protocol` to biometric-engines commit
 `60de92b37c2e6dbcb4ad8f543d72fd6024506c96` (wire version 1). It launches the
 separately built static x86_64 Linux worker with `--bundled`, connected Unix
 stream FD 3 and no inherited environment. Executable FD 4 is closed on exec.
 Minijail applies its namespaces, read-only root, UID, resource and syscall policy
-before the executable starts. The worker owns models and inference; the broker
-owns attestation, PCP, encryption, result policy and signing.
+before the executable starts.
 
 Readiness and requests use upstream's protobuf codec and four-byte big-endian
 length frames. Readiness must arrive after model initialization within 120s.
-The broker caps readiness at 64 bytes and replies at 16 KiB before allocation.
+The verifier enclave caps readiness at 64 bytes and replies at 16 KiB before allocation.
 Each exchange has one 10s deadline, including partial reads/writes. IDs, operation
 types and every cosine score (finite and within [-1, 1]) are validated.
 DeepFace and GrayBadge are supported internally; embedding generation is a follow-up.
@@ -35,12 +40,12 @@ Older signed/multi-file formats are rejected. No publisher keys or signatures ex
 
 The parent deployment is trusted to select the executable. The digest checks
 transfer integrity; it does not authenticate a publisher. Minijail confines the
-worker but does not guarantee truthful inference. PCRs measure the broker image,
+worker but does not guarantee truthful inference. PCRs measure the verifier enclave image,
 not the sideloaded executable. Release records must pin the worker digest separately.
-The broker records that digest operationally without logging biometric inputs/results.
+The verifier enclave records that digest operationally without logging biometric inputs/results.
 
-Provisioning ACK means initialized worker and attested broker keys. The carrier
-separately probes the serving broker before publishing readiness. Fixed provisioning
+Provisioning ACK means initialized worker and attested verifier enclave keys. The carrier
+separately probes the serving verifier enclave before publishing readiness. Fixed provisioning
 socket timeouts bound individual I/O; a carrier watchdog bounds the whole bootstrap.
 
 ## Admission and cancellation

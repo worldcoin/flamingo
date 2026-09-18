@@ -51,5 +51,5 @@ let
   });
 in {
   verifier-enclave = buildEnclaveBin "verifier-enclave";
-  worker-bundle = buildEnclaveBin "worker-bundle";
+  sandbox-bundle = buildEnclaveBin "sandbox-bundle";
 }

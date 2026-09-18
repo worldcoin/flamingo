@@ -306,5 +306,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(target_os = "linux"))]
 /// This fixture cannot exercise Minijail on other operating systems.
 fn main() {
-    panic!("worker-process fixture requires Linux");
+    panic!("sandbox-client fixture requires Linux");
 }

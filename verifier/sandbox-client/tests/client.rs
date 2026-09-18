@@ -6,7 +6,7 @@ use biometric_engines_protocol::{
     },
     framing, protobuf,
 };
-use flamingo_verifier_worker_process::{WorkerClient, WorkerClientConfig, WorkerClientError};
+use flamingo_verifier_sandbox_client::{WorkerClient, WorkerClientConfig, WorkerClientError};
 use std::{io::Write, os::unix::net::UnixStream, thread, time::Duration};
 
 fn config() -> WorkerClientConfig {

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use flamingo_verifier_worker_artifact::{
+use flamingo_verifier_sandbox_bundle::{
     Error, MAX_BUNDLE_BYTES, Manifest, WORKER_PATH, package, receive,
 };
 use sha2::{Digest, Sha384};
@@ -218,7 +218,7 @@ fn packaging_matches_the_receiver_and_rejects_changed_files() {
     let source = tempfile::tempdir().unwrap();
     let executable = source.path().join("worker");
     fs::write(&executable, &fixture.binary).unwrap();
-    let generated = std::process::Command::new(env!("CARGO_BIN_EXE_worker-bundle"))
+    let generated = std::process::Command::new(env!("CARGO_BIN_EXE_sandbox-bundle"))
         .args(["manifest", &fixture.manifest.release_id])
         .arg(&executable)
         .output()
@@ -237,7 +237,7 @@ fn packaging_matches_the_receiver_and_rejects_changed_files() {
     let manifest_path = source.path().join("manifest.json");
     let bundle_path = source.path().join("worker.bundle");
     fs::write(&manifest_path, &manifest).unwrap();
-    let packed = std::process::Command::new(env!("CARGO_BIN_EXE_worker-bundle"))
+    let packed = std::process::Command::new(env!("CARGO_BIN_EXE_sandbox-bundle"))
         .arg("pack")
         .args([&manifest_path, &executable, &bundle_path])
         .output()

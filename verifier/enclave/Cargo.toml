@@ -19,7 +19,7 @@ flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 eddsa-babyjubjub.workspace = true
 biometric-engines-protocol.workspace = true
-flamingo-verifier-worker-artifact.workspace = true
+flamingo-verifier-sandbox-bundle.workspace = true
 hex.workspace = true
 pontifex = { workspace = true, features = ["nsm", "server", "channel"] }
 rand.workspace = true
@@ -33,7 +33,7 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 vsock.workspace = true
 libc.workspace = true
-flamingo-verifier-worker-process.workspace = true
+flamingo-verifier-sandbox-client.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

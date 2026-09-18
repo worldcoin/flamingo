@@ -1,5 +1,5 @@
 [package]
-name = "flamingo-verifier-worker-process"
+name = "flamingo-verifier-sandbox-client"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -19,13 +19,13 @@ libc.workspace = true
 minijail.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-flamingo-verifier-worker-artifact.workspace = true
+flamingo-verifier-sandbox-bundle.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
 [[bin]]
-name = "worker-process-test-peer"
+name = "sandbox-client-test-peer"
 path = "tests/support/fake-worker.rs"
 required-features = ["test-worker"]
 test = false

@@ -26,7 +26,7 @@ impl BootstrapConfig {
     /// Rejects missing release decisions rather than trusting host-provided defaults.
     ///
     /// # Errors
-    /// Returns an error for missing budgets, invalid limits,.
+    /// Returns an error for missing budgets or invalid limits.
     pub fn validate(&self) -> Result<(), Error> {
         if !(1..=MAX_BUNDLE_BYTES).contains(&self.max_bundle_bytes)
             || !(1..=i64::MAX as u64).contains(&self.address_space_bytes)
@@ -60,16 +60,16 @@ impl BootstrapConfig {
 mod tests {
     use super::BootstrapConfig as Config;
 
-    /// Public CI images build without trusted keys, but cannot provision a worker.
+    /// A release without configured resource budgets cannot provision a worker.
     #[test]
     fn unconfigured_release_cannot_boot() {
         let config: Config = serde_json::from_str(r#"{"max_bundle_bytes":0,"address_space_bytes":0,"max_threads":0,"provisioning_io_timeout_seconds":0}"#).unwrap();
         assert!(config.validate().is_err());
     }
 
-    /// Trust and every deployment budget must be valid together; no setting is defaulted.
+    /// Every deployment budget must be valid; no setting is defaulted.
     #[test]
-    fn validates_configured_trust_and_each_budget() {
+    fn validates_each_configured_budget() {
         let valid = serde_json::json!({
             "max_bundle_bytes": 1024,
             "address_space_bytes": 1024,

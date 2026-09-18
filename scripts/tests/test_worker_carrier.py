@@ -41,12 +41,12 @@ class CarrierTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        for tool in ('nitro-cli', 'worker-bundle'):
+        for tool in ('nitro-cli', 'sandbox-bundle'):
             path = self.root/tool
             path.write_text(MOCK)
             path.chmod(0o755)
         env = dict(os.environ, PATH=str(self.root)+os.pathsep+os.environ['PATH'],
-                   CARRIER_TEST_ROOT=str(self.root), WORKER_TOOL=str(self.root/'worker-bundle'),
+                   CARRIER_TEST_ROOT=str(self.root), WORKER_TOOL=str(self.root/'sandbox-bundle'),
                    WORKER_READY_FILE=str(self.root/'ready'), BOOTSTRAP_TIMEOUT_SECONDS='1',
                    DRAIN_SECONDS='0', POLL_SECONDS='1', RETRY_SECONDS='1')
         self.env = env

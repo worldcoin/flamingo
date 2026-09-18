@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-use flamingo_verifier_worker_artifact::{
+use flamingo_verifier_sandbox_bundle::{
     BootstrapConfig, MAX_BUNDLE_BYTES, MAX_MANIFEST_BYTES, Manifest,
 };
 use sha2::{Digest, Sha384};
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|path| !path.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
             let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-            flamingo_verifier_worker_artifact::package(
+            flamingo_verifier_sandbox_bundle::package(
                 &mut temporary,
                 &manifest,
                 Path::new(&args[3]),
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("send") if args.len() == 5 => send(&args[2], &args[3], &args[4])?,
         _ => {
             return Err(concat!(
-                "usage: worker-bundle manifest RELEASE_ID EXECUTABLE | ",
+                "usage: sandbox-bundle manifest RELEASE_ID EXECUTABLE | ",
                 "pack MANIFEST EXECUTABLE OUTPUT | ",
                 "send CID BUNDLE IO_TIMEOUT_SECONDS | health CID | validate-config CONFIG_PATH"
             )
