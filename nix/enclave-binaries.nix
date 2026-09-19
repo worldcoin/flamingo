@@ -14,6 +14,17 @@ let
 
   publicVendorDir = craneLib.vendorCargoDeps { cargoLock = root + "/Cargo.lock"; };
 
+  # An external executable or model dropped into the checkout must never become
+  # a compiler input (including through include_bytes!) or an image input.
+  publicSource = lib.cleanSourceWith {
+    src = root;
+    filter = path: type:
+      type == "directory"
+      || lib.hasSuffix ".rs" path
+      || builtins.elem (builtins.baseNameOf path) [ "Cargo.toml" "Cargo.lock" "rust-toolchain.toml" ]
+      || path == toString (root + "/verifier/sandbox-client/worker.policy");
+  };
+
   commonArgs = {
     strictDeps = true;
 
@@ -24,12 +35,18 @@ let
       clang
       pkg-config
       protobuf
+      python3
     ];
     buildInputs = with pkgs; [
       minijail
       libcap
     ];
     LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+    # This guard applies to direct Nix builds as well as the release workflow.
+    preBuild = ''
+      python3 ${root + "/scripts/check-public-release.py"} --lockfile Cargo.lock
+    '';
 
     # LLVM's LICM scalar promotion orders work by pointer value, so rustc (1.97 and 1.98
     # both) emits different code for the same input under different address-space layouts —
@@ -45,7 +62,7 @@ let
 
   buildEnclaveBin = pname: craneLib.buildPackage (commonArgs // {
     inherit pname version;
-    src = root;
+    src = publicSource;
     cargoVendorDir = publicVendorDir;
     cargoExtraArgs = "--locked --bin ${pname}";
   });

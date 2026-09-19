@@ -1,14 +1,14 @@
-# Build artifacts and VCS metadata — never needed in the image build context.
-target/
+# Public host builds accept source files only, never provisioned worker binaries,
+# bundles or model data from the checkout. Keep this aligned with publicSource in Nix.
+**
+!**/
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!verifier/**/Cargo.toml
+!verifier/**/*.rs
+!verifier/sandbox-client/worker.policy
+!di/**/Cargo.toml
+!di/**/*.rs
 **/target/
-build/
-.git/
-.github/
-
-# Private model artifacts are fetched into the Nix store by scripts/build-enclaves.sh.
-models/
-
-# Local editor / OS cruft.
-.vscode/
-.idea/
-.DS_Store
+**/.git/

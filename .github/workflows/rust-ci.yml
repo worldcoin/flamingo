@@ -44,6 +44,10 @@ jobs:
         with:
           app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
           private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
+      - name: Public release boundary tests
+        run: |
+          python3 scripts/tests/test_public_release.py
+          python3 scripts/check-public-release.py
       - name: Inference dependency boundary
         run: |
           cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/public-metadata.json"
