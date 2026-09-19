@@ -8,7 +8,5 @@
 !verifier/**/Cargo.toml
 !verifier/**/*.rs
 !verifier/sandbox-client/worker.policy
-!di/**/Cargo.toml
-!di/**/*.rs
 **/target/
 **/.git/

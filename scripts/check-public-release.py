@@ -22,7 +22,7 @@ def check_dependencies(lockfile):
 
 
 def release_assets(workload):
-    if workload not in {"verifier", "di"}:
+    if workload != "verifier":
         raise ValueError(f"unknown workload: {workload}")
     return {
         f"{workload}-enclave.eif",
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lockfile", type=Path, default=Path("Cargo.lock"))
     parser.add_argument("--assets", type=Path)
-    parser.add_argument("--workload", choices=("verifier", "di"))
+    parser.add_argument("--workload", choices=("verifier",))
     args = parser.parse_args()
     if args.assets and not args.workload:
         parser.error("--assets requires --workload")
