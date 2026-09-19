@@ -19,22 +19,22 @@ const MAX_READY_BYTES: usize = 64;
 
 /// Broker-owned limits, independent of the worker's more permissive frame reader.
 #[derive(Debug, Clone)]
-pub struct WorkerClientConfig {
+pub struct SandboxClientConfig {
     pub startup_timeout: Duration,
     pub request_timeout: Duration,
     pub max_request_bytes: usize,
     pub max_image_bytes: usize,
 }
 
-impl WorkerClientConfig {
-    pub fn validate(&self) -> Result<(), WorkerClientError> {
+impl SandboxClientConfig {
+    pub fn validate(&self) -> Result<(), SandboxClientError> {
         if !transport::valid_limits(self.max_request_bytes, self.max_image_bytes)
             || self.max_request_bytes > biometric_engines_protocol::framing::MAX_FRAME_BYTES
             || self.max_image_bytes > face::MAX_IMAGE_BYTES
             || !transport::valid_timeout(self.startup_timeout)
             || !transport::valid_timeout(self.request_timeout)
         {
-            return Err(WorkerClientError::InvalidConfig);
+            return Err(SandboxClientError::InvalidConfig);
         }
         Ok(())
     }
@@ -42,34 +42,34 @@ impl WorkerClientConfig {
 
 /// One exclusive synchronous connection. A fatal failure permanently closes it.
 #[derive(Debug)]
-pub struct WorkerClient {
+pub struct SandboxClient {
     stream: Option<UnixStream>,
-    config: WorkerClientConfig,
-    failure: Option<WorkerClientError>,
+    config: SandboxClientConfig,
+    failure: Option<SandboxClientError>,
     next_id: u64,
 }
 
-impl WorkerClient {
+impl SandboxClient {
     /// Wait for the upstream versioned readiness frame after spawning the child.
     pub fn new(
         mut stream: UnixStream,
-        config: WorkerClientConfig,
-    ) -> Result<Self, WorkerClientError> {
+        config: SandboxClientConfig,
+    ) -> Result<Self, SandboxClientError> {
         config.validate()?;
         stream
             .set_nonblocking(false)
-            .map_err(WorkerClientError::transport)?;
+            .map_err(SandboxClientError::transport)?;
         let ready = transport::read_frame(
             &mut stream,
             MAX_READY_BYTES,
             Instant::now() + config.startup_timeout,
         )
-        .map_err(|error| match WorkerClientError::transport(error) {
-            WorkerClientError::RequestTimeout => WorkerClientError::StartupTimeout,
+        .map_err(|error| match SandboxClientError::transport(error) {
+            SandboxClientError::RequestTimeout => SandboxClientError::StartupTimeout,
             error => error,
         })?;
         if !protobuf::decode_ready(&ready) {
-            return Err(WorkerClientError::InvalidReady);
+            return Err(SandboxClientError::InvalidReady);
         }
         Ok(Self {
             stream: Some(stream),
@@ -80,12 +80,12 @@ impl WorkerClient {
     }
 
     #[must_use]
-    pub fn failure(&self) -> Option<&WorkerClientError> {
+    pub fn failure(&self) -> Option<&SandboxClientError> {
         self.failure.as_ref()
     }
 
     /// Own this call through completion, including when an async caller is cancelled.
-    pub fn evaluate(&mut self, operation: Operation) -> Result<ResponseBody, WorkerClientError> {
+    pub fn evaluate(&mut self, operation: Operation) -> Result<ResponseBody, SandboxClientError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
@@ -94,24 +94,26 @@ impl WorkerClient {
         let kind = match operation {
             Operation::DeepFace(_) => 0,
             Operation::GrayBadge(_) => 1,
-            Operation::GenerateEmbedding(_) => return Err(WorkerClientError::UnsupportedOperation),
+            Operation::GenerateEmbedding(_) => {
+                return Err(SandboxClientError::UnsupportedOperation);
+            }
         };
         let id = self.next_id;
         self.next_id = self
             .next_id
             .checked_add(1)
-            .ok_or(WorkerClientError::RequestIdExhausted)?;
+            .ok_or(SandboxClientError::RequestIdExhausted)?;
         let payload = protobuf::encode_request(Request {
             request_id: id,
             operation,
         })
-        .map_err(WorkerClientError::RequestEncoding)?;
+        .map_err(SandboxClientError::RequestEncoding)?;
         if payload.len() > self.config.max_request_bytes {
-            return Err(WorkerClientError::InvalidImages);
+            return Err(SandboxClientError::InvalidImages);
         }
         let result = self.exchange(&payload, id, kind, deadline);
         if let Err(error) = &result
-            && !matches!(error, WorkerClientError::AnalysisFailed(_))
+            && !matches!(error, SandboxClientError::AnalysisFailed(_))
         {
             self.failure = Some(error.clone());
             self.stream.take();
@@ -119,7 +121,7 @@ impl WorkerClient {
         result
     }
 
-    fn validate_images(&self, operation: &Operation) -> Result<(), WorkerClientError> {
+    fn validate_images(&self, operation: &Operation) -> Result<(), SandboxClientError> {
         let mut images = Vec::with_capacity(4);
         let live = match operation {
             Operation::DeepFace(r) => {
@@ -158,7 +160,7 @@ impl WorkerClient {
             .any(|i| i.0.is_empty() || i.0.len() > self.config.max_image_bytes)
             || images.iter().map(|i| i.0.len()).sum::<usize>() > self.config.max_request_bytes
         {
-            return Err(WorkerClientError::InvalidImages);
+            return Err(SandboxClientError::InvalidImages);
         }
         Ok(())
     }
@@ -169,25 +171,25 @@ impl WorkerClient {
         id: u64,
         kind: u8,
         deadline: Instant,
-    ) -> Result<ResponseBody, WorkerClientError> {
+    ) -> Result<ResponseBody, SandboxClientError> {
         let stream = self
             .stream
             .as_mut()
             .expect("failed clients return before exchange");
-        transport::write_frame(stream, payload, deadline).map_err(WorkerClientError::transport)?;
+        transport::write_frame(stream, payload, deadline).map_err(SandboxClientError::transport)?;
         let bytes = transport::read_frame(stream, MAX_RESPONSE_BYTES, deadline)
-            .map_err(WorkerClientError::transport)?;
-        let response = protobuf::decode_response(&bytes).map_err(WorkerClientError::Protocol)?;
-        transport::remaining(deadline).map_err(WorkerClientError::transport)?;
+            .map_err(SandboxClientError::transport)?;
+        let response = protobuf::decode_response(&bytes).map_err(SandboxClientError::Protocol)?;
+        transport::remaining(deadline).map_err(SandboxClientError::transport)?;
         if response.request_id != id {
-            return Err(WorkerClientError::WrongResponse);
+            return Err(SandboxClientError::WrongResponse);
         }
         let result = match response.outcome {
             Ok(result) => result,
             Err(Failure::Face(error)) if error.code != face::FailureCode::Internal => {
-                return Err(WorkerClientError::AnalysisFailed(error));
+                return Err(SandboxClientError::AnalysisFailed(error));
             }
-            Err(error) => return Err(WorkerClientError::Protocol(error)),
+            Err(error) => return Err(SandboxClientError::Protocol(error)),
         };
         let scores = match (&result, kind) {
             (ResponseBody::DeepFace(r), 0) => vec![
@@ -196,13 +198,13 @@ impl WorkerClient {
                 r.similarity_selfie_challenge,
             ],
             (ResponseBody::GrayBadge(r), 1) => vec![r.similarity_selfie_challenge],
-            _ => return Err(WorkerClientError::WrongResponse),
+            _ => return Err(SandboxClientError::WrongResponse),
         };
         if scores
             .iter()
             .any(|s| !s.is_finite() || !(-1.0..=1.0).contains(s))
         {
-            return Err(WorkerClientError::InvalidScore);
+            return Err(SandboxClientError::InvalidScore);
         }
         Ok(result)
     }
@@ -210,7 +212,7 @@ impl WorkerClient {
 
 /// Payload-free errors; only input/biological failures leave the connection reusable.
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum WorkerClientError {
+pub enum SandboxClientError {
     #[error("worker request encoding failed: {0}")]
     RequestEncoding(Failure),
     #[error("worker protocol failure: {0}")]
@@ -239,7 +241,7 @@ pub enum WorkerClientError {
     RequestIdExhausted,
 }
 
-impl WorkerClientError {
+impl SandboxClientError {
     fn transport(error: io::Error) -> Self {
         if matches!(
             error.kind(),

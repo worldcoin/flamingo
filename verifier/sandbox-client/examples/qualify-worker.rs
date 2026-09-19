@@ -7,8 +7,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Operation, ResponseBody,
         face::{DeepFaceRequest, ImageBytes, LiveCapture},
     };
+    use flamingo_verifier_sandbox_client::{SandboxClientConfig, SandboxClientError};
     use flamingo_verifier_sandbox_client::{SandboxConfig, Worker, WorkerError};
-    use flamingo_verifier_sandbox_client::{WorkerClientConfig, WorkerClientError};
     use std::{fs::File, io::Read, path::Path, time::Duration};
 
     let args: Vec<_> = std::env::args().collect();
@@ -42,8 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_threads: args[3].parse()?,
         },
         // Deliberately no dependency on the private implementation in this public launcher.
-        // This profile must match docs/worker-protocol.md when the artifact changes.
-        WorkerClientConfig {
+        // Explicit IPC budgets for qualification.
+        SandboxClientConfig {
             startup_timeout: Duration::from_secs(120),
             request_timeout: Duration::from_secs(10),
             max_request_bytes: 24 * 1024 * 1024 + 1024,
@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     assert!(matches!(
         worker.evaluate(invalid),
-        Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed(_)))
+        Err(WorkerError::Rpc(SandboxClientError::AnalysisFailed(_)))
     ));
     assert_eq!(worker.evaluate(request())?, cold);
     let gray = worker.evaluate(Operation::GrayBadge(
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "linux")]
 /// A terminal RPC error always ends this broker lifetime; no retry or worker restart.
-fn fatal(error: flamingo_verifier_sandbox_client::WorkerClientError) -> ! {
+fn fatal(error: flamingo_verifier_sandbox_client::SandboxClientError) -> ! {
     eprintln!("worker qualification failed: {error}");
     std::process::exit(1)
 }

@@ -6,11 +6,11 @@ use biometric_engines_protocol::{
     },
     framing, protobuf,
 };
-use flamingo_verifier_sandbox_client::{WorkerClient, WorkerClientConfig, WorkerClientError};
+use flamingo_verifier_sandbox_client::{SandboxClient, SandboxClientConfig, SandboxClientError};
 use std::{io::Write, os::unix::net::UnixStream, thread, time::Duration};
 
-fn config() -> WorkerClientConfig {
-    WorkerClientConfig {
+fn config() -> SandboxClientConfig {
+    SandboxClientConfig {
         startup_timeout: Duration::from_millis(100),
         request_timeout: Duration::from_millis(100),
         max_request_bytes: 4096,
@@ -47,12 +47,12 @@ fn startup_requires_framed_compatible_readiness() {
         let (client, mut server) = UnixStream::pair().unwrap();
         server.write_all(&bytes).unwrap();
         drop(server);
-        assert!(WorkerClient::new(client, config()).is_err());
+        assert!(SandboxClient::new(client, config()).is_err());
     }
     let (client, _server) = UnixStream::pair().unwrap();
     assert!(matches!(
-        WorkerClient::new(client, config()),
-        Err(WorkerClientError::StartupTimeout)
+        SandboxClient::new(client, config()),
+        Err(SandboxClientError::StartupTimeout)
     ));
 }
 
@@ -90,10 +90,10 @@ fn deepface_graybadge_and_typed_biological_failure_share_one_connection() {
         }
         wait.recv().unwrap();
     });
-    let mut client = WorkerClient::new(client, config()).unwrap();
+    let mut client = SandboxClient::new(client, config()).unwrap();
     assert!(matches!(
         client.evaluate(request()),
-        Err(WorkerClientError::AnalysisFailed(_))
+        Err(SandboxClientError::AnalysisFailed(_))
     ));
     assert!(client.failure().is_none());
     assert_eq!(client.evaluate(request()).unwrap(), scores());
@@ -150,7 +150,7 @@ fn response_corruption_poisoning_is_permanent() {
             }
             framing::write_frame(&mut server, &protobuf::encode_response(response)).unwrap();
         });
-        let mut client = WorkerClient::new(client, config()).unwrap();
+        let mut client = SandboxClient::new(client, config()).unwrap();
         assert!(client.evaluate(request()).is_err(), "case {case}");
         assert!(client.failure().is_some(), "case {case}");
         assert!(client.evaluate(request()).is_err());
@@ -162,14 +162,14 @@ fn response_corruption_poisoning_is_permanent() {
 fn local_validation_does_not_touch_or_poison_socket() {
     let (client, mut server) = UnixStream::pair().unwrap();
     ready(&mut server);
-    let mut client = WorkerClient::new(client, config()).unwrap();
+    let mut client = SandboxClient::new(client, config()).unwrap();
     let Operation::DeepFace(mut r) = request() else {
         unreachable!()
     };
     r.orb_credential.0.resize(101, 0);
     assert!(matches!(
         client.evaluate(Operation::DeepFace(r)),
-        Err(WorkerClientError::InvalidImages)
+        Err(SandboxClientError::InvalidImages)
     ));
     assert!(client.failure().is_none());
     server.set_nonblocking(true).unwrap();
@@ -193,10 +193,10 @@ fn partial_progress_does_not_extend_the_request_deadline() {
             thread::sleep(Duration::from_millis(40));
         }
     });
-    let mut client = WorkerClient::new(client, config()).unwrap();
+    let mut client = SandboxClient::new(client, config()).unwrap();
     assert!(matches!(
         client.evaluate(request()),
-        Err(WorkerClientError::RequestTimeout)
+        Err(SandboxClientError::RequestTimeout)
     ));
     assert!(client.failure().is_some());
     peer.join().unwrap();
