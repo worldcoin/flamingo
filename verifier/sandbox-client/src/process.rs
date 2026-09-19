@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{WorkerClient, WorkerClientConfig, WorkerClientError};
+use crate::{SandboxClient, SandboxClientConfig, SandboxClientError};
 use biometric_engines_protocol::{Operation, ResponseBody};
 
 #[path = "sandbox.rs"]
@@ -24,11 +24,11 @@ unsafe extern "C" {}
 /// Owns one worker for the broker's lifetime. Fatal comparisons terminate the broker.
 pub struct Worker {
     /// Validates each comparison and permanently closes IPC after a fatal error.
-    rpc: WorkerClient,
+    rpc: SandboxClient,
     /// Never reaped here, so it cannot be reused before the broker exits.
     pid: libc::pid_t,
     /// Broker-owned process exit policy; must not unwind or wait for worker cleanup.
-    on_fatal: fn(WorkerClientError) -> !,
+    on_fatal: fn(SandboxClientError) -> !,
 }
 
 impl Worker {
@@ -39,8 +39,8 @@ impl Worker {
     pub fn spawn(
         binary: &File,
         sandbox: SandboxConfig<'_>,
-        config: WorkerClientConfig,
-        on_fatal: fn(WorkerClientError) -> !,
+        config: SandboxClientConfig,
+        on_fatal: fn(SandboxClientError) -> !,
     ) -> Result<Self, WorkerError> {
         config.validate()?;
         let (rpc, child) = UnixStream::pair()?;
@@ -76,7 +76,7 @@ impl Worker {
         drop(jail);
         // Close the parent's duplicate so an initialization failure is observed as EOF.
         drop(child);
-        let rpc = WorkerClient::new(rpc, config).map_err(|error| {
+        let rpc = SandboxClient::new(rpc, config).map_err(|error| {
             kill(pid);
             WorkerError::Rpc(error)
         })?;
@@ -123,7 +123,7 @@ impl Worker {
         if let Some(error) = error {
             tracing::error!(dependency = "biometric_worker", pid = self.pid, %error, "worker liveness check failed");
             kill(self.pid);
-            (self.on_fatal)(WorkerClientError::Transport(Arc::new(error)));
+            (self.on_fatal)(SandboxClientError::Transport(Arc::new(error)));
         }
     }
 }
@@ -164,5 +164,5 @@ pub enum WorkerError {
     Jail(#[from] minijail::Error),
     /// Client setup or local input/analysis failure; comparison failures here are recoverable.
     #[error(transparent)]
-    Rpc(#[from] WorkerClientError),
+    Rpc(#[from] SandboxClientError),
 }

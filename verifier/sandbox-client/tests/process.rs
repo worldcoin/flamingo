@@ -9,9 +9,9 @@ use biometric_engines_protocol::{
     face::{DeepFaceRequest, DeepFaceResult, ImageBytes, LiveCapture},
 };
 #[cfg(target_os = "linux")]
-use flamingo_verifier_sandbox_client::{SandboxConfig, WORKER_UID, Worker, WorkerError};
+use flamingo_verifier_sandbox_client::{SandboxClientConfig, SandboxClientError};
 #[cfg(target_os = "linux")]
-use flamingo_verifier_sandbox_client::{WorkerClientConfig, WorkerClientError};
+use flamingo_verifier_sandbox_client::{SandboxConfig, WORKER_UID, Worker, WorkerError};
 
 #[cfg(target_os = "linux")]
 fn peer() -> String {
@@ -28,8 +28,8 @@ const FATAL_EXIT: i32 = 70;
 
 #[cfg(target_os = "linux")]
 /// Allows startup initialization while keeping deliberately stuck comparisons short.
-fn config() -> WorkerClientConfig {
-    WorkerClientConfig {
+fn config() -> SandboxClientConfig {
+    SandboxClientConfig {
         startup_timeout: Duration::from_secs(2),
         request_timeout: Duration::from_secs(2),
         max_request_bytes: 1024,
@@ -59,7 +59,7 @@ fn images(id: u8) -> Operation {
 
 #[cfg(target_os = "linux")]
 /// The broker owns process termination; expose the original error for the test supervisor.
-fn fatal(error: WorkerClientError) -> ! {
+fn fatal(error: SandboxClientError) -> ! {
     eprintln!("fatal_worker:{error}");
     std::process::exit(FATAL_EXIT);
 }
@@ -248,7 +248,7 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         assert_eq!(worker.evaluate(images(1))?, scores);
         assert!(matches!(
             worker.evaluate(images(250)),
-            Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed(_)))
+            Err(WorkerError::Rpc(SandboxClientError::AnalysisFailed(_)))
         ));
         assert_eq!(worker.evaluate(images(2))?, scores);
         worker.evaluate(images(253))?;
@@ -275,14 +275,14 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         input.orb_credential.0.clear();
         assert!(matches!(
             worker.evaluate(invalid),
-            Err(WorkerError::Rpc(WorkerClientError::InvalidImages))
+            Err(WorkerError::Rpc(SandboxClientError::InvalidImages))
         ));
         for id in 1..=3 {
             assert_eq!(worker.evaluate(images(id))?, scores);
         }
         assert!(matches!(
             worker.evaluate(images(250)),
-            Err(WorkerError::Rpc(WorkerClientError::AnalysisFailed(_)))
+            Err(WorkerError::Rpc(SandboxClientError::AnalysisFailed(_)))
         ));
         assert_eq!(
             worker.evaluate(images(201))?,

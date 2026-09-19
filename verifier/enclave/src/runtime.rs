@@ -10,8 +10,8 @@ use flamingo_verifier_enclave::{
     rng, server,
     state::EnclaveState,
 };
+use flamingo_verifier_sandbox_client::{SandboxClientConfig, SandboxClientError};
 use flamingo_verifier_sandbox_client::{SandboxConfig, Worker};
-use flamingo_verifier_sandbox_client::{WorkerClientConfig, WorkerClientError};
 use pontifex::SecureModule;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -36,7 +36,7 @@ pub(super) fn run() -> anyhow::Result<()> {
             address_space_bytes: boot.address_space_bytes,
             max_threads: boot.max_threads,
         },
-        WorkerClientConfig {
+        SandboxClientConfig {
             startup_timeout: Duration::from_secs(120),
             request_timeout: Duration::from_secs(10),
             max_request_bytes: MAX_REQUEST_BYTES,
@@ -56,7 +56,7 @@ pub(super) fn run() -> anyhow::Result<()> {
 }
 
 /// A terminal worker cannot be replaced within an enclave boot; init tears down the guest.
-fn worker_failed(error: WorkerClientError) -> ! {
+fn worker_failed(error: SandboxClientError) -> ! {
     error!(
         dependency = "biometric_worker",
         %error,

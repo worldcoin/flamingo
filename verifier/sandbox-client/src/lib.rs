@@ -3,7 +3,7 @@
 //! Owns worker launch under Linux Minijail, readiness, bounded IPC and teardown.
 mod client;
 mod transport;
-pub use client::{WorkerClient, WorkerClientConfig, WorkerClientError};
+pub use client::{SandboxClient, SandboxClientConfig, SandboxClientError};
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]

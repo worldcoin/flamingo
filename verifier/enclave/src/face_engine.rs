@@ -65,7 +65,7 @@ mod sandboxed {
         Operation, ResponseBody,
         face::{DeepFaceRequest, GrayBadgeRequest, ImageBytes, LiveCapture},
     };
-    use flamingo_verifier_sandbox_client::{Worker, WorkerClientError, WorkerError};
+    use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
     /// Owns the eagerly initialized worker under the broker's exclusive mutex.
     pub struct FaceEngine {
         worker: Worker,
@@ -78,11 +78,11 @@ mod sandboxed {
         }
         fn run(&mut self, op: Operation) -> Result<ResponseBody, FailureReason> {
             self.worker.evaluate(op).map_err(|error| match error {
-                WorkerError::Rpc(WorkerClientError::AnalysisFailed(failure)) => {
+                WorkerError::Rpc(SandboxClientError::AnalysisFailed(failure)) => {
                     crate::error::worker_failure(failure)
                 }
                 WorkerError::Rpc(
-                    WorkerClientError::InvalidImages | WorkerClientError::RequestEncoding(_),
+                    SandboxClientError::InvalidImages | SandboxClientError::RequestEncoding(_),
                 ) => FailureReason::MalformedInputs,
                 _ => {
                     tracing::error!(%error, "unexpected worker failure");
