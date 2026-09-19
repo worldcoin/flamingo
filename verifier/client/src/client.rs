@@ -8,6 +8,7 @@ use flamingo_verifier_api_types::{
 };
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
 use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use futures_util::StreamExt as _;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -50,6 +51,13 @@ pub struct FlamingoVerifierClient {
     verifier: Verifier,
 }
 
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        clippy::future_not_send,
+        reason = "Fetch and JavaScript futures stay on their originating browser worker"
+    )
+)]
 impl FlamingoVerifierClient {
     /// Builds a client from `config`.
     ///
@@ -62,8 +70,8 @@ impl FlamingoVerifierClient {
 
     /// Builds a client using an externally configured HTTP client builder.
     ///
-    /// The configured cookie store, connection timeout, and request timeout are applied to the
-    /// supplied builder.
+    /// Native clients use a cookie store and connection/request timeouts. Browser clients
+    /// use Fetch credentials and a per-request deadline; the browser manages connections.
     ///
     /// # Errors
     ///
@@ -72,13 +80,13 @@ impl FlamingoVerifierClient {
         config: Config,
         http: reqwest::ClientBuilder,
     ) -> Result<Self, Error> {
+        #[cfg(not(target_arch = "wasm32"))]
         let http = http
             // Replays the ALB's affinity cookie, so the match reaches the enclave that was assigned.
             .cookie_store(true)
             .connect_timeout(config.connect_timeout())
-            .timeout(config.request_timeout())
-            .build()
-            .map_err(Error::Transport)?;
+            .timeout(config.request_timeout());
+        let http = http.build().map_err(Error::Transport)?;
 
         Ok(Self {
             verifier: config.verifier()?,
@@ -91,12 +99,13 @@ impl FlamingoVerifierClient {
     ///
     /// Callers may customize the returned builder before passing it to
     /// [`Self::request_assignment_with`].
+    #[must_use = "the request must be sent to fetch an assignment"]
     pub fn build_assignment_request(&self) -> reqwest::RequestBuilder {
         let url = format!(
             "{}/v1/enclave-assignment",
             self.config.host_url().as_str().trim_end_matches('/')
         );
-        self.http.post(url)
+        self.configure_request(self.http.post(url))
     }
 
     /// Requests an assignment and returns it only if its attestation verifies.
@@ -179,8 +188,7 @@ impl FlamingoVerifierClient {
             return Err(Error::MalformedResult);
         }
         let request = self
-            .http
-            .post(url)
+            .configure_request(self.http.post(url))
             .header(reqwest::header::CONTENT_TYPE, MATCH_CONTENT_TYPE)
             .header(reqwest::header::ACCEPT, MATCH_CONTENT_TYPE)
             .body(sealed);
@@ -250,11 +258,11 @@ impl FlamingoVerifierClient {
         request: reqwest::RequestBuilder,
         opener: pontifex::ResponseOpener,
     ) -> Result<VerifiedMatchResult, Error> {
-        let mut response = request.send().await.map_err(Error::Request)?;
+        let response = request.send().await.map_err(Error::Request)?;
 
         let status = response.status();
         if !status.is_success() {
-            let bytes = bounded_response(&mut response).await?;
+            let bytes = bounded_response(response).await?;
             let body = std::str::from_utf8(&bytes).ok();
             return Err(Self::api_error(status.as_u16(), body));
         }
@@ -267,7 +275,7 @@ impl FlamingoVerifierClient {
         {
             return Err(Error::MalformedResult);
         }
-        let ciphertext = bounded_response(&mut response).await?;
+        let ciphertext = bounded_response(response).await?;
         let plaintext = opener
             .open_from_enclave(&ciphertext)
             .map_err(Error::Channel)?;
@@ -325,9 +333,22 @@ impl FlamingoVerifierClient {
             allow_retry: envelope.allow_retry,
         }
     }
+
+    fn configure_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        #[cfg(target_arch = "wasm32")]
+        let request = request.fetch_credentials_include().fetch_cache_no_store();
+        request.timeout(self.config.request_timeout())
+    }
 }
 
-async fn bounded_response(response: &mut reqwest::Response) -> Result<Vec<u8>, Error> {
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        clippy::future_not_send,
+        reason = "Fetch response streams stay on the originating browser worker"
+    )
+)]
+async fn bounded_response(response: reqwest::Response) -> Result<Vec<u8>, Error> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_MATCH_RESPONSE_BYTES as u64)
@@ -335,8 +356,12 @@ async fn bounded_response(response: &mut reqwest::Response) -> Result<Vec<u8>, E
         return Err(Error::MalformedResult);
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(Error::MalformedResponse)? {
-        if bytes.len() + chunk.len() > MAX_MATCH_RESPONSE_BYTES {
+    // bytes_stream is available on both native and browser clients. Keep the limit
+    // incremental so a missing Content-Length cannot force a full-body allocation.
+    let mut stream = Box::pin(response.bytes_stream());
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(Error::MalformedResponse)?;
+        if chunk.len() > MAX_MATCH_RESPONSE_BYTES - bytes.len() {
             return Err(Error::MalformedResult);
         }
         bytes.extend_from_slice(&chunk);
@@ -360,7 +385,7 @@ pub enum VerifiedMatchResult {
     /// No statement issued.
     Failed(flamingo_verifier_sealed_types::FailureReason),
 }
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
@@ -658,3 +683,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+#[path = "browser_tests.rs"]
+mod browser_tests;

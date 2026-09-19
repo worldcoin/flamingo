@@ -54,7 +54,7 @@ vsock = "0.5.4"
 hex-literal = "1.1"
 http-body-util = "0.1"
 image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
-pontifex = { version = "2.0.0", default-features = false }
+pontifex = { version = "2.0.0", git = "https://github.com/worldcoin/pontifex", rev = "89d79f45d592a5b7446f106e60372fe357c76fa8", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }

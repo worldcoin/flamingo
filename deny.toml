@@ -66,10 +66,10 @@ license-files = [{ path = "../../LICENSE", hash = 0x51549d2b }]
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# Only verifier/enclave reaches biometric-engines; the other two workspaces resolve no git
-# source at all, so this goes unmatched there. See the note at the top.
+# Some allowed sources are only reached by particular workspace members.
 unused-allowed-source = "allow"
 allow-git = [
     "https://github.com/google/minijail",
     "https://github.com/worldcoin/biometric-engines",
+    "https://github.com/worldcoin/pontifex",
 ]
