@@ -38,12 +38,11 @@ class PublicReleaseTests(unittest.TestCase):
         for name in release.release_assets(workload):
             (self.root / name).write_bytes(b"release fixture")
 
-    def test_exact_assets_for_each_workload_are_allowed(self):
-        for workload in ("verifier", "di"):
-            self.populate(workload)
-            release.check_assets(self.root, workload)
-            for path in self.root.iterdir():
-                path.unlink()
+    def test_exact_verifier_assets_are_allowed(self):
+        self.populate("verifier")
+        release.check_assets(self.root, "verifier")
+        with self.assertRaises(ValueError):
+            release.release_assets("di")
 
     def test_added_payloads_and_directories_are_rejected(self):
         self.populate("verifier")

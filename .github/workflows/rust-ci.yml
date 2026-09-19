@@ -118,6 +118,23 @@ jobs:
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
-      # No image is built here. The DI enclave used to be the cheap build smoke test; with it
-      # gone the only remaining image is the verifier's ~90-minute build, so build errors that
-      # evaluation does not catch now surface first in release-enclaves.yml.
+      - name: Verify source filtering
+        env:
+          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          probe_root="$RUNNER_TEMP/public-source"
+          mkdir -p "$probe_root/models"
+          git archive HEAD | tar -x -C "$probe_root"
+          touch "$probe_root/worker.bundle" "$probe_root/models/weights.onnx"
+          touch "$probe_root/verifier/sandbox-client/biometric-engines-worker"
+          source=$(nix eval --raw --no-update-lock-file "path:$probe_root#packages.x86_64-linux.verifier-enclave.src")
+          test -f "$source/Cargo.toml"
+          test -f "$source/verifier/sandbox-client/worker.policy"
+          test ! -e "$source/worker.bundle"
+          test ! -e "$source/models/weights.onnx"
+          test ! -e "$source/verifier/sandbox-client/biometric-engines-worker"
+      # External inference removes the expensive engine/model build from this image.
+      - name: Build the public verifier image
+        env:
+          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.verifier-oci
