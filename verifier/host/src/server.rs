@@ -25,6 +25,7 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
 
     tracing::info!(%address, "API listening");
 
+    let shutdown_state = state.clone();
     axum::serve(
         listener,
         routes::handler()
@@ -32,7 +33,10 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
             .layer(TraceLayer::new_for_axum())
             .into_make_service(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown_state.begin_drain();
+    })
     .await
     .context("API server failed")
 }

@@ -1,24 +1,12 @@
-//! Face Engine initialization and in-enclave embedding comparison.
-
-use std::{io::Cursor, sync::Arc};
-
-use face_engine::{
-    components::{
-        captured_image_analyzer::CapturedImageAnalyzer, template_generator::TemplateGenerator,
-    },
-    io::rgb_image::RgbImage,
-    matchers::cosine_similarity::CosineSimilarity,
-    nodes::{subject_extraction::SubjectFace, template_generation::EmbeddingVector},
-};
-use flamingo_verifier_sealed_types::{
-    ComparisonRole, FailureReason, ImageFailureReason, ImageRole, valid_similarity,
-};
-use image::ImageReader;
-
-const FACE_ANALYZER_CONFIG: &str = include_str!("../config/face_analyzer.yaml");
-const FACE_TEMPLATE_GENERATOR_CONFIG: &str = include_str!("../config/face_template_generator.yaml");
+//! Synchronous image-only boundary to the sandboxed worker.
+use flamingo_verifier_sealed_types::FailureReason;
+/// Maximum encoded bytes per image.
+pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_IMAGE_BYTES;
+/// Worker request budget for three vanilla images and protobuf overhead.
+pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_IMAGE_BYTES + 1024;
 
 /// Internal normalized scores; these do not define the signed-token contract.
+#[derive(Clone, Copy)]
 pub struct DeepFaceScores {
     /// Orb credential versus live selfie.
     pub similarity_orb_selfie: f64,
@@ -36,175 +24,128 @@ pub struct GrayBadgeScores {
 
 /// Image-only inference operations. PCP verification and threshold policy belong to the caller.
 pub trait FaceComparator: Send + Sync {
-    /// Compare the credential, live selfie and challenge without copying input buffers.
+    /// Compare the credential, live selfie and challenge using the worker protocol.
     /// # Errors
     /// Returns structured analysis failures or infrastructure faults.
     fn deep_face(
-        &self,
+        &mut self,
         credential: &[u8],
         live: &[u8],
         challenge: &[u8],
     ) -> Result<DeepFaceScores, FailureReason>;
 
-    /// Compare the live selfie and challenge without copying input buffers.
+    /// Compare the live selfie and challenge using the worker protocol.
     /// # Errors
     /// Returns structured analysis failures or infrastructure faults.
-    fn gray_badge(&self, live: &[u8], challenge: &[u8]) -> Result<GrayBadgeScores, FailureReason>;
-}
-
-// TODO: Inject production Face Engine configs and model artifacts at runtime instead of compiling
-// the prototype configs and fixed `/models` paths into the enclave.
-/// Face Engine implementation backed by the configured ONNX models.
-pub struct FaceEngine {
-    template_generator: TemplateGenerator,
-    analyzer: CapturedImageAnalyzer,
-    matcher: CosineSimilarity,
-}
-
-impl Default for FaceEngine {
-    fn default() -> Self {
-        Self {
-            template_generator: TemplateGenerator::new(FACE_TEMPLATE_GENERATOR_CONFIG)
-                .expect("built-in Face Engine template generator config and model should load"),
-            analyzer: CapturedImageAnalyzer::new(FACE_ANALYZER_CONFIG)
-                .expect("built-in Face Engine analyzer config and model should load"),
-            matcher: CosineSimilarity {
-                normalize_score: true,
-            },
-        }
-    }
-}
-
-impl FaceEngine {
-    fn generate_embedding(
-        &self,
-        image_bytes: &[u8],
-        role: ImageRole,
-    ) -> Result<EmbeddingVector, FailureReason> {
-        let rgb_image = decode_image(image_bytes, role)?;
-
-        let analysis = self
-            .analyzer
-            .run_inference_rgb(&rgb_image)
-            .map_err(|_| FailureReason::Internal)?;
-        if let Some(error) = analysis.error {
-            tracing::warn!(?error, "Face Engine image analysis failed");
-            return Err(crate::error::image_failure(&error, role));
-        }
-
-        let subject_metadata = analysis.subject_face_extracted.ok_or_else(|| {
-            tracing::warn!("Face Engine did not extract a subject");
-            FailureReason::ImageRejected {
-                image: role,
-                reason: ImageFailureReason::NoFaceDetected,
-            }
-        })?;
-        let subject = SubjectFace {
-            input_image: Arc::new(rgb_image),
-            metadata: subject_metadata,
-        };
-
-        let output = self
-            .template_generator
-            .run_inference(&subject)
-            .map_err(|_| FailureReason::Internal)?;
-        if let Some(error) = output.metadata.error {
-            tracing::warn!(?error, "Face Engine rejected the generated template");
-            return Err(crate::error::image_failure(&error, role));
-        }
-
-        output.embedding_vector.ok_or_else(|| {
-            tracing::error!("Face Engine returned no embedding");
-            FailureReason::ImageRejected {
-                image: role,
-                reason: ImageFailureReason::TemplateFailed,
-            }
-        })
-    }
-
-    fn compute_score(
-        &self,
-        probe: &EmbeddingVector,
-        reference: &EmbeddingVector,
-        role: ComparisonRole,
-    ) -> Result<f64, FailureReason> {
-        let score = f64::from(
-            self.matcher
-                .compute_score(probe, reference)
-                .map_err(|_| FailureReason::MatchingFailed(role))?,
-        );
-        if !valid_similarity(score) {
-            return Err(FailureReason::MatchingFailed(role));
-        }
-        Ok(score)
-    }
-}
-
-impl FaceComparator for FaceEngine {
-    fn deep_face(
-        &self,
-        credential: &[u8],
+    fn gray_badge(
+        &mut self,
         live: &[u8],
         challenge: &[u8],
-    ) -> Result<DeepFaceScores, FailureReason> {
-        let orb = self.generate_embedding(credential, ImageRole::OrbCredential)?;
-        let live = self.generate_embedding(live, ImageRole::LiveSelfie)?;
-        let challenge = self.generate_embedding(challenge, ImageRole::RtmsChallenge)?;
-        Ok(DeepFaceScores {
-            similarity_orb_selfie: self.compute_score(&orb, &live, ComparisonRole::OrbSelfie)?,
-            similarity_orb_challenge: self.compute_score(
-                &orb,
-                &challenge,
-                ComparisonRole::OrbChallenge,
-            )?,
-            similarity_selfie_challenge: self.compute_score(
-                &live,
-                &challenge,
-                ComparisonRole::SelfieChallenge,
-            )?,
-        })
-    }
-
-    fn gray_badge(&self, live: &[u8], challenge: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
-        let live = self.generate_embedding(live, ImageRole::LiveSelfie)?;
-        let challenge = self.generate_embedding(challenge, ImageRole::RtmsChallenge)?;
-        Ok(GrayBadgeScores {
-            similarity_selfie_challenge: self.compute_score(
-                &live,
-                &challenge,
-                ComparisonRole::SelfieChallenge,
-            )?,
-        })
-    }
+    ) -> Result<GrayBadgeScores, FailureReason>;
+    /// Checks idle worker liveness without waiting for active inference.
+    fn check_health(&self) {}
 }
 
-fn decode_image(bytes: &[u8], role: ImageRole) -> Result<RgbImage, FailureReason> {
-    let invalid = || FailureReason::ImageRejected {
-        image: role,
-        reason: ImageFailureReason::InvalidImage,
+/// Preserve the existing engine's f32 normalization before applying public policy.
+#[cfg(any(target_os = "linux", test))]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the pinned worker emits raw cosine widened from f32; preserve existing normalization"
+)]
+fn normalized(score: f64) -> f64 {
+    f64::from(f32::midpoint(1.0, score as f32))
+}
+
+#[cfg(target_os = "linux")]
+pub use sandboxed::FaceEngine;
+#[cfg(target_os = "linux")]
+mod sandboxed {
+    use super::{DeepFaceScores, FaceComparator, FailureReason, GrayBadgeScores, normalized};
+    use biometric_engines_protocol::{
+        Operation, ResponseBody,
+        face::{DeepFaceRequest, GrayBadgeRequest, ImageBytes, LiveCapture},
     };
-    let reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|_| invalid())?;
-    let format = reader.format().ok_or_else(invalid)?;
-    if !matches!(format, image::ImageFormat::Jpeg | image::ImageFormat::Png) {
-        return Err(invalid());
+    use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
+    /// Owns the eagerly initialized worker under the broker's exclusive mutex.
+    pub struct FaceEngine {
+        worker: Worker,
     }
-    let (width, height) = reader.into_dimensions().map_err(|_| invalid())?;
-    if width == 0
-        || height == 0
-        || width > 8192
-        || height > 8192
-        || u64::from(width) * u64::from(height) > 16 * 1024 * 1024
-    {
-        return Err(invalid());
+    impl FaceEngine {
+        /// Takes an initialized worker before broker key generation.
+        #[must_use]
+        pub const fn new(worker: Worker) -> Self {
+            Self { worker }
+        }
+        fn run(&mut self, op: Operation) -> Result<ResponseBody, FailureReason> {
+            self.worker.evaluate(op).map_err(|error| match error {
+                WorkerError::Rpc(SandboxClientError::AnalysisFailed(failure)) => {
+                    crate::error::worker_failure(failure)
+                }
+                WorkerError::Rpc(
+                    SandboxClientError::InvalidImages | SandboxClientError::RequestEncoding(_),
+                ) => FailureReason::MalformedInputs,
+                _ => {
+                    tracing::error!(%error, "unexpected worker failure");
+                    std::process::exit(1);
+                }
+            })
+        }
     }
-    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
-    let image = reader.decode().map_err(|_| invalid())?.into_rgb8();
-    RgbImage::new(image.into_raw(), height, width, None).map_err(|_| invalid())
+    impl FaceComparator for FaceEngine {
+        fn deep_face(
+            &mut self,
+            credential: &[u8],
+            live: &[u8],
+            challenge: &[u8],
+        ) -> Result<DeepFaceScores, FailureReason> {
+            let ResponseBody::DeepFace(scores) =
+                self.run(Operation::DeepFace(DeepFaceRequest {
+                    orb_credential: ImageBytes(credential.to_vec()),
+                    live: LiveCapture::Vanilla(ImageBytes(live.to_vec())),
+                    rtms_challenge: ImageBytes(challenge.to_vec()),
+                }))?
+            else {
+                unreachable!("client validates response type")
+            };
+            Ok(DeepFaceScores {
+                similarity_orb_selfie: normalized(scores.similarity_orb_selfie),
+                similarity_orb_challenge: normalized(scores.similarity_orb_challenge),
+                similarity_selfie_challenge: normalized(scores.similarity_selfie_challenge),
+            })
+        }
+        fn gray_badge(
+            &mut self,
+            live: &[u8],
+            challenge: &[u8],
+        ) -> Result<GrayBadgeScores, FailureReason> {
+            let ResponseBody::GrayBadge(scores) =
+                self.run(Operation::GrayBadge(GrayBadgeRequest {
+                    live: LiveCapture::Vanilla(ImageBytes(live.to_vec())),
+                    rtms_challenge: ImageBytes(challenge.to_vec()),
+                }))?
+            else {
+                unreachable!("client validates response type")
+            };
+            Ok(GrayBadgeScores {
+                similarity_selfie_challenge: normalized(scores.similarity_selfie_challenge),
+            })
+        }
+        fn check_health(&self) {
+            self.worker.check_alive();
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn raw_cosine_keeps_existing_public_normalization() {
+        for (raw, expected) in [
+            (-1.0, 0.0),
+            (0.0, 0.5),
+            (1.0, 1.0),
+            (0.8, f64::from(0.9f32)),
+        ] {
+            assert_eq!(super::normalized(raw).to_bits(), expected.to_bits());
+        }
+    }
 }

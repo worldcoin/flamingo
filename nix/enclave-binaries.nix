@@ -12,55 +12,33 @@ let
   rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml");
   craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-  # The biometric-engines rev pinned by the root lockfile, so the assets grafted into the
-  # vendor tree below cannot come from a different commit than the crates built against them.
-  lockedFaceEngineRev =
-    let
-      lock = builtins.fromTOML (builtins.readFile (root + "/Cargo.lock"));
-      sources = lib.unique (
-        lib.filter (source: source != null && lib.hasInfix "worldcoin/biometric-engines" source) (
-          map (package: package.source or null) lock.package
-        )
-      );
-    in
-    assert lib.assertMsg (lib.length sources == 1) (
-      "expected one worldcoin/biometric-engines git source in Cargo.lock,"
-      + " found "
-      + toString (lib.length sources)
-    );
-    lib.last (lib.splitString "#" (lib.head sources));
-
-  # Fetched here rather than taken as a flake input so there is no second pin to keep in
-  # step with Cargo.lock. This is a private repo, and `builtins.fetchGit` runs on the host
-  # with the host's git credentials — a credential helper or an ssh agent. No secret
-  # reaches a derivation or the store. crane resolves the crates themselves the same way.
-  biometricEngines = builtins.fetchGit {
-    url = "https://github.com/worldcoin/biometric-engines";
-    rev = lockedFaceEngineRev;
-    allRefs = true;
+  protocol = (builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"))).workspace.dependencies.biometric-engines-protocol;
+  publicVendorDir = craneLib.vendorCargoDeps {
+    cargoLock = root + "/Cargo.lock";
+    overrideVendorGitCheckout = packages: drv:
+      if lib.any (package: package.name == "biometric-engines-protocol") packages then
+        drv.overrideAttrs (_: {
+          # Fetch the exact pin even after its prototype branch has been rebased/deleted.
+          # A shallow fetch requests the revision directly instead of searching live refs.
+          src = builtins.fetchGit {
+            url = protocol.git;
+            rev = protocol.rev;
+            shallow = true;
+            submodules = true;
+          };
+        })
+      else drv;
   };
 
-  # NOTE: Temporary - while we keep around biometric-engines as a build dep
-  # face-engine's consts.rs reads its default graph configs with
-  # include_str!("../../../assets/..."), which resolves only in a monorepo checkout —
-  # cargo vendors every crate standalone. That path lands at the root of the vendored
-  # checkout, one level above the crate directories, so restoring assets/ there satisfies
-  # it without patching the crate. Nothing verifies the addition: cargo writes
-  # `{"files":{}}` as the checksum manifest for vendored git crates.
-  verifierVendorDir = craneLib.vendorCargoDeps {
-    cargoLock = root + "/Cargo.lock";
-    overrideVendorGitCheckout =
-      packages: drv:
-      if
-        lib.any (package: lib.hasInfix "worldcoin/biometric-engines" (package.source or "")) packages
-      then
-        pkgs.runCommandLocal "biometric-engines-checkout-with-assets" { } ''
-          cp -R --no-preserve=mode,ownership ${drv} $out
-          chmod -R u+w $out
-          cp -R ${biometricEngines}/assets $out/assets
-        ''
-      else
-        drv;
+  # An external executable or model dropped into the checkout must never become
+  # a compiler input (including through include_bytes!) or an image input.
+  publicSource = lib.cleanSourceWith {
+    src = root;
+    filter = path: type:
+      type == "directory"
+      || lib.hasSuffix ".rs" path
+      || builtins.elem (builtins.baseNameOf path) [ "Cargo.toml" "Cargo.lock" "rust-toolchain.toml" ]
+      || path == toString (root + "/verifier/sandbox-client/worker.policy");
   };
 
   commonArgs = {
@@ -72,12 +50,19 @@ let
     nativeBuildInputs = with pkgs; [
       clang
       pkg-config
+      protobuf
+      python3
     ];
     buildInputs = with pkgs; [
       minijail
       libcap
     ];
     LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+    # This guard applies to direct Nix builds as well as the release workflow.
+    preBuild = ''
+      python3 ${root + "/scripts/check-public-release.py"} --lockfile Cargo.lock
+    '';
 
     # LLVM's LICM scalar promotion orders work by pointer value, so rustc (1.97 and 1.98
     # both) emits different code for the same input under different address-space layouts —
@@ -89,36 +74,15 @@ let
     RUSTFLAGS = "-C llvm-args=-disable-licm-promotion";
   };
 
-  # face-engine builds its ONNX Runtime bindings with bindgen, which needs clang.
-  faceEngineArgs = {
-    nativeBuildInputs = with pkgs; [
-      clang
-      pkg-config
-    ];
-    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-  };
-
   version = (builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"))).workspace.package.version;
 
-  buildEnclaveBin =
-    {
-      pname,
-      extraArgs ? { },
-    }:
-    craneLib.buildPackage (
-      commonArgs
-      // extraArgs
-      // {
-        inherit pname version;
-        src = root;
-        cargoVendorDir = verifierVendorDir;
-        cargoExtraArgs = "--locked --bin ${pname}";
-      }
-    );
-in
-{
-  verifier-enclave = buildEnclaveBin {
-    pname = "verifier-enclave";
-    extraArgs = faceEngineArgs;
-  };
+  buildEnclaveBin = pname: craneLib.buildPackage (commonArgs // {
+    inherit pname version;
+    src = publicSource;
+    cargoVendorDir = publicVendorDir;
+    cargoExtraArgs = "--locked --bin ${pname}";
+  });
+in {
+  verifier-enclave = buildEnclaveBin "verifier-enclave";
+  sandbox-bundle = buildEnclaveBin "sandbox-bundle";
 }

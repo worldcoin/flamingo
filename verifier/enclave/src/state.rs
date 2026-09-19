@@ -6,7 +6,7 @@ use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_sealed_types::MATCH_CHANNEL_DOMAIN;
 use pontifex::{ChannelDomain, ChannelEnclave};
-use tokio::task::JoinHandle;
+use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
@@ -16,11 +16,18 @@ use crate::{
 
 /// Immutable state generated once during enclave boot.
 pub struct EnclaveState {
+    /// Opens requests sealed to this boot.
     channel: ChannelEnclave,
+    /// Signs accepted match claims.
     signing_key: SigningKey,
+    /// Cached attestation of the sealed-channel key.
     attested_encryption_key: AttestedKey,
+    /// Cached attestation of the statement key.
     attested_signing_key: AttestedKey,
-    face_engine: Arc<dyn FaceComparator>,
+    /// Exclusive worker access, held only during the blocking comparison.
+    /// Bounds decrypted requests retained while the worker is busy.
+    pub(crate) admission: Arc<tokio::sync::Semaphore>,
+    pub(crate) comparator: Arc<Mutex<Box<dyn FaceComparator>>>,
 }
 
 impl EnclaveState {
@@ -35,7 +42,7 @@ impl EnclaveState {
     /// be serialized, or either key cannot be attested.
     pub fn generate(
         attestor: Arc<dyn Attestor>,
-        face_engine: Arc<dyn FaceComparator>,
+        face_engine: Box<dyn FaceComparator>,
     ) -> Result<Self, enclave_types::Error> {
         let channel = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN)).map_err(
             |error| {
@@ -44,7 +51,6 @@ impl EnclaveState {
             },
         )?;
         let signing_key = SigningKey::generate();
-        tracing::info!("generated boot-scoped sealed channel and signing keys");
 
         // Serialized once here rather than on every attestation.
         let signing_public_key =
@@ -69,7 +75,8 @@ impl EnclaveState {
             signing_key,
             attested_encryption_key,
             attested_signing_key,
-            face_engine,
+            admission: Arc::new(tokio::sync::Semaphore::new(4)),
+            comparator: Arc::new(Mutex::new(face_engine)),
         })
     }
 
@@ -97,10 +104,11 @@ impl EnclaveState {
         self.signing_key.public_key()
     }
 
-    /// Returns the Face Engine used for enclave match operations.
-    #[must_use]
-    pub fn face_engine(&self) -> &dyn FaceComparator {
-        self.face_engine.as_ref()
+    /// Checks an idle worker without waiting for an in-flight comparison.
+    pub fn check_worker_health(&self) {
+        if let Ok(worker) = self.comparator.try_lock() {
+            worker.check_health();
+        }
     }
 
     /// Starts background attestation refresh for both boot keys.
@@ -183,7 +191,7 @@ mod tests {
     #[test]
     fn an_attestor_that_fails_fails_the_boot() {
         let error =
-            EnclaveState::generate(Arc::new(FailingAttestor), Arc::new(UnusedFaceEngine)).err();
+            EnclaveState::generate(Arc::new(FailingAttestor), Box::new(UnusedFaceEngine)).err();
 
         assert_eq!(error, Some(enclave_types::Error::AttestationFailed));
     }

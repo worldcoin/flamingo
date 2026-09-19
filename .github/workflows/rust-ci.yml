@@ -44,6 +44,14 @@ jobs:
         with:
           app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
           private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
+      - name: Public release boundary tests
+        run: |
+          python3 scripts/tests/test_public_release.py
+          python3 scripts/check-public-release.py
+      - name: Inference dependency boundary
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/public-metadata.json"
+          jq -e 'all(.packages[]; .name != "flamingo-verifier-worker" and .name != "face-engine" and (if ((.source // "") | contains("biometric-engines")) then .name == "biometric-engines-protocol" else true end))' "$RUNNER_TEMP/public-metadata.json"
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -60,16 +68,21 @@ jobs:
           app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
           private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - name: tests
-        run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-worker-process --verbose
+        run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-sandbox-client --verbose
+      - name: Carrier lifecycle tests
+        run: python3 scripts/tests/test_worker_carrier.py
+      - name: Bounded protocol client tests
+        run: cargo test --locked -p flamingo-verifier-sandbox-client --test client
       - name: Minijail process tests
         run: |
-          cargo test --locked -p flamingo-verifier-worker-process --all-features --no-run \
+          RUSTFLAGS="-C target-feature=+crt-static" cargo test --locked \
+            --target x86_64-unknown-linux-gnu -p flamingo-verifier-sandbox-client --all-features --no-run \
             --message-format=json > target/worker-test-artifacts.json
           test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "process") | .executable // empty' target/worker-test-artifacts.json)
           test -n "$test_binary"
           sudo timeout --kill-after=5s 60s "$test_binary"
 
-  # Evaluate every Nix output without spending the 90-minute EIF build.
+  # Model credentials are gone; the protocol still needs private Git until published.
   flake:
     name: Flake eval
     runs-on: ubuntu-latest
@@ -101,10 +114,27 @@ jobs:
           GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
-          for output in verifier-enclave verifier-oci verifier-eif; do
+          for output in verifier-enclave sandbox-bundle verifier-oci verifier-eif; do
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
-      # No image is built here. The DI enclave used to be the cheap build smoke test; with it
-      # gone the only remaining image is the verifier's ~90-minute build, so build errors that
-      # evaluation does not catch now surface first in release-enclaves.yml.
+      - name: Verify source filtering
+        env:
+          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          probe_root="$RUNNER_TEMP/public-source"
+          mkdir -p "$probe_root/models"
+          git archive HEAD | tar -x -C "$probe_root"
+          touch "$probe_root/worker.bundle" "$probe_root/models/weights.onnx"
+          touch "$probe_root/verifier/sandbox-client/biometric-engines-worker"
+          source=$(nix eval --raw --no-update-lock-file "path:$probe_root#packages.x86_64-linux.verifier-enclave.src")
+          test -f "$source/Cargo.toml"
+          test -f "$source/verifier/sandbox-client/worker.policy"
+          test ! -e "$source/worker.bundle"
+          test ! -e "$source/models/weights.onnx"
+          test ! -e "$source/verifier/sandbox-client/biometric-engines-worker"
+      # External inference removes the expensive engine/model build from this image.
+      - name: Build the public verifier image
+        env:
+          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.verifier-oci

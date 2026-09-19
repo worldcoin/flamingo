@@ -94,11 +94,11 @@ impl Attestor for FailsAfterSuccessesAttestor {
 pub struct UnusedFaceEngine;
 
 impl FaceComparator for UnusedFaceEngine {
-    fn deep_face(&self, _: &[u8], _: &[u8], _: &[u8]) -> Result<DeepFaceScores, FailureReason> {
+    fn deep_face(&mut self, _: &[u8], _: &[u8], _: &[u8]) -> Result<DeepFaceScores, FailureReason> {
         panic!("Face Engine was called unexpectedly")
     }
 
-    fn gray_badge(&self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
+    fn gray_badge(&mut self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
         panic!("Face Engine was called unexpectedly")
     }
 }
@@ -106,7 +106,7 @@ impl FaceComparator for UnusedFaceEngine {
 /// Builds state whose Face Engine must not be called.
 pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
     Arc::new(
-        EnclaveState::generate(attestor, Arc::new(UnusedFaceEngine))
+        EnclaveState::generate(attestor, Box::new(UnusedFaceEngine))
             .expect("boot state should generate"),
     )
 }

@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+# Private deployment image only: contains the worker and models. Never publish via release-enclaves.
+# Context: build-enclaves.sh output plus externally produced worker.bundle.
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023
+RUN dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq coreutils && dnf clean all
+COPY verifier-enclave.eif /home/enclave.eif
+# The uploader's Nix runtime closure lives in the carrier, outside the EIF.
+COPY nix/store/ /nix/store/
+COPY sandbox-bundle run-worker-enclave.sh worker.bundle worker-release.json /home/
+ENV ENCLAVE_CPU_COUNT=2 ENCLAVE_MEMORY_SIZE=4096 WORKER_READY_FILE=/run/flamingo/ready
+CMD ["/home/run-worker-enclave.sh"]

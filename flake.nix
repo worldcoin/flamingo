@@ -33,23 +33,13 @@
       enclaveBins = import ./nix/enclave-binaries.nix {
         inherit root pkgs crane;
       };
-      faceModels = import ./nix/face-models.nix {
-        inherit pkgs;
-      };
       enclaveImages = import ./nix/enclave-images.nix {
         inherit system pkgs nitro-util enclaveBins;
-        verifierModels = faceModels.package;
+        workerBootstrapConfig = ./config/worker-bootstrap.json;
       };
     in
     {
-      packages.${system} =
-        enclaveBins
-        // enclaveImages
-        // {
-          verifierModels = faceModels.package;
-        };
-
-      faceModels = faceModels.metadata;
+      packages.${system} = enclaveBins // enclaveImages;
 
       devShells = import ./nix/dev-shells.nix {
         inherit root nixpkgs rust-overlay;

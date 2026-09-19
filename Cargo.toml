@@ -8,10 +8,8 @@ members = [
     "verifier/enclave",
     "verifier/host",
     "verifier/protocol",
-    "verifier/worker-rpc",
-    "verifier/worker-protocol",
-    "verifier/worker-process",
-    "verifier/worker-artifact",
+    "verifier/sandbox-client",
+    "verifier/sandbox-bundle",
 ]
 resolver = "3"
 
@@ -25,6 +23,7 @@ repository = "https://github.com/worldcoin/flamingo"
 publish = false
 
 [workspace.dependencies]
+biometric-engines-protocol = { git = "https://github.com/worldcoin/biometric-engines", rev = "60de92b37c2e6dbcb4ad8f543d72fd6024506c96" }
 anyhow = "1.0"
 ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5" }
 ark-ff = "0.5"
@@ -40,20 +39,14 @@ flamingo-verifier-enclave-types = { path = "verifier/enclave-types" }
 flamingo-verifier-protocol = { version = "0.4.0", path = "verifier/protocol" }
 flamingo-verifier-sealed-types = { version = "0.4.0", path = "verifier/sealed-types" }
 eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
-face-engine = { git = "https://github.com/worldcoin/biometric-engines", rev = "face-engine-v2.16.0", default-features = false, features = ["tract"] }
+flamingo-verifier-sandbox-client = { path = "verifier/sandbox-client" }
+flamingo-verifier-sandbox-bundle = { path = "verifier/sandbox-bundle" }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-flamingo-verifier-worker-protocol = { path = "verifier/worker-protocol" }
-flamingo-verifier-worker-rpc = { path = "verifier/worker-rpc" }
-flamingo-verifier-worker-process = { path = "verifier/worker-process" }
-flamingo-verifier-worker-artifact = { path = "verifier/worker-artifact" }
+hex-literal = "1.1"
+http-body-util = "0.1"
 libc = "0.2"
 minijail = { git = "https://github.com/google/minijail", rev = "b0b5dc6997956cdc027295ade5e425c416f30d33" }
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
-tempfile = "3.27"
-vsock = "0.5.4"
-hex-literal = "1.1"
-http-body-util = "0.1"
-image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp"] }
 pontifex = { version = "2.0.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
 rand = "0.8"
@@ -63,6 +56,8 @@ serde_bytes = "0.11"
 serde_json = "1.0"
 sha2 = { version = "0.10", default-features = false }
 thiserror = "2"
+tempfile = "3.27"
+vsock = "0.5.4"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tower = { version = "0.5", features = ["util"] }
 telemetry-batteries = { version = "0.4.1", default-features = false }
