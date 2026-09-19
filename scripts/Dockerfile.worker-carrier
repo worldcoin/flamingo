@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# Private deployment image only: contains the worker and models. Never publish via release-enclaves.
 # Context: build-enclaves.sh output plus externally produced worker.bundle.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023
 RUN dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq coreutils && dnf clean all
