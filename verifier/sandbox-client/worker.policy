@@ -68,8 +68,9 @@ pause: 1
 # The inherited connected Unix stream (or its duplicates) is the only channel.
 poll: 1
 ppoll: 1
-# Rust UnixStream::set_nonblocking; no device-specific ioctls (including NSM).
-ioctl: arg1 == FIONBIO
+# Rust socket mode and upstream logger terminal probes on /dev/null stdio only.
+# x86_64 TCGETS=0x5401, TCGETS2=0x802c542a; device ioctls (including NSM) stay denied.
+ioctl: arg1 == FIONBIO || arg0 <= 2 && arg1 == 0x5401 || arg0 <= 2 && arg1 == 0x802c542a
 setsockopt: arg1 == SOL_SOCKET && arg2 == SO_RCVTIMEO || arg1 == SOL_SOCKET && arg2 == SO_SNDTIMEO
 getsockopt: arg1 == SOL_SOCKET && arg2 == SO_ERROR || arg1 == SOL_SOCKET && arg2 == SO_TYPE
 # Entrypoint validates the inherited Unix socket, including when the broker already closed it.

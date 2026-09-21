@@ -51,6 +51,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stat = unsafe { stat.assume_init() };
         assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFCHR);
         assert_eq!(stat.st_rdev, libc::makedev(1, 3), "stdio must be /dev/null");
+        for request in [0x5401, 0x802c542a] {
+            let mut terminal = [0_u8; 64];
+            // SAFETY: both read-only queries receive a buffer larger than termios/termios2.
+            assert_eq!(
+                unsafe { libc::ioctl(fd, request, terminal.as_mut_ptr()) },
+                -1
+            );
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENOTTY)
+            );
+        }
     }
     for fd in [4, 5, 6, 64] {
         assert_eq!(
@@ -132,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Returning scores makes the broker test fail if the syscall was allowed.
                 }
-                205..=219 => {
+                205..=219 | 223..=225 => {
                     // All calls must kill the whole process, even from a secondary thread.
                     unsafe {
                         match credential[0] {
@@ -206,6 +218,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             219 => {
                                 libc::syscall(libc::SYS_uname, 0);
+                            }
+                            223 => {
+                                libc::ioctl(3, 0x5401);
+                            }
+                            224 => {
+                                libc::ioctl(3, 0x802c542a);
+                            }
+                            225 => {
+                                libc::ioctl(1, 0x5402); // TCSETS remains forbidden on stdio.
                             }
                             _ => unreachable!(),
                         }
