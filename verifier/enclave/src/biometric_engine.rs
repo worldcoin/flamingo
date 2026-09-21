@@ -164,7 +164,7 @@ mod sandboxed {
                 .await?
                 .map_err(|error| match error {
                     WorkerError::Rpc(SandboxClientError::AnalysisFailed(failure)) => {
-                        BiometricError::from(failure.as_ref())
+                        BiometricError::from(&failure)
                     }
                     WorkerError::Rpc(SandboxClientError::InvalidImages) => {
                         BiometricError::Rejected(FailureReason::MalformedInputs)
