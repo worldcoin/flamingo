@@ -46,7 +46,7 @@ elif Path(sys.argv[0]).name == 'aws':
         sys.exit(1)
     shutil.copy(root/'artifact.tar.gz', args[-1])
     (root/'downloaded').touch()
-    with (root/'download.log').open('a') as log: log.write('1')
+    with (root/'download.log').open('a') as log: log.write('1\\n')
 else:
     if args[0] == 'manifest':
         # The carrier must extract the artifact and hand the real executable to the tool.
@@ -122,7 +122,7 @@ class CarrierTests(unittest.TestCase):
         until = time.monotonic()+6
         while time.monotonic()<until:
             log = self.root/'download.log'
-            if log.exists() and len(log.read_text()) >= count: return
+            if log.exists() and len(log.read_text().splitlines()) >= count: return
             if self.process.poll() is not None: self.fail('carrier exited unexpectedly')
             time.sleep(.02)
         self.fail(f'carrier did not download {count} times')

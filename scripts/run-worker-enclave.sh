@@ -15,11 +15,12 @@ set -euo pipefail
 : "${DRAIN_SECONDS:=35}"
 : "${POLL_SECONDS:=2}"
 : "${RETRY_SECONDS:=5}"
+: "${MAX_RETRY_SECONDS:=60}"
 
-for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$DRAIN_SECONDS" "$POLL_SECONDS" "$RETRY_SECONDS"; do
+for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$DRAIN_SECONDS" "$POLL_SECONDS" "$RETRY_SECONDS" "$MAX_RETRY_SECONDS"; do
     [[ "$number" =~ ^[0-9]+$ ]] || exit 2
 done
-(( BOOTSTRAP_TIMEOUT_SECONDS > 0 && POLL_SECONDS > 0 && RETRY_SECONDS > 0 )) || exit 2
+(( BOOTSTRAP_TIMEOUT_SECONDS > 0 && POLL_SECONDS > 0 && RETRY_SECONDS > 0 && MAX_RETRY_SECONDS > 0 )) || exit 2
 # The pinned artifact and its digest are required; a malformed pin must not start.
 [[ "$WORKER_ARTIFACT_URI" =~ ^s3://[^[:space:]]+\.tar\.gz$ ]] || { echo "unusable WORKER_ARTIFACT_URI: $WORKER_ARTIFACT_URI" >&2; exit 2; }
 [[ "$WORKER_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "unusable WORKER_ARTIFACT_SHA256: $WORKER_ARTIFACT_SHA256" >&2; exit 2; }
@@ -70,6 +71,7 @@ export EIF_PATH WORKER_TOOL ENCLAVE_CPU_COUNT ENCLAVE_MEMORY_SIZE
 export WORKER_ARTIFACT_URI WORKER_ARTIFACT_SHA256 WORKER_RELEASE_ID
 export PROVISIONING_IO_TIMEOUT_SECONDS
 attempt=0
+retry_delay="$RETRY_SECONDS"
 while true; do
     rm -f "$WORKER_READY_FILE"
     attempt=$((attempt + 1))
@@ -110,6 +112,8 @@ while true; do
         enclave_id=$(cat "$state/enclave-id")
         enclave_cid=$(jq -er .EnclaveCID "$state/launch.json")
         touch "$WORKER_READY_FILE"
+        # A ready attempt resets the backoff, so a later failure retries promptly.
+        retry_delay="$RETRY_SECONDS"
         echo "worker enclave ready: $enclave_id"
         while nitro-cli describe-enclaves | jq -e --arg id "$enclave_id" 'any(.[]; .EnclaveID == $id and .State == "RUNNING")' >/dev/null; do
             "$WORKER_TOOL" health "$enclave_cid" || break
@@ -118,8 +122,11 @@ while true; do
     else
         startup_pid=""
         echo "worker enclave bootstrap failed" >&2
+        # Double the delay after consecutive failures; the half guard keeps the
+        # arithmetic in range and the cap keeps recovery prompt.
+        retry_delay=$(( retry_delay <= MAX_RETRY_SECONDS / 2 ? retry_delay * 2 : MAX_RETRY_SECONDS ))
     fi
     cleanup
     rm -f "$state/enclave-id" "$state/launch.json"
-    sleep "$RETRY_SECONDS" & wait $! || true
+    sleep "$retry_delay" & wait $! || true
 done
