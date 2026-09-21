@@ -178,6 +178,7 @@ impl FlamingoVerifierClient {
         if sealed.len() > MAX_MATCH_BODY_BYTES {
             return Err(Error::MalformedResult);
         }
+
         let request = self
             .http
             .post(url)
@@ -210,6 +211,7 @@ impl FlamingoVerifierClient {
         {
             return Err(Error::StatementInvalid);
         }
+
         Ok(result)
     }
 
@@ -226,7 +228,7 @@ impl FlamingoVerifierClient {
     }
 
     /// Submit a typed `GrayBadge` request without credential fields.
-    /// Currently returns `UnsupportedOperation` until its token contract is agreed.
+    /// Supports vanilla and `LightGuard` captures and verifies a credential-free statement.
     /// # Errors
     /// Returns transport, attestation or contract errors.
     pub async fn gray_badge(
@@ -267,6 +269,7 @@ impl FlamingoVerifierClient {
         {
             return Err(Error::MalformedResult);
         }
+
         let ciphertext = bounded_response(&mut response).await?;
         let plaintext = opener
             .open_from_enclave(&ciphertext)
@@ -333,6 +336,7 @@ async fn bounded_response(response: &mut reqwest::Response) -> Result<Vec<u8>, E
     {
         return Err(Error::MalformedResult);
     }
+
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(Error::MalformedResponse)? {
         if bytes.len() + chunk.len() > MAX_MATCH_RESPONSE_BYTES {
@@ -340,6 +344,7 @@ async fn bounded_response(response: &mut reqwest::Response) -> Result<Vec<u8>, E
         }
         bytes.extend_from_slice(&chunk);
     }
+
     Ok(bytes)
 }
 
@@ -351,6 +356,7 @@ pub struct VerifiedMatch {
     /// Already-verified operation-specific claims.
     pub claims: MatchClaims,
 }
+
 /// Verified success or an encrypted unsigned rejection.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VerifiedMatchResult {
@@ -359,6 +365,7 @@ pub enum VerifiedMatchResult {
     /// No statement issued.
     Failed(flamingo_verifier_sealed_types::FailureReason),
 }
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};

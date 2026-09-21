@@ -24,6 +24,7 @@ pub enum ImageRole {
     /// RTMS image.
     RtmsChallenge,
 }
+
 /// Semantic comparison location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +36,7 @@ pub enum ComparisonRole {
     /// Live/challenge.
     SelfieChallenge,
 }
+
 /// All request-derived failures remain encrypted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,10 +53,6 @@ pub enum FailureReason {
     EmptyImage,
     /// Image or aggregate budget exceeded.
     InputTooLarge,
-    /// Recognized capture is not implemented by this backend.
-    UnsupportedCapture,
-    /// Recognized operation has no agreed match-token contract yet.
-    UnsupportedOperation,
     /// A named comparison did not meet policy.
     MatchBelowThreshold(ComparisonRole),
     /// Image analysis rejection with semantic location.

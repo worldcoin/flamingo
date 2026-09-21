@@ -16,7 +16,7 @@ DeepFace compares each pair of images: Orb photo and selfie, Orb photo and chall
 
 The enclave checks that the Orb photo matches the `thumbnail.png` hash in the supplied `hashes.json`. It does not verify the Orb's signature or prove that the credential came from an Orb. The downstream proof must bind this commitment to an issuer-signed credential.
 
-The BabyJubJub EdDSA statement contains hashes of the selfie, challenge image, and raw `hashes.json`, plus the Orb/selfie score. The threshold and other two scores are not part of the signed statement. See the [token format](../verifier/protocol/src/match_token.rs).
+Version-2 BabyJubJub EdDSA statements bind the operation, live capture and challenge image. DeepFace additionally commits to raw `hashes.json` and reports the Orb/live score; GrayBadge has no credential commitment and reports the live/challenge score. Both operations accept vanilla or LightGuard captures. LightGuard commitments cover both frames and the matching-frame selection. The threshold and DeepFace’s other two scores remain enclave policy checks. See the [token format](../verifier/protocol/src/match_token.rs).
 
 ## Repository layout
 
@@ -36,6 +36,6 @@ All crates share the root [Cargo workspace](../Cargo.toml) and lockfile.
 | [`sealed-types`](../verifier/sealed-types) | Plaintext CBOR requests and results carried inside encryption. |
 | [`protocol`](../verifier/protocol) | Signed match claims and token encoding. |
 
-The worker crates provide [message types](../verifier/worker-protocol), [RPC](../verifier/worker-rpc), [Minijail process isolation](../verifier/worker-process), and [signed runtime bundles](../verifier/worker-artifact). The current enclave still calls the face engine directly.
+The [sandbox client](../verifier/sandbox-client) launches the external biometric worker under Minijail and exchanges messages using `biometric-engines-protocol`. The [sandbox bundle](../verifier/sandbox-bundle) provisions the executable with size and digest integrity checks. The enclave owns PCP verification, threshold policy and signing. Worker access uses one mutex with a timeout.
 
-Nix uses the root workspace, lockfile, and pinned models to build the enclave. Shared dependency changes can affect its PCR measurements. The separate [DeepIdentifier migration](https://github.com/worldcoin/di-migration-tee) lives in its own repository.
+Nix uses the root workspace and lockfile to build the enclave. Public binaries, Docker images and EIFs exclude the biometric engine and models; the worker is provisioned at runtime. Shared dependency changes can affect its PCR measurements. The separate [DeepIdentifier migration](https://github.com/worldcoin/di-migration-tee) lives in its own repository.

@@ -15,15 +15,24 @@ deny = [
     { name = "openssl" },
     { name = "openssl-sys" },
     { name = "openssl-src" },
+    # Inference runs in the provisioned sandbox, never in a public broker artifact.
+    { name = "biometric-engines" },
+    { name = "biometric-engines-worker" },
+    { name = "flamingo-verifier-worker" },
+    { name = "face-engine" },
+    { name = "ort" },
+    { name = "ort-sys" },
+    { name = "onnxruntime" },
+    { name = "onnxruntime-sys" },
+    { name = "hf-hub" },
 ]
 
 [licenses]
 version = 2
 confidence-threshold = 1.0
 unused-allowed-license = "allow"
-# biometric-engines is a private first-party repository whose crates are not
-# published with SPDX metadata. Keep enforcing licenses for every other source.
-private = { ignore = true, ignore-sources = ["https://github.com/worldcoin/biometric-engines"] }
+# Workspace crates are not published; public dependencies still require approved licenses.
+private = { ignore = true }
 allow = [
     "Apache-2.0",
     # Reached via blake3, which taceo-eddsa-babyjubjub uses to expand signing keys.
@@ -37,6 +46,8 @@ allow = [
     "Unicode-3.0",
 ]
 exceptions = [
+    # Upstream protocol generation reaches foldhash through prost-build/petgraph.
+    { allow = ["Zlib"], name = "foldhash", version = "0.1.5" },
     # telemetry-batteries uses this public-domain instrumentation helper for HTTP spans.
     { allow = ["CC0-1.0"], name = "tracing-opentelemetry-instrumentation-sdk", version = "0.38.3" },
     # telemetry-batteries reaches option-ext through dirs; MPL's copyleft is file-scoped.
@@ -66,10 +77,8 @@ license-files = [{ path = "../../LICENSE", hash = 0x51549d2b }]
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# Only verifier/enclave reaches biometric-engines; the other two workspaces resolve no git
-# source at all, so this goes unmatched there. See the note at the top.
 unused-allowed-source = "allow"
+# Minijail is the only Git dependency; the protocol comes from crates.io.
 allow-git = [
     "https://github.com/google/minijail",
-    "https://github.com/worldcoin/biometric-engines",
 ]
