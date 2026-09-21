@@ -1,11 +1,19 @@
 # syntax=docker/dockerfile:1
-# Private deployment image only: contains the worker and models. Never publish via release-enclaves.
-# Context: build-enclaves.sh output plus externally produced worker.bundle.
+# Private deployment image only: contains the enclave EIF and the provisioning tooling.
+# Never publish via release-enclaves.
+# Launches a worker enclave EIF on Nitro-enabled nodes. Consumes an EIF, does not build
+# one — scripts/build-enclaves.sh does. An enclave cannot be scheduled directly, so an
+# ordinary container owns its lifecycle.
+# Context: build-enclaves.sh output. The worker artifact is fetched from S3 at container
+# start (WORKER_ARTIFACT_URI/SHA256/RELEASE_ID), so this image is identical across worker
+# releases and never bakes in the worker.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023
-RUN dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq coreutils && dnf clean all
+# awscli-2 is AL2023's AWS CLI v2 package; tar and gzip are not in the base image and
+# extract the fetched artifact.
+RUN dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel jq coreutils awscli-2 tar gzip && dnf clean all
 COPY verifier-enclave.eif /home/enclave.eif
 # The uploader's Nix runtime closure lives in the carrier, outside the EIF.
 COPY nix/store/ /nix/store/
-COPY sandbox-bundle run-worker-enclave.sh worker.bundle worker-release.json /home/
+COPY sandbox-bundle run-worker-enclave.sh /home/
 ENV ENCLAVE_CPU_COUNT=2 ENCLAVE_MEMORY_SIZE=4096 WORKER_READY_FILE=/run/flamingo/ready
 CMD ["/home/run-worker-enclave.sh"]

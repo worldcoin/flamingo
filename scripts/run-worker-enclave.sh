@@ -1,9 +1,12 @@
 #!/bin/bash
-# One owned enclave, with a watchdog spanning launch, upload and initialization.
+# One owned enclave, with a watchdog spanning artifact fetch, launch, upload and
+# initialization. The pinned worker artifact is fetched from S3 on every attempt.
 set -euo pipefail
 : "${EIF_PATH:=/home/enclave.eif}"
-: "${WORKER_BUNDLE:=/home/worker.bundle}"
 : "${WORKER_TOOL:=/home/sandbox-bundle}"
+: "${WORKER_ARTIFACT_URI:=}"
+: "${WORKER_ARTIFACT_SHA256:=}"
+: "${WORKER_RELEASE_ID:=}"
 : "${WORKER_READY_FILE:=/run/flamingo/ready}"
 : "${ENCLAVE_CPU_COUNT:=2}"
 : "${ENCLAVE_MEMORY_SIZE:=4096}"
@@ -17,6 +20,10 @@ for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$
     [[ "$number" =~ ^[0-9]+$ ]] || exit 2
 done
 (( BOOTSTRAP_TIMEOUT_SECONDS > 0 && POLL_SECONDS > 0 && RETRY_SECONDS > 0 )) || exit 2
+# The pinned artifact and its digest are required; a malformed pin must not start.
+[[ "$WORKER_ARTIFACT_URI" =~ ^s3://[^[:space:]]+\.tar\.gz$ ]] || exit 2
+[[ "$WORKER_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
+[[ "$WORKER_RELEASE_ID" =~ ^biometric-engines-worker-v[0-9A-Za-z][0-9A-Za-z.-]*$ ]] || exit 2
 mkdir -p "$(dirname "$WORKER_READY_FILE")"
 state=$(mktemp -d)
 enclave_id=""
@@ -59,7 +66,8 @@ shutdown() {
 trap shutdown TERM INT
 trap 'cleanup; rm -rf "$state"' EXIT
 
-export EIF_PATH WORKER_BUNDLE WORKER_TOOL ENCLAVE_CPU_COUNT ENCLAVE_MEMORY_SIZE
+export EIF_PATH WORKER_TOOL ENCLAVE_CPU_COUNT ENCLAVE_MEMORY_SIZE
+export WORKER_ARTIFACT_URI WORKER_ARTIFACT_SHA256 WORKER_RELEASE_ID
 export PROVISIONING_IO_TIMEOUT_SECONDS
 attempt=0
 while true; do
@@ -76,7 +84,19 @@ while true; do
         nitro-cli run-enclave "${args[@]}" > "$1/launch.json"
         cid=$(jq -er .EnclaveCID "$1/launch.json")
         jq -er .EnclaveID "$1/launch.json" > "$1/enclave-id"
-        "$WORKER_TOOL" send "$cid" "$WORKER_BUNDLE" "$PROVISIONING_IO_TIMEOUT_SECONDS"
+        # Fetch the pinned artifact into this attempt state, so a retry re-downloads it.
+        work="$1/artifact"
+        rm -rf "$work"
+        mkdir -p "$work"
+        aws s3 cp "$WORKER_ARTIFACT_URI" "$work/worker.tar.gz"
+        echo "$WORKER_ARTIFACT_SHA256  $work/worker.tar.gz" | sha256sum -c -
+        tar -xzf "$work/worker.tar.gz" -C "$work"
+        shopt -s nullglob
+        executables=("$work"/*/biometric-engines-worker)
+        [[ ${#executables[@]} -eq 1 ]] || { echo "artifact has no single worker executable" >&2; exit 1; }
+        "$WORKER_TOOL" manifest "$WORKER_RELEASE_ID" "${executables[0]}" > "$work/manifest.json"
+        "$WORKER_TOOL" pack "$work/manifest.json" "${executables[0]}" "$work/worker.bundle"
+        "$WORKER_TOOL" send "$cid" "$work/worker.bundle" "$PROVISIONING_IO_TIMEOUT_SECONDS"
         # Provisioning ACK proves initialized worker/key setup, not a bound serving socket.
         until "$WORKER_TOOL" health "$cid"; do sleep 0.2; done
     ' _ "$state" &

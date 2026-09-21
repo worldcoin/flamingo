@@ -1,24 +1,32 @@
 """Carrier lifecycle checks with a foreign enclave present and the real supervisor."""
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
 import subprocess
+import tarfile
 import tempfile
 import time
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "run-worker-enclave.sh"
+RELEASE_ID = "biometric-engines-worker-v0.1.0"
+ARTIFACT_URI = (
+    "s3://biometric-engines-worker-dev-eu-central-1/worker/v0.1.0/"
+    f"{RELEASE_ID}-x86_64-unknown-linux-gnu.tar.gz"
+)
 MOCK = '''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, shutil, sys, time
 from pathlib import Path
 root = Path(os.environ['CARRIER_TEST_ROOT'])
 args = sys.argv[1:]
 if Path(sys.argv[0]).name == 'nitro-cli':
     if args[0] == 'run-enclave':
-        name = args[args.index('--enclave-name')+1]
-        item = dict(EnclaveID='owned', EnclaveCID=99, EnclaveName=name, State='RUNNING')
+        with (root/'run-enclave.log').open('a') as log: log.write('1\\n')
+        enclave_name = args[args.index('--enclave-name')+1]
+        item = dict(EnclaveID='owned', EnclaveCID=99, EnclaveName=enclave_name, State='RUNNING')
         (root/'owned.json').write_text(json.dumps(item))
         print(json.dumps(item))
     elif args[0] == 'describe-enclaves':
@@ -30,27 +38,61 @@ if Path(sys.argv[0]).name == 'nitro-cli':
         (root/'terminated').touch()
         if not (root/'owned.json').exists(): sys.exit(1)
         (root/'owned.json').unlink(missing_ok=True)
+elif Path(sys.argv[0]).name == 'aws':
+    assert args[:2] == ['s3', 'cp'], args
+    if (root/'download-fail').exists():
+        (root/'download-fail').unlink()
+        (root/'download-failed').touch()
+        sys.exit(1)
+    shutil.copy(root/'artifact.tar.gz', args[-1])
+    (root/'downloaded').touch()
 else:
-    if args[0] == 'send' and (root/'hang').exists():
-        (root/'uploader-pid').write_text(str(os.getpid()))
-        time.sleep(60)
-    if args[0] == 'health' and (root/'health-fail').exists(): sys.exit(1)
+    if args[0] == 'manifest':
+        # The carrier must extract the artifact and hand the real executable to the tool.
+        assert args[1] == os.environ['WORKER_RELEASE_ID'], args
+        assert Path(args[2]).name == 'biometric-engines-worker' and Path(args[2]).is_file(), args
+        print('{}')
+    elif args[0] == 'pack':
+        assert Path(args[1]).is_file() and Path(args[2]).is_file(), args
+        Path(args[3]).write_bytes(b'bundle')
+        (root/'packed').touch()
+    elif args[0] == 'send':
+        assert Path(args[2]).is_file(), args
+        (root/'sent').touch()
+        if (root/'hang').exists():
+            (root/'uploader-pid').write_text(str(os.getpid()))
+            time.sleep(60)
+    elif args[0] == 'health' and (root/'health-fail').exists():
+        sys.exit(1)
 '''
 
 class CarrierTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        for tool in ('nitro-cli', 'sandbox-bundle'):
+        for tool in ('nitro-cli', 'sandbox-bundle', 'aws'):
             path = self.root/tool
             path.write_text(MOCK)
             path.chmod(0o755)
+        self.artifact_sha256 = self.make_artifact()
         env = dict(os.environ, PATH=str(self.root)+os.pathsep+os.environ['PATH'],
                    CARRIER_TEST_ROOT=str(self.root), WORKER_TOOL=str(self.root/'sandbox-bundle'),
-                   WORKER_READY_FILE=str(self.root/'ready'), BOOTSTRAP_TIMEOUT_SECONDS='1',
-                   DRAIN_SECONDS='0', POLL_SECONDS='1', RETRY_SECONDS='1')
+                   WORKER_READY_FILE=str(self.root/'ready'), BOOTSTRAP_TIMEOUT_SECONDS='3',
+                   DRAIN_SECONDS='0', POLL_SECONDS='1', RETRY_SECONDS='1',
+                   WORKER_ARTIFACT_URI=ARTIFACT_URI, WORKER_ARTIFACT_SHA256=self.artifact_sha256,
+                   WORKER_RELEASE_ID=RELEASE_ID)
         self.env = env
         self.process = None
+
+    def make_artifact(self):
+        """A tarball shaped like the published worker artifact; returns its sha256."""
+        top = f"{RELEASE_ID}-x86_64-unknown-linux-gnu"
+        source = self.root/'fixture'/top
+        source.mkdir(parents=True)
+        (source/'biometric-engines-worker').write_bytes(b'\\x7fELF' + b'worker'*64)
+        with tarfile.open(self.root/'artifact.tar.gz', 'w:gz') as archive:
+            archive.add(source, arcname=top)
+        return hashlib.sha256((self.root/'artifact.tar.gz').read_bytes()).hexdigest()
 
     def tearDown(self):
         if self.process and self.process.poll() is None:
@@ -61,8 +103,9 @@ class CarrierTests(unittest.TestCase):
                 self.process.wait()
         self.temp.cleanup()
 
-    def start(self):
-        self.process = subprocess.Popen(['bash', str(SCRIPT)], env=self.env,
+    def start(self, timeout=None):
+        env = self.env if timeout is None else dict(self.env, BOOTSTRAP_TIMEOUT_SECONDS=timeout)
+        self.process = subprocess.Popen(['bash', str(SCRIPT)], env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
     def wait_for(self, name):
@@ -90,15 +133,35 @@ class CarrierTests(unittest.TestCase):
         self.assertIsNone(self.process.poll())
 
     def test_watchdog_kills_uploader_and_cleans_owned_enclave(self):
-        (self.root/'hang').touch(); self.start(); self.wait_for('uploader-pid')
+        (self.root/'hang').touch(); self.start(timeout='1'); self.wait_for('uploader-pid')
         pid = int((self.root/'uploader-pid').read_text())
         self.wait_for('terminated')
         self.assertFalse((self.root/'ready').exists())
         with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
 
     def test_provisioning_ack_does_not_imply_serving_readiness(self):
-        (self.root/'health-fail').touch(); self.start(); self.wait_for('terminated')
+        (self.root/'health-fail').touch(); self.start(timeout='1'); self.wait_for('terminated')
         self.assertFalse((self.root/'ready').exists())
+
+    def test_artifact_is_downloaded_verified_packed_then_sent(self):
+        self.start(); self.wait_for('ready')
+        for stage in ('downloaded', 'packed', 'sent'):
+            self.assertTrue((self.root/stage).exists(), f'{stage} did not run')
+
+    def test_digest_mismatch_fails_attempt_without_sending(self):
+        self.env['WORKER_ARTIFACT_SHA256'] = '0'*64
+        self.start(); self.wait_for('downloaded'); self.wait_for('terminated')
+        self.assertFalse((self.root/'packed').exists())
+        self.assertFalse((self.root/'sent').exists())
+        self.assertFalse((self.root/'ready').exists())
+
+    def test_failed_download_is_retried_with_fresh_enclave(self):
+        (self.root/'download-fail').touch()
+        self.start(); self.wait_for('ready')
+        self.assertTrue((self.root/'download-failed').exists())
+        self.assertTrue((self.root/'terminated').exists())
+        launches = (self.root/'run-enclave.log').read_text().splitlines()
+        self.assertGreaterEqual(len(launches), 2, 'retry reused the enclave')
 
 if __name__ == '__main__':
     if not shutil.which('timeout') or not shutil.which('jq'):
