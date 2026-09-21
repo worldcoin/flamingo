@@ -1,9 +1,11 @@
 #!/bin/bash
-# One owned enclave, with a watchdog spanning launch, upload and initialization.
+# One owned enclave; the watchdog spans artifact fetch, launch, upload and initialization.
 set -euo pipefail
 : "${EIF_PATH:=/home/enclave.eif}"
-: "${WORKER_BUNDLE:=/home/worker.bundle}"
 : "${WORKER_TOOL:=/home/sandbox-bundle}"
+: "${WORKER_ARTIFACT_URI:=}"
+: "${WORKER_ARTIFACT_SHA256:=}"
+: "${WORKER_RELEASE_ID:=}"
 : "${WORKER_READY_FILE:=/run/flamingo/ready}"
 : "${ENCLAVE_CPU_COUNT:=2}"
 : "${ENCLAVE_MEMORY_SIZE:=4096}"
@@ -12,11 +14,16 @@ set -euo pipefail
 : "${DRAIN_SECONDS:=35}"
 : "${POLL_SECONDS:=2}"
 : "${RETRY_SECONDS:=5}"
+: "${MAX_RETRY_SECONDS:=60}"
 
-for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$DRAIN_SECONDS" "$POLL_SECONDS" "$RETRY_SECONDS"; do
+for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$DRAIN_SECONDS" "$POLL_SECONDS" "$RETRY_SECONDS" "$MAX_RETRY_SECONDS"; do
     [[ "$number" =~ ^[0-9]+$ ]] || exit 2
 done
-(( BOOTSTRAP_TIMEOUT_SECONDS > 0 && POLL_SECONDS > 0 && RETRY_SECONDS > 0 )) || exit 2
+(( BOOTSTRAP_TIMEOUT_SECONDS > 0 && POLL_SECONDS > 0 && RETRY_SECONDS > 0 && MAX_RETRY_SECONDS > 0 )) || exit 2
+# The pinned artifact and its digest are required; a malformed pin must not start.
+[[ "$WORKER_ARTIFACT_URI" =~ ^s3://[^[:space:]]+\.tar\.gz$ ]] || { echo "unusable WORKER_ARTIFACT_URI: $WORKER_ARTIFACT_URI" >&2; exit 2; }
+[[ "$WORKER_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "unusable WORKER_ARTIFACT_SHA256: $WORKER_ARTIFACT_SHA256" >&2; exit 2; }
+[[ "$WORKER_RELEASE_ID" =~ ^biometric-engines-worker-v[0-9A-Za-z][0-9A-Za-z.-]*$ ]] || { echo "unusable WORKER_RELEASE_ID: $WORKER_RELEASE_ID" >&2; exit 2; }
 mkdir -p "$(dirname "$WORKER_READY_FILE")"
 state=$(mktemp -d)
 enclave_id=""
@@ -59,9 +66,11 @@ shutdown() {
 trap shutdown TERM INT
 trap 'cleanup; rm -rf "$state"' EXIT
 
-export EIF_PATH WORKER_BUNDLE WORKER_TOOL ENCLAVE_CPU_COUNT ENCLAVE_MEMORY_SIZE
+export EIF_PATH WORKER_TOOL ENCLAVE_CPU_COUNT ENCLAVE_MEMORY_SIZE
+export WORKER_ARTIFACT_URI WORKER_ARTIFACT_SHA256 WORKER_RELEASE_ID
 export PROVISIONING_IO_TIMEOUT_SECONDS
 attempt=0
+retry_delay="$RETRY_SECONDS"
 while true; do
     rm -f "$WORKER_READY_FILE"
     attempt=$((attempt + 1))
@@ -71,12 +80,25 @@ while true; do
     # shellcheck disable=SC2016 # Expanded inside the supervised child.
     timeout --signal=TERM --kill-after=5s "${BOOTSTRAP_TIMEOUT_SECONDS}s" bash -c '
         set -euo pipefail
+        # Fetch and verify before launching, so a download or digest failure never starts an enclave.
+        work="$1/artifact"
+        rm -rf "$work"
+        mkdir -p "$work"
+        aws s3 cp --cli-connect-timeout 10 --cli-read-timeout 60 "$WORKER_ARTIFACT_URI" "$work/worker.tar.gz"
+        echo "$WORKER_ARTIFACT_SHA256  $work/worker.tar.gz" | sha256sum -c -
+        tar -xzf "$work/worker.tar.gz" -C "$work"
+        shopt -s nullglob
+        executables=("$work"/*/biometric-engines-worker)
+        [[ ${#executables[@]} -eq 1 ]] || { echo "artifact has no single worker executable" >&2; exit 1; }
+        "$WORKER_TOOL" manifest "$WORKER_RELEASE_ID" "${executables[0]}" > "$work/manifest.json"
+        "$WORKER_TOOL" pack "$work/manifest.json" "${executables[0]}" "$work/worker.bundle"
         args=(--eif-path "$EIF_PATH" --cpu-count "$ENCLAVE_CPU_COUNT" --memory "$ENCLAVE_MEMORY_SIZE" --enclave-name "$enclave_name")
         if [[ -n "${ENCLAVE_CID:-}" ]]; then args+=(--enclave-cid "$ENCLAVE_CID"); fi
         nitro-cli run-enclave "${args[@]}" > "$1/launch.json"
         cid=$(jq -er .EnclaveCID "$1/launch.json")
         jq -er .EnclaveID "$1/launch.json" > "$1/enclave-id"
-        "$WORKER_TOOL" send "$cid" "$WORKER_BUNDLE" "$PROVISIONING_IO_TIMEOUT_SECONDS"
+        "$WORKER_TOOL" send "$cid" "$work/worker.bundle" "$PROVISIONING_IO_TIMEOUT_SECONDS"
+        rm -rf "$work"
         # Provisioning ACK proves initialized worker/key setup, not a bound serving socket.
         until "$WORKER_TOOL" health "$cid"; do sleep 0.2; done
     ' _ "$state" &
@@ -86,6 +108,8 @@ while true; do
         enclave_id=$(cat "$state/enclave-id")
         enclave_cid=$(jq -er .EnclaveCID "$state/launch.json")
         touch "$WORKER_READY_FILE"
+        # A ready attempt resets the backoff so later failures retry promptly.
+        retry_delay="$RETRY_SECONDS"
         echo "worker enclave ready: $enclave_id"
         while nitro-cli describe-enclaves | jq -e --arg id "$enclave_id" 'any(.[]; .EnclaveID == $id and .State == "RUNNING")' >/dev/null; do
             "$WORKER_TOOL" health "$enclave_cid" || break
@@ -94,8 +118,10 @@ while true; do
     else
         startup_pid=""
         echo "worker enclave bootstrap failed" >&2
+        # The half guard keeps the doubled backoff from overshooting the cap.
+        retry_delay=$(( retry_delay <= MAX_RETRY_SECONDS / 2 ? retry_delay * 2 : MAX_RETRY_SECONDS ))
     fi
     cleanup
     rm -f "$state/enclave-id" "$state/launch.json"
-    sleep "$RETRY_SECONDS" & wait $! || true
+    sleep "$retry_delay" & wait $! || true
 done

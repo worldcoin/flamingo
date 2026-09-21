@@ -35,6 +35,18 @@ skopeo inspect \
 
 Install `skopeo` separately. The [Docker workflow](../.github/workflows/build-docker.yml) builds host images; Nix builds enclave images. See [releases](release.md) for publishing and measurement changes.
 
+## Worker carrier
+
+The private worker carrier (`scripts/Dockerfile.worker-carrier`) runs one enclave per pod and provisions the external worker into it. It bakes in the EIF and the `sandbox-bundle` tool, but not the worker: at container start [`run-worker-enclave.sh`](../scripts/run-worker-enclave.sh) downloads the pinned tarball from S3, checks it against `WORKER_ARTIFACT_SHA256`, and packs it before sending it over vsock. The image is therefore identical across worker releases; only the EIF changes with an enclave release.
+
+| Variable | Purpose |
+| --- | --- |
+| `WORKER_ARTIFACT_URI` | Tarball to fetch, e.g. `s3://biometric-engines-worker-dev-eu-central-1/worker/v0.1.0/biometric-engines-worker-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`. |
+| `WORKER_ARTIFACT_SHA256` | Pinned lowercase-hex SHA-256 of that tarball. |
+| `WORKER_RELEASE_ID` | `biometric-engines-worker-vX.Y.Z` tag, used as the bundle's `release_id`. |
+
+Artifacts live in `biometric-engines-worker-<env>-eu-central-1` under `worker/v<version>/`, alongside `SHA256SUMS`. The pod's identity role grants read, so no credentials are baked in. A missing or malformed pin stops the carrier instead of starting an unverified worker. Each attempt re-downloads the tarball, which holds one top-level directory containing the `biometric-engines-worker` executable.
+
 ## Prepare a Nitro host
 
 Use an Amazon Linux 2023 EC2 instance that supports Nitro Enclaves, with enclaves enabled at launch. Restrict inbound SSH to your IP. Install the runtime:
