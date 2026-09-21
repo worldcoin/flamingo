@@ -22,10 +22,12 @@ class PublicReleaseTests(unittest.TestCase):
         lockfile.write_text(f'[[package]]\nname = "{name}"\nsource = "{source}"\n')
         release.check_dependencies(lockfile)
 
-    def test_protocol_is_allowed_before_and_after_publication(self):
-        self.check_package("biometric-engines-protocol", "git+https://github.com/worldcoin/biometric-engines")
-        self.check_package("biometric-engines-protocol")
+    def test_public_protocol_is_allowed_and_private_git_is_rejected(self):
+        self.check_package("takis-biometric-engine-protocol")
         self.check_package("flamingo-verifier-sandbox-client")
+        for source in ("", "git+https://github.com/worldcoin/biometric-engines"):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                self.check_package("takis-biometric-engine-protocol", source)
 
     def test_engine_and_model_dependencies_are_rejected(self):
         for name in ("biometric-engines-worker", "face-engine", "flamingo-verifier-worker", "ort", "ort-sys", "hf-hub", "onnxruntime-sys"):

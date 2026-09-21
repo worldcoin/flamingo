@@ -11,7 +11,9 @@ def check_dependencies(lockfile):
     for package in packages:
         name = package["name"]
         source = package.get("source", "").lower()
-        if name == "biometric-engines-protocol":
+        if name == "takis-biometric-engine-protocol":
+            if source != "registry+https://github.com/rust-lang/crates.io-index":
+                raise ValueError("protocol must come from its public crates.io release")
             continue
         if (
             "biometric-engines" in source

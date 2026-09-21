@@ -90,24 +90,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.sha }}
       - name: Reject private inference dependencies
         run: python3 scripts/check-public-release.py
-      # Only the protocol crate needs private Git until Tobi publishes it.
-      - id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
-          owner: worldcoin
-          repositories: biometric-engines
-      - env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          # shellcheck disable=SC2016  # Expand the token only when Git invokes the helper.
-          git config --global credential."https://github.com".helper \
-            '!f() { echo username=x-access-token; echo "password=${GH_APP_TOKEN}"; }; f'
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Validate measured worker policy and build enclave
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           scripts/build-enclaves.sh --workload "$WORKLOAD" target/enclave-build
           mkdir -p target/release
@@ -115,8 +99,6 @@ jobs:
           install -m 0644 "target/enclave-build/$WORKLOAD-enclave.eif" "target/release/"
           install -m 0644 "target/enclave-build/$WORKLOAD-pcr.json" "target/release/"
       - name: Package OCI layout
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           oci_store=$(nix build --no-link --no-update-lock-file --print-out-paths ".#${WORKLOAD}-oci")
           tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \

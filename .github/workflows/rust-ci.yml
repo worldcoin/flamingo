@@ -41,9 +41,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup-rust
-        with:
-          app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - name: Public release boundary tests
         run: |
           python3 scripts/tests/test_public_release.py
@@ -51,7 +48,7 @@ jobs:
       - name: Inference dependency boundary
         run: |
           cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/public-metadata.json"
-          jq -e 'all(.packages[]; .name != "flamingo-verifier-worker" and .name != "face-engine" and (if ((.source // "") | contains("biometric-engines")) then .name == "biometric-engines-protocol" else true end))' "$RUNNER_TEMP/public-metadata.json"
+          jq -e 'all(.packages[]; .name != "flamingo-verifier-worker" and .name != "face-engine" and (((.source // "") | contains("biometric-engines")) | not))' "$RUNNER_TEMP/public-metadata.json"
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -64,9 +61,6 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup-rust
-        with:
-          app-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
       - name: tests
         run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-sandbox-client --verbose
       - name: Carrier lifecycle tests
@@ -82,36 +76,17 @@ jobs:
           test -n "$test_binary"
           sudo timeout --kill-after=5s 60s "$test_binary"
 
-  # Model credentials are gone; the protocol still needs private Git until published.
   flake:
     name: Flake eval
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
-          owner: worldcoin
-          repositories: biometric-engines
-      # crane fetches the private dependency with `builtins.fetchGit`, which uses the host's git
-      # credentials. A helper rather than `insteadOf`, whose behaviour depends on Nix's git backend.
-      - name: Authorize git for biometric-engines
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          # shellcheck disable=SC2016  # the helper must expand GH_APP_TOKEN when git runs it.
-          git config --global credential."https://github.com".helper \
-            '!f() { echo username=x-access-token; echo "password=${GH_APP_TOKEN}"; }; f'
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       # --no-update-lock-file: otherwise a new flake.nix input resolves against upstream right
       # now and the lock is quietly rewritten.
       - name: Evaluate the enclave image and converter derivations
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           set -euo pipefail
           for output in verifier-enclave sandbox-bundle verifier-oci verifier-eif; do
@@ -119,8 +94,6 @@ jobs:
             echo "$output -> $drv"
           done
       - name: Verify source filtering
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           probe_root="$RUNNER_TEMP/public-source"
           mkdir -p "$probe_root/models"
@@ -135,6 +108,4 @@ jobs:
           test ! -e "$source/verifier/sandbox-client/biometric-engines-worker"
       # External inference removes the expensive engine/model build from this image.
       - name: Build the public verifier image
-        env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
         run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.verifier-oci

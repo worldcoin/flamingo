@@ -12,22 +12,8 @@ let
   rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml");
   craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-  protocol = (builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"))).workspace.dependencies.biometric-engines-protocol;
   publicVendorDir = craneLib.vendorCargoDeps {
     cargoLock = root + "/Cargo.lock";
-    overrideVendorGitCheckout = packages: drv:
-      if lib.any (package: package.name == "biometric-engines-protocol") packages then
-        drv.overrideAttrs (_: {
-          # Fetch the exact pin even after its prototype branch has been rebased/deleted.
-          # A shallow fetch requests the revision directly instead of searching live refs.
-          src = builtins.fetchGit {
-            url = protocol.git;
-            rev = protocol.rev;
-            shallow = true;
-            submodules = true;
-          };
-        })
-      else drv;
   };
 
   # An external executable or model dropped into the checkout must never become
