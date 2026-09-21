@@ -1,11 +1,22 @@
 //! Conversion from public worker failures to sealed API failures.
+use crate::biometric_engine::BiometricError;
 use biometric_engines_protocol::face::{self, FailureCode, failure::Location};
 use flamingo_verifier_sealed_types::{
     ComparisonRole, FailureReason, ImageFailureReason, ImageRole,
 };
+
+impl From<&face::Failure> for BiometricError {
+    fn from(failure: &face::Failure) -> Self {
+        match worker_failure(failure) {
+            FailureReason::Internal => Self::Internal,
+            reason => Self::Rejected(reason),
+        }
+    }
+}
+
 /// Preserve semantic locations while keeping backend infrastructure failures distinct.
 #[must_use]
-pub fn worker_failure(failure: &face::Failure) -> FailureReason {
+fn worker_failure(failure: &face::Failure) -> FailureReason {
     let Ok(code) = FailureCode::try_from(failure.code) else {
         return FailureReason::Internal;
     };
@@ -14,6 +25,7 @@ pub fn worker_failure(failure: &face::Failure) -> FailureReason {
     {
         return FailureReason::Internal;
     }
+
     let reason = match code {
         FailureCode::Unspecified | FailureCode::Internal => return FailureReason::Internal,
         FailureCode::InvalidRequest => {
@@ -38,9 +50,11 @@ pub fn worker_failure(failure: &face::Failure) -> FailureReason {
                     Ok(face::ComparisonRole::CredentialLive) => {
                         FailureReason::MatchingFailed(ComparisonRole::OrbSelfie)
                     }
+
                     Ok(face::ComparisonRole::CredentialChallenge) => {
                         FailureReason::MatchingFailed(ComparisonRole::OrbChallenge)
                     }
+
                     Ok(face::ComparisonRole::LiveChallenge) => {
                         FailureReason::MatchingFailed(ComparisonRole::SelfieChallenge)
                     }
@@ -61,6 +75,7 @@ pub fn worker_failure(failure: &face::Failure) -> FailureReason {
             ) {
                 return FailureReason::Internal;
             }
+
             let Ok(reason) = face::ValidationReason::try_from(validation.reason) else {
                 return FailureReason::Internal;
             };

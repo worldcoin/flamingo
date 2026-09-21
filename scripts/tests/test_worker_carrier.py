@@ -48,7 +48,7 @@ class CarrierTests(unittest.TestCase):
         env = dict(os.environ, PATH=str(self.root)+os.pathsep+os.environ['PATH'],
                    CARRIER_TEST_ROOT=str(self.root), WORKER_TOOL=str(self.root/'sandbox-bundle'),
                    WORKER_READY_FILE=str(self.root/'ready'), BOOTSTRAP_TIMEOUT_SECONDS='1',
-                   DRAIN_SECONDS='0', POLL_SECONDS='1', RETRY_SECONDS='1')
+                   POLL_SECONDS='1', RETRY_SECONDS='1')
         self.env = env
         self.process = None
 

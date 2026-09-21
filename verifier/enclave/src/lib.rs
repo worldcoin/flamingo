@@ -15,10 +15,8 @@ pub mod biometric_engine;
 /// Single-threaded runtime provisioning with integrity checks.
 #[cfg(target_os = "linux")]
 pub mod bootstrap;
-mod execution;
 /// Boot-scoped key material.
 pub mod keys;
-mod operations;
 /// PCP binding verification (transport-free).
 pub mod pcp;
 /// Nitro hardware RNG verification.
@@ -34,3 +32,19 @@ mod test_support;
 
 #[cfg(any(target_os = "linux", test))]
 mod error;
+
+/// Runs synchronous enclave work without blocking the async runtime.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, flamingo_verifier_enclave_types::Error> {
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| {
+            tracing::error!("blocking enclave task panicked");
+            std::process::exit(1);
+        })
+    })
+    .await
+    .map_err(|_| flamingo_verifier_enclave_types::Error::Internal)
+}

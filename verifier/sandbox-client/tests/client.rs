@@ -19,6 +19,7 @@ fn config() -> SandboxClientConfig {
         max_image_bytes: 100,
     }
 }
+
 fn request() -> Operation {
     Operation::DeepFace(DeepFaceRequest {
         credential: Some(FaceImage {
@@ -32,6 +33,7 @@ fn request() -> Operation {
         }),
     })
 }
+
 fn scores() -> Outcome {
     Outcome::DeepFace(DeepFaceResult {
         similarity_credential_live: Some(0.8),
@@ -40,6 +42,7 @@ fn scores() -> Outcome {
         debug_report: None,
     })
 }
+
 fn ready(stream: &mut UnixStream) {
     framing::write_frame(stream, &protobuf::encode_ready()).unwrap();
 }
@@ -58,6 +61,7 @@ fn startup_requires_framed_compatible_readiness() {
         drop(server);
         assert!(SandboxClient::new(client, config()).is_err());
     }
+
     let (client, _server) = UnixStream::pair().unwrap();
     assert!(matches!(
         SandboxClient::new(client, config()),

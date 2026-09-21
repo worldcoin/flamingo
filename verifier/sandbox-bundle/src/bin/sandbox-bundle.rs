@@ -22,11 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "worker must be a regular executable, not a directory or symlink".into(),
                 );
             }
+
             let mut file = File::open(executable)?;
             let size = file.metadata()?.len();
             if size == 0 || size > MAX_BUNDLE_BYTES {
                 return Err("executable size exceeds format limits".into());
             }
+
             let mut hash = Sha384::new();
             let mut buffer = [0; 64 * 1024];
             let mut remaining = size;
@@ -36,9 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hash.update(&buffer[..length]);
                 remaining -= length as u64;
             }
+
             if file.read(&mut [0])? != 0 {
                 return Err("executable changed during hashing".into());
             }
+
             let manifest = Manifest {
                 manifest_version: 3,
                 release_id: args[2].clone(),
@@ -79,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
+
     Ok(())
 }
 
@@ -91,6 +96,7 @@ fn send(cid: &str, bundle: &str, io_timeout: &str) -> Result<(), Box<dyn std::er
     if cid <= 2 || !(1..=900).contains(&io_timeout) {
         return Err("invalid enclave CID or provisioning I/O timeout".into());
     }
+
     let mut bundle = File::open(bundle)?;
     let metadata = bundle.metadata()?;
     if !metadata.is_file() || metadata.len() > MAX_BUNDLE_BYTES + MAX_MANIFEST_BYTES as u64 + 4 {
@@ -123,6 +129,7 @@ fn send(cid: &str, bundle: &str, io_timeout: &str) -> Result<(), Box<dyn std::er
     if acknowledgement != [0] {
         return Err("enclave refused worker startup".into());
     }
+
     if stream
         .read(&mut [0])
         .map_err(|error| format!("worker acknowledgement close failed: {error}"))?
@@ -130,6 +137,7 @@ fn send(cid: &str, bundle: &str, io_timeout: &str) -> Result<(), Box<dyn std::er
     {
         return Err("invalid trailing startup acknowledgement".into());
     }
+
     Ok(())
 }
 

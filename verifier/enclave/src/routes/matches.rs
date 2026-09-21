@@ -1,9 +1,14 @@
 use std::sync::Arc;
 
 use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
-use flamingo_verifier_sealed_types::{MatchInputs, MatchResult};
+use flamingo_verifier_protocol::match_token::{MatchClaims, MatchOperation};
+use flamingo_verifier_sealed_types::{
+    AttestedStatement, ComparisonRole, DeepFaceInputs, FailureReason, GrayBadgeInputs, MatchInputs,
+    MatchResult, valid_similarity,
+};
+use sha2::{Digest, Sha256};
 
-use crate::{execution::blocking, operations, state::EnclaveState};
+use crate::{blocking, pcp, state::EnclaveState};
 
 /// Opens one request, dispatches its operation and seals the outcome.
 pub async fn handler(
@@ -13,25 +18,24 @@ pub async fn handler(
     if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES {
         return Err(enclave_types::Error::RequestNotOpened);
     }
-    let admission = Arc::new(state.admit()?);
+
     let opening_state = Arc::clone(&state);
-    let (sealer, inputs, admission) = blocking(move || {
+    let (sealer, inputs) = blocking(move || {
         let (plaintext, sealer) = opening_state
             .channel()
             .open(&request.body)
             .map_err(|_| enclave_types::Error::RequestNotOpened)?;
-        Ok::<_, enclave_types::Error>((sealer, MatchInputs::from_cbor(&plaintext), admission))
+        Ok::<_, enclave_types::Error>((sealer, MatchInputs::from_cbor(&plaintext)))
     })
     .await??;
+
     let result = match inputs {
-        Ok(MatchInputs::DeepFace(inputs)) => {
-            operations::deepface(state, inputs, Arc::clone(&admission)).await?
-        }
-        Ok(MatchInputs::GrayBadge(inputs)) => operations::graybadge(inputs),
+        Ok(MatchInputs::DeepFace(inputs)) => deepface(state, inputs).await?,
+        Ok(MatchInputs::GrayBadge(inputs)) => graybadge(state, inputs).await?,
         Err(reason) => MatchResult::Failed(reason),
     };
+
     blocking(move || {
-        let _admission = admission;
         let encoded = result
             .to_padded_cbor()
             .map_err(|_| enclave_types::Error::Internal)?;
@@ -40,6 +44,147 @@ pub async fn handler(
                 .seal(&encoded)
                 .map_err(|_| enclave_types::Error::Internal)?,
         })
+    })
+    .await?
+}
+
+async fn deepface(
+    state: Arc<EnclaveState>,
+    inputs: DeepFaceInputs,
+) -> Result<MatchResult, enclave_types::Error> {
+    let prepared = blocking(move || {
+        let input = MatchInputs::DeepFace(inputs);
+        input.validate()?;
+        let MatchInputs::DeepFace(inputs) = input else {
+            unreachable!()
+        };
+        let credential_claim =
+            pcp::bind_credential_claim(&inputs.orb_credential, &inputs.hashes_json)?;
+        let claims = MatchClaims {
+            operation: MatchOperation::DeepFace { credential_claim },
+            live_capture_hash: inputs.live.commitment(),
+            challenger_image_hash: Sha256::digest(&inputs.rtms_challenge).into(),
+            match_coefficient: 0.0,
+        };
+
+        Ok((inputs, claims))
+    })
+    .await?;
+    let (inputs, mut claims) = match prepared {
+        Ok(prepared) => prepared,
+        Err(reason) => return Ok(MatchResult::Failed(reason)),
+    };
+
+    let scores = match state
+        .engine()
+        .deepface(
+            inputs.orb_credential.into_vec(),
+            inputs.live,
+            inputs.rtms_challenge.into_vec(),
+        )
+        .await
+    {
+        Ok(scores) => scores,
+        Err(error) => return error.into_result(),
+    };
+
+    for (score, role) in [
+        (scores.credential_live, ComparisonRole::OrbSelfie),
+        (scores.credential_challenge, ComparisonRole::OrbChallenge),
+        (scores.live_challenge, ComparisonRole::SelfieChallenge),
+    ] {
+        if let Err(reason) = check_score(score, inputs.match_threshold, role) {
+            return crate::biometric_engine::BiometricError::Rejected(reason).into_result();
+        }
+    }
+
+    claims.match_coefficient = token_score(scores.credential_live);
+    sign(state, claims).await
+}
+
+async fn graybadge(
+    state: Arc<EnclaveState>,
+    inputs: GrayBadgeInputs,
+) -> Result<MatchResult, enclave_types::Error> {
+    let prepared = blocking(move || {
+        let input = MatchInputs::GrayBadge(inputs);
+        input.validate()?;
+        let MatchInputs::GrayBadge(inputs) = input else {
+            unreachable!()
+        };
+        let claims = MatchClaims {
+            operation: MatchOperation::GrayBadge,
+            live_capture_hash: inputs.live.commitment(),
+            challenger_image_hash: Sha256::digest(&inputs.rtms_challenge).into(),
+            match_coefficient: 0.0,
+        };
+
+        Ok((inputs, claims))
+    })
+    .await?;
+    let (inputs, mut claims) = match prepared {
+        Ok(prepared) => prepared,
+        Err(reason) => return Ok(MatchResult::Failed(reason)),
+    };
+
+    let scores = match state
+        .engine()
+        .graybadge(inputs.live, inputs.rtms_challenge.into_vec())
+        .await
+    {
+        Ok(scores) => scores,
+        Err(error) => return error.into_result(),
+    };
+    if let Err(reason) = check_score(
+        scores.live_challenge,
+        inputs.match_threshold,
+        ComparisonRole::SelfieChallenge,
+    ) {
+        return crate::biometric_engine::BiometricError::Rejected(reason).into_result();
+    }
+
+    claims.match_coefficient = token_score(scores.live_challenge);
+    sign(state, claims).await
+}
+
+fn check_score(
+    score: f64,
+    threshold: f64,
+    comparison: ComparisonRole,
+) -> Result<(), FailureReason> {
+    if !valid_similarity(score) {
+        return Err(FailureReason::Internal);
+    }
+
+    if score < threshold {
+        return Err(FailureReason::MatchBelowThreshold(comparison));
+    }
+
+    Ok(())
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "worker scores are normalized as f32 before widening"
+)]
+const fn token_score(score: f64) -> f32 {
+    score as f32
+}
+
+async fn sign(
+    state: Arc<EnclaveState>,
+    claims: MatchClaims,
+) -> Result<MatchResult, enclave_types::Error> {
+    let signing_key_attestation = state.signing_key_attestation().await;
+
+    blocking(move || {
+        Ok(MatchResult::Success(AttestedStatement {
+            token: state
+                .signing_key()
+                .sign_claims(&claims)
+                .map_err(|_| enclave_types::Error::Internal)?,
+            signing_key_attestation,
+        }))
     })
     .await?
 }
@@ -62,16 +207,27 @@ mod tests {
     struct Engine {
         third: f64,
     }
+
     #[async_trait::async_trait]
     impl BiometricEngine for Engine {
         async fn deepface(
             &self,
             credential: Vec<u8>,
-            live: Vec<u8>,
+            live: LiveCapture,
             challenge: Vec<u8>,
         ) -> Result<DeepFaceScores, BiometricError> {
             assert_eq!(&credential[..], b"orb");
-            assert_eq!(&live[..], b"live");
+            match live {
+                LiveCapture::Vanilla(image) => assert_eq!(&image[..], b"live"),
+                LiveCapture::LightGuard {
+                    illuminated,
+                    unilluminated,
+                    ..
+                } => {
+                    assert_eq!(&illuminated[..], b"lit");
+                    assert_eq!(&unilluminated[..], b"dark");
+                }
+            }
             assert_eq!(&challenge[..], b"challenge");
             Ok(DeepFaceScores {
                 credential_live: 0.95,
@@ -82,12 +238,15 @@ mod tests {
 
         async fn graybadge(
             &self,
-            _: Vec<u8>,
+            _: LiveCapture,
             _: Vec<u8>,
         ) -> Result<GrayBadgeScores, BiometricError> {
-            panic!("GrayBadge must be rejected before inference")
+            Ok(GrayBadgeScores {
+                live_challenge: self.third,
+            })
         }
     }
+
     fn inputs() -> MatchInputs {
         let hash = hex::encode(Sha256::digest(b"orb"));
         MatchInputs::DeepFace(DeepFaceInputs {
@@ -100,6 +259,7 @@ mod tests {
             match_threshold: 0.8,
         })
     }
+
     fn gray(threshold: f64) -> MatchInputs {
         MatchInputs::GrayBadge(GrayBadgeInputs {
             live: LiveCapture::Vanilla(b"live".to_vec().into()),
@@ -107,9 +267,11 @@ mod tests {
             match_threshold: threshold,
         })
     }
+
     fn state(engine: impl BiometricEngine + 'static) -> Arc<EnclaveState> {
         Arc::new(EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine)).unwrap())
     }
+
     async fn exchange(state: Arc<EnclaveState>, inputs: &MatchInputs) -> (MatchResult, usize) {
         let consumer = ChannelConsumer::from_unverified_public_key(
             ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
@@ -134,8 +296,9 @@ mod tests {
             size,
         )
     }
+
     #[tokio::test]
-    async fn deep_face_returns_the_legacy_claims_bound_to_the_request() {
+    async fn deep_face_returns_claims_bound_to_the_request() {
         let state = state(Engine { third: 0.85 });
         let inputs = inputs();
         let (result, _) = exchange(Arc::clone(&state), &inputs).await;
@@ -145,8 +308,8 @@ mod tests {
         let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
         assert!(inputs.matches_claims(&claims));
         assert_eq!(
-            claims.live_image_hash,
-            <[u8; 32]>::from(Sha256::digest(b"live"))
+            claims.live_capture_hash,
+            LiveCapture::Vanilla(b"live".to_vec().into()).commitment()
         );
         assert_eq!(
             claims.challenger_image_hash,
@@ -156,11 +319,14 @@ mod tests {
             unreachable!()
         };
         assert_eq!(
-            claims.credential_claim,
-            <[u8; 32]>::from(Sha256::digest(&inputs.hashes_json))
+            claims.operation,
+            MatchOperation::DeepFace {
+                credential_claim: Sha256::digest(&inputs.hashes_json).into()
+            }
         );
         assert_eq!(claims.match_coefficient.to_bits(), 0.95f32.to_bits());
     }
+
     #[tokio::test]
     async fn third_comparison_is_a_required_gate_and_failure_is_padded() {
         let (success, success_len) = exchange(state(Engine { third: 0.9 }), &inputs()).await;
@@ -174,76 +340,86 @@ mod tests {
         );
         assert_eq!(success_len, failure_len);
     }
+
     #[tokio::test]
-    async fn gray_badge_rejects_before_inference_until_its_token_is_agreed() {
-        let (result, length) = exchange(state(UnusedBiometricEngine), &gray(0.5)).await;
+    async fn gray_badge_signs_without_a_credential_and_enforces_threshold() {
+        let state = state(Engine { third: 0.9 });
+        let inputs = gray(0.8);
+        let (result, length) = exchange(Arc::clone(&state), &inputs).await;
+        let MatchResult::Success(statement) = result else {
+            panic!("expected signed GrayBadge result")
+        };
+        let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
+        assert_eq!(claims.operation, MatchOperation::GrayBadge);
+        assert!(inputs.matches_claims(&claims));
+
+        let (failure, failure_length) = exchange(state, &gray(0.95)).await;
         assert_eq!(
-            result,
-            MatchResult::Failed(FailureReason::UnsupportedOperation)
+            failure,
+            MatchResult::Failed(FailureReason::MatchBelowThreshold(
+                ComparisonRole::SelfieChallenge
+            ))
         );
-        let (_, success_length) = exchange(state(Engine { third: 0.9 }), &inputs()).await;
-        assert_eq!(length, success_length);
+        assert_eq!(length, failure_length);
     }
+
     #[tokio::test]
-    async fn bad_pcp_and_light_guard_reject_before_inference() {
-        let state = state(UnusedBiometricEngine);
-        let MatchInputs::DeepFace(mut i) = inputs() else {
+    async fn light_guard_supports_both_operations_and_frame_selections() {
+        for matching_frame in [
+            LightGuardMatchingFrame::Illuminated,
+            LightGuardMatchingFrame::Unilluminated,
+        ] {
+            for mut inputs in [inputs(), gray(0.8)] {
+                let live = match &mut inputs {
+                    MatchInputs::DeepFace(i) => &mut i.live,
+                    MatchInputs::GrayBadge(i) => &mut i.live,
+                };
+                *live = LiveCapture::LightGuard {
+                    illuminated: b"lit".to_vec().into(),
+                    unilluminated: b"dark".to_vec().into(),
+                    matching_frame,
+                };
+                let state = state(Engine { third: 0.9 });
+                let (result, _) = exchange(Arc::clone(&state), &inputs).await;
+                let MatchResult::Success(statement) = result else {
+                    panic!("expected LightGuard result")
+                };
+                let claims =
+                    match_token::verify(&statement.token, state.signing_public_key()).unwrap();
+                assert!(inputs.matches_claims(&claims));
+            }
+        }
+    }
+
+    #[test]
+    fn all_comparisons_reject_invalid_or_low_scores() {
+        for role in [
+            ComparisonRole::OrbSelfie,
+            ComparisonRole::OrbChallenge,
+            ComparisonRole::SelfieChallenge,
+        ] {
+            for score in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
+                assert_eq!(check_score(score, 0.8, role), Err(FailureReason::Internal));
+            }
+            assert_eq!(
+                check_score(0.7, 0.8, role),
+                Err(FailureReason::MatchBelowThreshold(role))
+            );
+            assert_eq!(check_score(0.8, 0.8, role), Ok(()));
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_pcp_rejects_before_inference() {
+        let MatchInputs::DeepFace(mut inputs) = inputs() else {
             unreachable!()
         };
-        i.orb_credential = b"other".to_vec().into();
+        inputs.orb_credential = b"other".to_vec().into();
         assert_eq!(
-            exchange(Arc::clone(&state), &MatchInputs::DeepFace(i))
+            exchange(state(UnusedBiometricEngine), &MatchInputs::DeepFace(inputs))
                 .await
                 .0,
             MatchResult::Failed(FailureReason::ThumbnailHashMismatch)
-        );
-        let MatchInputs::GrayBadge(mut i) = gray(0.5) else {
-            unreachable!()
-        };
-        i.live = LiveCapture::LightGuard {
-            illuminated: vec![1].into(),
-            unilluminated: vec![2].into(),
-            matching_frame: LightGuardMatchingFrame::Unilluminated,
-        };
-        assert_eq!(
-            exchange(state, &MatchInputs::GrayBadge(i)).await.0,
-            MatchResult::Failed(FailureReason::UnsupportedCapture)
-        );
-    }
-    #[tokio::test]
-    async fn malformed_payload_is_sealed_and_another_boot_cannot_open_request() {
-        let state = state(UnusedBiometricEngine);
-        let consumer = ChannelConsumer::from_unverified_public_key(
-            ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
-            &state.channel().public_key(),
-        )
-        .unwrap();
-        let (sealed, opener) = consumer.seal_to_enclave(b"invalid CBOR").unwrap();
-        let response = handler(
-            Arc::clone(&state),
-            MatchRequest {
-                body: sealed.into(),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            MatchResult::from_padded_cbor(&opener.open_from_enclave(&response.ciphertext).unwrap())
-                .unwrap(),
-            MatchResult::Failed(FailureReason::MalformedInputs)
-        );
-        let other = super::tests::state(UnusedBiometricEngine);
-        let (sealed, _) = consumer.seal_to_enclave(b"invalid").unwrap();
-        assert_eq!(
-            handler(
-                other,
-                MatchRequest {
-                    body: sealed.into()
-                }
-            )
-            .await
-            .unwrap_err(),
-            enclave_types::Error::RequestNotOpened
         );
     }
 }

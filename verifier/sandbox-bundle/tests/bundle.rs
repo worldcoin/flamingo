@@ -131,6 +131,7 @@ fn incomplete_or_tampered_bundles_are_cleaned_up() {
         assert!(receive(&mut Cursor::new(&bundle[..length]), 1024, parent.path()).is_err());
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
+
     let mut corrupt = bundle.clone();
     *corrupt.last_mut().unwrap() ^= 1;
     assert!(matches!(

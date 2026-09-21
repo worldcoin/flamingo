@@ -78,6 +78,7 @@ impl Manifest {
         if max_bundle_bytes == 0 || max_bundle_bytes > MAX_BUNDLE_BYTES {
             return Err(Error::InvalidConfig);
         }
+
         if self.manifest_version != 3
             || self.release_id.is_empty()
             || self.release_id.len() > 128
@@ -95,6 +96,7 @@ impl Manifest {
         {
             return Err(Error::InvalidManifest);
         }
+
         Ok(())
     }
 }
@@ -115,6 +117,7 @@ pub fn receive(
     if max_bundle_bytes == 0 || max_bundle_bytes > MAX_BUNDLE_BYTES {
         return Err(Error::InvalidConfig);
     }
+
     let manifest_bytes = read_frame(reader, MAX_MANIFEST_BYTES)?;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).map_err(|_| Error::InvalidManifest)?;
@@ -142,6 +145,7 @@ pub fn receive(
         file.write_all(&buffer[..length])?;
         remaining -= length as u64;
     }
+
     if hex::encode(digest.finalize()) != manifest.sha384 {
         return Err(Error::DigestMismatch);
     }
@@ -150,6 +154,7 @@ pub fn receive(
     if reader.read(&mut [0])? != 0 {
         return Err(Error::TrailingData);
     }
+
     let mut binary = File::open(&worker_path)?;
     let mut header = [0_u8; 20];
     binary.read_exact(&mut header)?;
@@ -179,6 +184,7 @@ pub fn package(
     if manifest_bytes.is_empty() || manifest_bytes.len() > MAX_MANIFEST_BYTES {
         return Err(Error::InvalidManifest);
     }
+
     let manifest: Manifest =
         serde_json::from_slice(manifest_bytes).map_err(|_| Error::InvalidManifest)?;
     manifest.validate(MAX_BUNDLE_BYTES)?;
@@ -188,6 +194,7 @@ pub fn package(
     if !fs::symlink_metadata(executable)?.is_file() {
         return Err(Error::InvalidManifest);
     }
+
     let mut file = File::open(executable)?;
     let mut digest = Sha384::new();
     let mut remaining = manifest.size;
@@ -199,9 +206,11 @@ pub fn package(
         writer.write_all(&buffer[..length])?;
         remaining -= length as u64;
     }
+
     if file.read(&mut [0])? != 0 || hex::encode(digest.finalize()) != manifest.sha384 {
         return Err(Error::DigestMismatch);
     }
+
     Ok(())
 }
 
@@ -213,6 +222,7 @@ fn read_frame(reader: &mut impl Read, maximum: usize) -> Result<Vec<u8>, Error> 
     if length == 0 || length > maximum {
         return Err(Error::InvalidManifest);
     }
+
     let mut bytes = vec![0; length];
     reader.read_exact(&mut bytes)?;
     Ok(bytes)

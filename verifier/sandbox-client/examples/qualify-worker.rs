@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+
     let root = Path::new(&args[1]);
     let mut image = Vec::new();
     File::open(&args[4])?
@@ -27,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if image.is_empty() || image.len() > 8 * 1024 * 1024 {
         return Err("fixture exceeds the worker's encoded image limit".into());
     }
+
     let request = || {
         Operation::DeepFace(DeepFaceRequest {
             credential: Some(FaceImage {
@@ -69,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         assert!((score.unwrap() - 1.0).abs() < 1e-5);
     }
+
     let invalid = Operation::DeepFace(DeepFaceRequest {
         credential: Some(FaceImage {
             source: Some(Source::Orb(vec![1])),

@@ -6,10 +6,7 @@ use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_sealed_types::MATCH_CHANNEL_DOMAIN;
 use pontifex::{ChannelDomain, ChannelEnclave};
-use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
-    task::JoinHandle,
-};
+use tokio::task::JoinHandle;
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
@@ -27,8 +24,6 @@ pub struct EnclaveState {
     attested_encryption_key: AttestedKey,
     /// Cached attestation of the statement key.
     attested_signing_key: AttestedKey,
-    /// Bounds requests performing decryption, policy and signing.
-    admission: Arc<Semaphore>,
     engine: Box<dyn BiometricEngine>,
 }
 
@@ -77,7 +72,6 @@ impl EnclaveState {
             signing_key,
             attested_encryption_key,
             attested_signing_key,
-            admission: Arc::new(Semaphore::new(4)),
             engine,
         })
     }
@@ -113,12 +107,6 @@ impl EnclaveState {
 
     pub(crate) fn engine(&self) -> &dyn BiometricEngine {
         self.engine.as_ref()
-    }
-
-    pub(crate) fn admit(&self) -> Result<OwnedSemaphorePermit, enclave_types::Error> {
-        Arc::clone(&self.admission)
-            .try_acquire_owned()
-            .map_err(|_| enclave_types::Error::NotReady)
     }
 
     /// Starts background attestation refresh for both boot keys.

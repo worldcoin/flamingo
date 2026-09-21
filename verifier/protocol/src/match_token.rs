@@ -1,7 +1,7 @@
 //! Match-result tokens: CWTs (RFC 8392) carrying private claims.
 //! Note: This is a WIP module and will probably move to the `world-id-protocol` repo.
 //!
-//! The enclave signs these legacy match claims. They are not yet aligned with the
+//! The enclave signs operation-specific match claims. They are not yet aligned with the
 //! WIP-110/WIP-111 token consumed by the proposed embedding-similarity circuit.
 //!
 
@@ -23,28 +23,54 @@ pub use eddsa_babyjubjub::EdDSAPublicKey;
 pub const COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2: i64 = -65537;
 
 /// Version of this token's encoding.
-pub const TOKEN_VERSION: u64 = 1;
-
-/// Domain separator folded into the Poseidon2 state before any claim.
-///
-/// Carries the version and is what enforces it. Bump with [`TOKEN_VERSION`]. Provisional.
-const DOMAIN_SEPARATOR: &[u8] = b"WORLD_ID_DFVT_V1";
+pub const TOKEN_VERSION: u64 = 2;
 
 // The `-81_00x` block is unallocated: WIP-106's own private claims sit at `-80_000`, `-80_001`, and
-// `-70_000`, so these five keep clear of those while staying in the same negative range. Nothing
+// `-70_000`, so these claims keep clear of those while staying in the same negative range. Nothing
 // reserves the block for us, which is what makes the keys provisional — ratification is pending.
 
 /// Private CWT claim key for [`TOKEN_VERSION`]. Frozen across versions; never renumber.
 pub const CLAIM_VERSION: i64 = -81_004;
 
-/// Private CWT claim key for `live_image_hash`. Provisional.
-pub const CLAIM_LIVE_IMAGE_HASH: i64 = -81_000;
+/// Private CWT claim key for `live_capture_hash`. Provisional.
+pub const CLAIM_LIVE_CAPTURE_HASH: i64 = -81_000;
 /// Private CWT claim key for `credential_claim`. Provisional.
 pub const CLAIM_CREDENTIAL_CLAIM: i64 = -81_001;
 /// Private CWT claim key for `challenger_image_hash`. Provisional.
 pub const CLAIM_CHALLENGER_IMAGE_HASH: i64 = -81_002;
 /// Private CWT claim key for `match_coefficient`. Provisional.
 pub const CLAIM_MATCH_COEFFICIENT: i64 = -81_003;
+
+/// Private CWT claim key for the operation (1 = `DeepFace`, 2 = `GrayBadge`).
+pub const CLAIM_OPERATION: i64 = -81_005;
+
+/// The operation and its operation-specific commitment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchOperation {
+    /// Three-way matching bound to a PCP commitment.
+    DeepFace {
+        /// SHA-256 of the exact PCP hashes.json bytes.
+        credential_claim: [u8; 32],
+    },
+    /// Live/challenge matching without a credential.
+    GrayBadge,
+}
+
+impl MatchOperation {
+    const fn id(self) -> u64 {
+        match self {
+            Self::DeepFace { .. } => 1,
+            Self::GrayBadge => 2,
+        }
+    }
+
+    const fn domain(self) -> &'static [u8] {
+        match self {
+            Self::DeepFace { .. } => b"WORLD_ID_DFVT_V2",
+            Self::GrayBadge => b"WORLD_ID_GBVT_V2",
+        }
+    }
+}
 
 /// Fixed-point scale applied to `match_coefficient` before it becomes a field element.
 ///
@@ -67,31 +93,26 @@ pub const SIGNING_KEY_LEN: usize = 32;
 
 /// The claims a match token commits to.
 ///
-/// `challenger_image_hash` is always present: v1 implements the 3-way flow only.
+/// The operation is signed through its own domain; `GrayBadge` carries no credential claim.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MatchClaims {
-    /// SHA-256 of the live image.
-    pub live_image_hash: [u8; 32],
-    /// PCP commitment `SHA256(hashes.json)`. A commitment, not proof of enrollment — the circuit
-    /// binds it to an issuer-signed credential.
-    pub credential_claim: [u8; 32],
+    /// Commitment to the capture variant, all live frames and the matching-frame selection.
+    pub live_capture_hash: [u8; 32],
+    /// Matching operation and its credential commitment, when applicable.
+    pub operation: MatchOperation,
     /// SHA-256 of the challenge image.
     pub challenger_image_hash: [u8; 32],
-    /// Credential-vs-live similarity.
+    /// Credential/live similarity for `DeepFace`; live/challenge similarity for `GrayBadge`.
     pub match_coefficient: f32,
 }
 
 impl MatchClaims {
     /// Builds the CWT claims set as a deterministic CBOR map.
     fn claims(&self) -> Result<Vec<u8>, Error> {
-        let claims = Value::Map(vec![
+        let mut entries = vec![
             (
-                Value::Integer(CLAIM_LIVE_IMAGE_HASH.into()),
-                Value::Bytes(self.live_image_hash.to_vec()),
-            ),
-            (
-                Value::Integer(CLAIM_CREDENTIAL_CLAIM.into()),
-                Value::Bytes(self.credential_claim.to_vec()),
+                Value::Integer(CLAIM_LIVE_CAPTURE_HASH.into()),
+                Value::Bytes(self.live_capture_hash.to_vec()),
             ),
             (
                 Value::Integer(CLAIM_CHALLENGER_IMAGE_HASH.into()),
@@ -105,8 +126,22 @@ impl MatchClaims {
                 Value::Integer(CLAIM_VERSION.into()),
                 Value::Integer(TOKEN_VERSION.into()),
             ),
-        ]);
+            (
+                Value::Integer(CLAIM_OPERATION.into()),
+                Value::Integer(self.operation.id().into()),
+            ),
+        ];
+        if let MatchOperation::DeepFace { credential_claim } = self.operation {
+            entries.insert(
+                1,
+                (
+                    Value::Integer(CLAIM_CREDENTIAL_CLAIM.into()),
+                    Value::Bytes(credential_claim.to_vec()),
+                ),
+            );
+        }
 
+        let claims = Value::Map(entries);
         let mut encoded = Vec::new();
         coset::cbor::into_writer(&claims, &mut encoded).map_err(|_| Error::Encoding)?;
 
@@ -156,12 +191,18 @@ impl MatchClaims {
 
         let mut state = [Fq::from(0u64); POSEIDON2_WIDTH];
         // 16 bytes, so `mod_order` cannot reduce it; the call is the lowering WIP-106 specifies.
-        state[0] = Fq::from_be_bytes_mod_order(DOMAIN_SEPARATOR);
+        state[0] = Fq::from_be_bytes_mod_order(self.operation.domain());
 
+        // GrayBadge reserves zero limbs here; the distinct operation domain prevents aliasing
+        // it with a DeepFace claim whose credential commitment happens to be all zeros.
+        let credential_claim = match self.operation {
+            MatchOperation::DeepFace { credential_claim } => credential_claim,
+            MatchOperation::GrayBadge => [0; 32],
+        };
         let mut slot = 1;
         for hash in [
-            &self.live_image_hash,
-            &self.credential_claim,
+            &self.live_capture_hash,
+            &credential_claim,
             &self.challenger_image_hash,
         ] {
             for limb in hash_limbs(hash) {
@@ -176,6 +217,7 @@ impl MatchClaims {
         Ok(state[1])
     }
 }
+
 /// A signed match token: an untagged `COSE_Sign1` over [`MatchClaims`].
 ///
 /// A newtype so the bytes cannot be confused with any other buffer between [`build_token`] and
@@ -301,6 +343,27 @@ fn decode_claims(payload: &[u8]) -> Result<MatchClaims, Error> {
     let claims: Value = coset::cbor::from_reader(payload).map_err(|_| Error::Malformed)?;
     let entries = claims.as_map().ok_or(Error::Malformed)?;
 
+    // Reject duplicate or unknown keys instead of silently accepting ambiguous statements.
+    let mut keys = std::collections::BTreeSet::new();
+    for (key, _) in entries {
+        let key = key
+            .as_integer()
+            .and_then(|key| i64::try_from(i128::from(key)).ok())
+            .ok_or(Error::Malformed)?;
+        if !matches!(
+            key,
+            CLAIM_LIVE_CAPTURE_HASH
+                | CLAIM_CREDENTIAL_CLAIM
+                | CLAIM_CHALLENGER_IMAGE_HASH
+                | CLAIM_MATCH_COEFFICIENT
+                | CLAIM_VERSION
+                | CLAIM_OPERATION
+        ) || !keys.insert(key)
+        {
+            return Err(Error::Malformed);
+        }
+    }
+
     let lookup = |key: i64| {
         entries
             .iter()
@@ -338,9 +401,19 @@ fn decode_claims(payload: &[u8]) -> Result<MatchClaims, Error> {
     )]
     let match_coefficient = unscaled as f32;
 
+    let operation = match lookup(CLAIM_OPERATION)?.as_integer().map(i128::from) {
+        Some(1) if entries.len() == 6 => MatchOperation::DeepFace {
+            credential_claim: hash(CLAIM_CREDENTIAL_CLAIM)?,
+        },
+        Some(2) if entries.len() == 5 && !keys.contains(&CLAIM_CREDENTIAL_CLAIM) => {
+            MatchOperation::GrayBadge
+        }
+        _ => return Err(Error::Malformed),
+    };
+
     Ok(MatchClaims {
-        live_image_hash: hash(CLAIM_LIVE_IMAGE_HASH)?,
-        credential_claim: hash(CLAIM_CREDENTIAL_CLAIM)?,
+        live_capture_hash: hash(CLAIM_LIVE_CAPTURE_HASH)?,
+        operation,
         challenger_image_hash: hash(CLAIM_CHALLENGER_IMAGE_HASH)?,
         match_coefficient,
     })
@@ -354,8 +427,8 @@ mod tests {
     use eddsa_babyjubjub::{EdDSAPrivateKey, EdDSAPublicKey};
 
     use super::{
-        CLAIM_VERSION, COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2, Error, MatchClaims, MatchToken,
-        TOKEN_VERSION, build_token, hash_limbs, verify,
+        CLAIM_OPERATION, CLAIM_VERSION, COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2, Error, MatchClaims,
+        MatchOperation, MatchToken, TOKEN_VERSION, build_token, hash_limbs, verify,
     };
 
     /// Stands in for the enclave, which owns the real key material.
@@ -387,8 +460,10 @@ mod tests {
 
     fn claims() -> MatchClaims {
         MatchClaims {
-            live_image_hash: [1u8; 32],
-            credential_claim: [2u8; 32],
+            live_capture_hash: [1u8; 32],
+            operation: MatchOperation::DeepFace {
+                credential_claim: [2u8; 32],
+            },
             challenger_image_hash: [3u8; 32],
             match_coefficient: 0.9375,
         }
@@ -403,8 +478,8 @@ mod tests {
         let verified = verify(&token, signing_key.public_key())
             .expect("the token should verify under its key");
 
-        assert_eq!(verified.live_image_hash, original.live_image_hash);
-        assert_eq!(verified.credential_claim, original.credential_claim);
+        assert_eq!(verified.live_capture_hash, original.live_capture_hash);
+        assert_eq!(verified.operation, original.operation);
         assert_eq!(
             verified.challenger_image_hash,
             original.challenger_image_hash
@@ -413,6 +488,63 @@ mod tests {
         assert_eq!(
             verified.match_coefficient.to_bits(),
             original.match_coefficient.to_bits()
+        );
+    }
+
+    #[test]
+    fn gray_badge_round_trips_without_a_credential() {
+        let signer = signer();
+        let claims = MatchClaims {
+            operation: MatchOperation::GrayBadge,
+            ..claims()
+        };
+        let token = signer.sign(&claims).unwrap();
+        assert_eq!(verify(&token, signer.public_key()).unwrap(), claims);
+
+        let sign1 = CoseSign1::from_slice(token.as_bytes()).unwrap();
+        let payload: Value = coset::cbor::from_reader(sign1.payload.unwrap().as_slice()).unwrap();
+        assert!(
+            !payload
+                .as_map()
+                .unwrap()
+                .iter()
+                .any(|(key, _)| key.as_integer() == Some(super::CLAIM_CREDENTIAL_CLAIM.into()))
+        );
+        assert_ne!(
+            claims.message_hash().unwrap(),
+            MatchClaims {
+                operation: MatchOperation::DeepFace {
+                    credential_claim: [0; 32]
+                },
+                ..claims
+            }
+            .message_hash()
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn operation_cannot_be_changed_to_reuse_a_signature() {
+        let signer = signer();
+        let original = MatchClaims {
+            operation: MatchOperation::DeepFace {
+                credential_claim: [0; 32],
+            },
+            ..claims()
+        };
+        let signature = signer.private_key.sign(original.message_hash().unwrap());
+        let forged = build_token(
+            &MatchClaims {
+                operation: MatchOperation::GrayBadge,
+                ..original
+            },
+            &signature,
+            signer.public_key(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify(&forged, signer.public_key()),
+            Err(Error::SignatureInvalid)
         );
     }
 
@@ -449,11 +581,13 @@ mod tests {
 
         for mutated in [
             MatchClaims {
-                live_image_hash: [9u8; 32],
+                live_capture_hash: [9u8; 32],
                 ..claims()
             },
             MatchClaims {
-                credential_claim: [9u8; 32],
+                operation: MatchOperation::DeepFace {
+                    credential_claim: [9u8; 32],
+                },
                 ..claims()
             },
             MatchClaims {
@@ -510,6 +644,7 @@ mod tests {
                 *value = Value::Integer((TOKEN_VERSION + 1).into());
             }
         }
+
         let mut repacked = Vec::new();
         coset::cbor::into_writer(&Value::Map(entries), &mut repacked).expect("should re-encode");
 
@@ -635,8 +770,8 @@ mod tests {
         expected.sort_by_key(|key| (i32::from(*key < 0), key.abs()));
 
         assert_eq!(keys, expected);
-        // The version sorts last despite being read first, so lookup cannot rely on position.
-        assert_eq!(keys.last(), Some(&i128::from(CLAIM_VERSION)));
-        assert_eq!(keys.len(), 5);
+        // The operation sorts last, so lookup cannot rely on position.
+        assert_eq!(keys.last(), Some(&i128::from(CLAIM_OPERATION)));
+        assert_eq!(keys.len(), 6);
     }
 }

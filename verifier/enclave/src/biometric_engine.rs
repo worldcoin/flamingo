@@ -4,12 +4,12 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use flamingo_verifier_sealed_types::FailureReason;
+use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
 #[cfg(any(target_os = "linux", test))]
 use tokio::{sync::Mutex, time::timeout};
 
 #[cfg(any(target_os = "linux", test))]
-use crate::execution::blocking;
+use crate::blocking;
 
 /// Maximum encoded bytes per image, derived from the public API.
 pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_IMAGE_BYTES;
@@ -47,6 +47,22 @@ pub enum BiometricError {
     Internal,
 }
 
+impl BiometricError {
+    pub(crate) const fn into_result(
+        self,
+    ) -> Result<flamingo_verifier_sealed_types::MatchResult, flamingo_verifier_enclave_types::Error>
+    {
+        use flamingo_verifier_enclave_types::Error;
+        use flamingo_verifier_sealed_types::MatchResult;
+
+        match self {
+            Self::Busy => Err(Error::NotReady),
+            Self::Internal | Self::Rejected(FailureReason::Internal) => Err(Error::Internal),
+            Self::Rejected(reason) => Ok(MatchResult::Failed(reason)),
+        }
+    }
+}
+
 /// Image-only operations; PCP verification, policy and signing stay in the enclave operations.
 #[async_trait]
 pub trait BiometricEngine: Send + Sync {
@@ -56,7 +72,7 @@ pub trait BiometricEngine: Send + Sync {
     async fn deepface(
         &self,
         credential: Vec<u8>,
-        live: Vec<u8>,
+        live: LiveCapture,
         challenge: Vec<u8>,
     ) -> Result<DeepFaceScores, BiometricError>;
     /// Compares live and challenge images.
@@ -64,7 +80,7 @@ pub trait BiometricEngine: Send + Sync {
     /// Returns a structured image rejection or infrastructure failure.
     async fn graybadge(
         &self,
-        live: Vec<u8>,
+        live: LiveCapture,
         challenge: Vec<u8>,
     ) -> Result<GrayBadgeScores, BiometricError>;
     /// Checks liveness without waiting for an active inference operation.
@@ -88,6 +104,7 @@ impl<W: Send + 'static> Executor<W> {
         &self,
         work: impl FnOnce(&mut W) -> T + Send + 'static,
     ) -> Result<T, BiometricError> {
+        // TODO: Bound waiting request memory if traffic requires more than this single mutex.
         let mut worker = timeout(QUEUE_TIMEOUT, Arc::clone(&self.worker).lock_owned())
             .await
             .map_err(|_| BiometricError::Busy)?;
@@ -117,12 +134,15 @@ mod sandboxed {
     };
     use async_trait::async_trait;
     use biometric_engines_protocol::{
-        face::{DeepFaceRequest, FaceImage, GrayBadgeRequest, face_image::Source},
+        face::{
+            DeepFaceRequest, FaceImage, GrayBadgeRequest, LightGuard, LightGuardMatchingFrame,
+            face_image::Source,
+        },
         request::Operation,
         response::Outcome,
     };
     use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
-    use flamingo_verifier_sealed_types::FailureReason;
+    use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
 
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
@@ -144,7 +164,7 @@ mod sandboxed {
                 .await?
                 .map_err(|error| match error {
                     WorkerError::Rpc(SandboxClientError::AnalysisFailed(failure)) => {
-                        BiometricError::Rejected(crate::error::worker_failure(&failure))
+                        BiometricError::from(failure.as_ref())
                     }
                     WorkerError::Rpc(SandboxClientError::InvalidImages) => {
                         BiometricError::Rejected(FailureReason::MalformedInputs)
@@ -154,6 +174,28 @@ mod sandboxed {
                         std::process::exit(1);
                     }
                 })
+        }
+    }
+
+    fn live_source(capture: LiveCapture) -> Source {
+        match capture {
+            LiveCapture::Vanilla(image) => Source::VanillaSelfie(image.into_vec()),
+            LiveCapture::LightGuard {
+                illuminated,
+                unilluminated,
+                matching_frame,
+            } => Source::LightGuard(LightGuard {
+                illuminated: illuminated.into_vec(),
+                unilluminated: unilluminated.into_vec(),
+                matching_frame: match matching_frame {
+                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated => {
+                        LightGuardMatchingFrame::Illuminated as i32
+                    }
+                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated => {
+                        LightGuardMatchingFrame::Unilluminated as i32
+                    }
+                },
+            }),
         }
     }
 
@@ -168,13 +210,13 @@ mod sandboxed {
         async fn deepface(
             &self,
             credential: Vec<u8>,
-            live: Vec<u8>,
+            live: LiveCapture,
             challenge: Vec<u8>,
         ) -> Result<DeepFaceScores, BiometricError> {
             let Outcome::DeepFace(scores) = self
                 .run(Operation::DeepFace(DeepFaceRequest {
                     credential: Some(image(Source::Orb(credential))),
-                    live: Some(image(Source::VanillaSelfie(live))),
+                    live: Some(image(live_source(live))),
                     challenge: Some(image(Source::Rtms(challenge))),
                 }))
                 .await?
@@ -202,12 +244,12 @@ mod sandboxed {
 
         async fn graybadge(
             &self,
-            live: Vec<u8>,
+            live: LiveCapture,
             challenge: Vec<u8>,
         ) -> Result<GrayBadgeScores, BiometricError> {
             let Outcome::GrayBadge(scores) = self
                 .run(Operation::GrayBadge(GrayBadgeRequest {
-                    live: Some(image(Source::VanillaSelfie(live))),
+                    live: Some(image(live_source(live))),
                     challenge: Some(image(Source::Rtms(challenge))),
                 }))
                 .await?
@@ -229,6 +271,39 @@ mod sandboxed {
             }
         }
     }
+
+    #[cfg(test)]
+    mod capture_tests {
+        use super::*;
+
+        #[test]
+        fn light_guard_preserves_both_frames_and_the_selected_matching_frame() {
+            for (matching_frame, expected) in [
+                (
+                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated,
+                    LightGuardMatchingFrame::Illuminated,
+                ),
+                (
+                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated,
+                    LightGuardMatchingFrame::Unilluminated,
+                ),
+            ] {
+                let illuminated = vec![1, 2, 3];
+                let pointer = illuminated.as_ptr();
+                let Source::LightGuard(pair) = live_source(LiveCapture::LightGuard {
+                    illuminated: illuminated.into(),
+                    unilluminated: vec![4, 5].into(),
+                    matching_frame,
+                }) else {
+                    panic!("must preserve LightGuard source")
+                };
+                assert_eq!(pair.illuminated, vec![1, 2, 3]);
+                assert_eq!(pair.illuminated.as_ptr(), pointer);
+                assert_eq!(pair.unilluminated, vec![4, 5]);
+                assert_eq!(pair.matching_frame, expected as i32);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +311,24 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use tokio::sync::Notify;
+
+    #[test]
+    fn infrastructure_errors_stay_distinct_from_encrypted_rejections() {
+        use flamingo_verifier_enclave_types::Error;
+        use flamingo_verifier_sealed_types::MatchResult;
+
+        assert_eq!(BiometricError::Busy.into_result(), Err(Error::NotReady));
+        for error in [
+            BiometricError::Internal,
+            BiometricError::Rejected(FailureReason::Internal),
+        ] {
+            assert_eq!(error.into_result(), Err(Error::Internal));
+        }
+        assert_eq!(
+            BiometricError::Rejected(FailureReason::MalformedInputs).into_result(),
+            Ok(MatchResult::Failed(FailureReason::MalformedInputs))
+        );
+    }
 
     #[test]
     fn preserves_existing_score_normalization() {
@@ -355,6 +448,7 @@ mod tests {
                 });
             return;
         }
+
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

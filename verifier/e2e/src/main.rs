@@ -7,7 +7,7 @@ use flamingo_verifier_client::{
 use flamingo_verifier_enclave_types::MatchRequest;
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey};
 use flamingo_verifier_sealed_types::{
-    DeepFaceInputs, GrayBadgeInputs, LiveCapture, MatchInputs, MatchResult,
+    DeepFaceInputs, GrayBadgeInputs, LightGuardMatchingFrame, LiveCapture, MatchInputs, MatchResult,
 };
 use pontifex::client::ConnectionDetails;
 use sha2::{Digest, Sha256};
@@ -28,7 +28,31 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|path| read_image(path, "credential"))
         .transpose()?;
-    let live_image = read_image(&image_paths.live, "live")?;
+    let live = match env::var("LIGHT_GUARD_UNILLUMINATED_IMAGE") {
+        Ok(path) => {
+            let matching_frame = match env::var("LIGHT_GUARD_MATCHING_FRAME").as_deref() {
+                Err(env::VarError::NotPresent) | Ok("illuminated") => {
+                    LightGuardMatchingFrame::Illuminated
+                }
+
+                Ok("unilluminated") => LightGuardMatchingFrame::Unilluminated,
+                _ => bail!("LIGHT_GUARD_MATCHING_FRAME must be illuminated or unilluminated"),
+            };
+            LiveCapture::LightGuard {
+                illuminated: read_image(&image_paths.live, "illuminated")?.into(),
+                unilluminated: read_image(&PathBuf::from(path), "unilluminated")?.into(),
+                matching_frame,
+            }
+        }
+        Err(env::VarError::NotPresent) => {
+            ensure!(
+                env::var_os("LIGHT_GUARD_MATCHING_FRAME").is_none(),
+                "LIGHT_GUARD_MATCHING_FRAME requires LIGHT_GUARD_UNILLUMINATED_IMAGE"
+            );
+            LiveCapture::Vanilla(read_image(&image_paths.live, "live")?.into())
+        }
+        Err(error) => return Err(error.into()),
+    };
     let challenge_image = read_image(&image_paths.challenge, "challenge")?;
 
     let match_threshold = optional_f64("MATCH_THRESHOLD", DEFAULT_MATCH_THRESHOLD)?;
@@ -45,7 +69,7 @@ async fn main() -> Result<()> {
     let inputs = if let Some(credential_image) = credential_image {
         let hashes_json = hashes_json_for(&credential_image);
         MatchInputs::DeepFace(DeepFaceInputs {
-            live: LiveCapture::Vanilla(live_image.into()),
+            live,
             orb_credential: credential_image.into(),
             hashes_json: hashes_json.into(),
             rtms_challenge: challenge_image.into(),
@@ -53,7 +77,7 @@ async fn main() -> Result<()> {
         })
     } else {
         MatchInputs::GrayBadge(GrayBadgeInputs {
-            live: LiveCapture::Vanilla(live_image.into()),
+            live,
             rtms_challenge: challenge_image.into(),
             match_threshold,
         })
@@ -62,6 +86,7 @@ async fn main() -> Result<()> {
         Err(env::VarError::NotPresent) | Ok("http") => {
             client.request_match(&assignment, &inputs).await?
         }
+
         Ok("vsock") => request_match_vsock(&assignment, &inputs, &verifier).await?,
         _ => bail!("VERIFIER_E2E_TRANSPORT must be http or vsock"),
     };
@@ -72,9 +97,9 @@ async fn main() -> Result<()> {
     };
     ensure!(
         inputs.matches_claims(&verified.claims),
-        "legacy statement's input hashes or live score did not match the request"
+        "statement operation, input commitments or score did not match the request"
     );
-    println!("attested match succeeded; legacy input commitments and live score verified");
+    println!("attested match succeeded; operation, capture commitments and score verified");
     Ok(())
 }
 

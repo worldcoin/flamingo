@@ -280,32 +280,3 @@ async fn readiness_follows_the_enclave() {
     .await;
     assert_eq!(unreachable, StatusCode::SERVICE_UNAVAILABLE);
 }
-
-#[tokio::test]
-async fn draining_rejects_uploads_before_json_extraction() {
-    let state = state_with(StubEnclaveClient::default());
-    state.begin_drain();
-    let (status, body) = send(
-        state.clone(),
-        Request::builder()
-            .method(Method::POST)
-            .uri("/v1/matches")
-            .header("content-type", "application/json")
-            .body(Body::from("this is not JSON"))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body["error"]["code"], "not_ready");
-    let response = routes::handler()
-        .with_state(state)
-        .oneshot(
-            Request::builder()
-                .uri("/ready")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-}

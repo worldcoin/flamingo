@@ -9,11 +9,10 @@ set -euo pipefail
 : "${ENCLAVE_MEMORY_SIZE:=4096}"
 : "${BOOTSTRAP_TIMEOUT_SECONDS:=180}"
 : "${PROVISIONING_IO_TIMEOUT_SECONDS:=120}"
-: "${DRAIN_SECONDS:=35}"
 : "${POLL_SECONDS:=2}"
 : "${RETRY_SECONDS:=5}"
 
-for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$DRAIN_SECONDS" "$POLL_SECONDS" "$RETRY_SECONDS"; do
+for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$POLL_SECONDS" "$RETRY_SECONDS"; do
     [[ "$number" =~ ^[0-9]+$ ]] || exit 2
 done
 (( BOOTSTRAP_TIMEOUT_SECONDS > 0 && POLL_SECONDS > 0 && RETRY_SECONDS > 0 )) || exit 2
@@ -50,8 +49,6 @@ cleanup() {
 shutdown() {
     trap '' TERM INT
     rm -f "$WORKER_READY_FILE"
-    # The host sees the shared readiness marker disappear; allow active 30s relays to drain.
-    if [[ -n "$enclave_id" ]]; then sleep "$DRAIN_SECONDS"; fi
     cleanup
     rm -rf "$state"
     exit 0

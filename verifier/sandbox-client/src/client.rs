@@ -50,6 +50,7 @@ impl SandboxClientConfig {
         {
             return Err(SandboxClientError::InvalidConfig);
         }
+
         Ok(())
     }
 }
@@ -85,6 +86,7 @@ impl SandboxClient {
         if !protobuf::decode_ready(&ready) {
             return Err(SandboxClientError::InvalidReady);
         }
+
         Ok(Self {
             stream: Some(stream),
             config,
@@ -103,6 +105,7 @@ impl SandboxClient {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
+
         let deadline = Instant::now() + self.config.request_timeout;
         self.validate_images(&operation)?;
         let kind = match operation {
@@ -121,6 +124,7 @@ impl SandboxClient {
         if payload.len() > self.config.max_request_bytes {
             return Err(SandboxClientError::InvalidImages);
         }
+
         let result = self.exchange(&payload, id, kind, deadline);
         if let Err(error) = &result
             && !matches!(error, SandboxClientError::AnalysisFailed(_))
@@ -165,9 +169,11 @@ impl SandboxClient {
                     .ok_or(SandboxClientError::InvalidImages)?;
             }
         }
+
         if total > self.config.max_request_bytes || total > face::MAX_TOTAL_IMAGE_BYTES {
             return Err(SandboxClientError::InvalidImages);
         }
+
         Ok(())
     }
 
@@ -190,6 +196,7 @@ impl SandboxClient {
         if response.request_id != id {
             return Err(SandboxClientError::WrongResponse);
         }
+
         let mut result = response.outcome.ok_or(SandboxClientError::WrongResponse)?;
         let scores = match (&mut result, kind) {
             (Outcome::DeepFace(r), 0) => {
@@ -221,6 +228,7 @@ impl SandboxClient {
         {
             return Err(SandboxClientError::InvalidScore);
         }
+
         Ok(result)
     }
 }

@@ -61,12 +61,14 @@ pub fn receive() -> anyhow::Result<BootWorker> {
     if !temporary.is_dir() || temporary.uid() != 0 {
         bail!("worker staging must be a real root-owned directory");
     }
+
     let directory = File::open(runtime_parent)?;
     // SAFETY: fstatvfs writes only this initialized buffer for a live directory descriptor.
     let mut filesystem: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatvfs(directory.as_raw_fd(), &raw mut filesystem) } != 0 {
         return Err(io::Error::last_os_error()).context("failed to inspect worker staging mount");
     }
+
     if filesystem.f_flag & (libc::ST_NOEXEC | libc::ST_RDONLY) != 0 {
         bail!("worker staging requires an executable, writable root filesystem");
     }
@@ -85,6 +87,7 @@ pub fn receive() -> anyhow::Result<BootWorker> {
     if peer.cid() != NITRO_PARENT_CID {
         bail!("worker provisioner must be the parent host");
     }
+
     let timeout = Some(Duration::from_secs(config.provisioning_io_timeout_seconds));
     provisioner.set_read_timeout(timeout)?;
     provisioner.set_write_timeout(timeout)?;

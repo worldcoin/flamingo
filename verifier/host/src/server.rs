@@ -25,7 +25,6 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
 
     tracing::info!(%address, "API listening");
 
-    let shutdown_state = state.clone();
     axum::serve(
         listener,
         routes::handler()
@@ -33,42 +32,6 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
             .layer(TraceLayer::new_for_axum())
             .into_make_service(),
     )
-    .with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        shutdown_state.begin_drain();
-    })
     .await
     .context("API server failed")
-}
-
-/// Resolves on the first shutdown signal. SIGTERM as well as Ctrl-C, since that is what an
-/// orchestrator sends when it drains a pod.
-async fn shutdown_signal() {
-    let interrupt = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "failed to install Ctrl-C handler");
-            std::future::pending::<()>().await;
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => {
-                tracing::error!(%error, "failed to install SIGTERM handler");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = interrupt => tracing::info!("received Ctrl-C, draining"),
-        () = terminate => tracing::info!("received SIGTERM, draining"),
-    }
 }
