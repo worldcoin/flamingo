@@ -111,9 +111,6 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Reject private inference dependencies
-        run: python3 scripts/check-public-release.py
-
       - name: Resolve version
         id: version
         if: inputs.version != ''

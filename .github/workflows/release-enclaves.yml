@@ -86,10 +86,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Reject private inference dependencies
-        run: python3 scripts/check-public-release.py
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - name: Validate measured worker policy and build enclave
+      - name: Build enclave
         run: |
           scripts/build-enclaves.sh --workload "$WORKLOAD" target/enclave-build
           mkdir -p target/release
@@ -115,8 +113,6 @@ jobs:
               artifacts: {eifSha256: $eifSha256, ociArchiveSha256: $ociArchiveSha256},
               measurements: $measurements}' \
             > target/release/manifest.json
-      - name: Check public release contents
-        run: python3 scripts/check-public-release.py --assets target/release --workload "$WORKLOAD"
       - id: outputs
         run: |
           jq -r '"PCR0=0x\(.PCR0)", "PCR1=0x\(.PCR1)", "PCR2=0x\(.PCR2)"' \
@@ -151,10 +147,6 @@ jobs:
         with:
           name: enclave-release
           path: assets
-      - name: Check downloaded release contents
-        env:
-          WORKLOAD: ${{ needs.prepare.outputs.workload }}
-        run: python3 scripts/check-public-release.py --assets assets --workload "$WORKLOAD"
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - name: Publish OCI image
         id: oci

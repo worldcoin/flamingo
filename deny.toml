@@ -15,6 +15,16 @@ deny = [
     { name = "openssl" },
     { name = "openssl-sys" },
     { name = "openssl-src" },
+    # Inference runs in the provisioned sandbox, never in a public broker artifact.
+    { name = "biometric-engines" },
+    { name = "biometric-engines-worker" },
+    { name = "flamingo-verifier-worker" },
+    { name = "face-engine" },
+    { name = "ort" },
+    { name = "ort-sys" },
+    { name = "onnxruntime" },
+    { name = "onnxruntime-sys" },
+    { name = "hf-hub" },
 ]
 
 [licenses]

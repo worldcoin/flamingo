@@ -12,9 +12,23 @@ let
   rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml");
   craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-  publicVendorDir = craneLib.vendorCargoDeps {
-    cargoLock = root + "/Cargo.lock";
-  };
+  # Enforce the repository's dependency bans before a direct Nix build fetches anything.
+  dependencyPolicy = builtins.fromTOML (builtins.readFile (root + "/deny.toml"));
+  lockPackages = (builtins.fromTOML (builtins.readFile (root + "/Cargo.lock"))).package;
+  allowedPackage = package:
+    !(builtins.elem package.name (map (ban: ban.name) dependencyPolicy.bans.deny))
+    && (!(lib.hasPrefix "git+" (package.source or ""))
+      || lib.any (url:
+        lib.hasPrefix "git+${url}?" package.source
+        || lib.hasPrefix "git+${url}#" package.source
+      ) dependencyPolicy.sources.allow-git);
+
+  publicVendorDir =
+    assert lib.assertMsg (lib.all allowedPackage lockPackages)
+      "Public enclave builds reject banned dependencies and unapproved Git sources (deny.toml).";
+    craneLib.vendorCargoDeps {
+      cargoLock = root + "/Cargo.lock";
+    };
 
   # An external executable or model dropped into the checkout must never become
   # a compiler input (including through include_bytes!) or an image input.
@@ -37,18 +51,12 @@ let
       clang
       pkg-config
       protobuf
-      python3
     ];
     buildInputs = with pkgs; [
       minijail
       libcap
     ];
     LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-
-    # This guard applies to direct Nix builds as well as the release workflow.
-    preBuild = ''
-      python3 ${root + "/scripts/check-public-release.py"} --lockfile Cargo.lock
-    '';
 
     # LLVM's LICM scalar promotion orders work by pointer value, so rustc (1.97 and 1.98
     # both) emits different code for the same input under different address-space layouts —
