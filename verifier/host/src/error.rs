@@ -1,6 +1,6 @@
 //! Universal error handling for the API.
 //!
-//! Every route returns [`AppError`], so status codes, response bodies and logging are decided
+//! Every route returns [`ApiError`], so status codes, response bodies and logging are decided
 //! in one place. Enclave failures map differently per route, since the same enclave error
 //! means different things depending on what was asked, so each route gets its own constructor
 //! rather than a blanket `From` impl.
@@ -10,14 +10,14 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use flamingo_verifier_api_types::{ApiErrorResponse, ErrorBody};
+use flamingo_verifier_api_types::{ErrorBody, ErrorEnvelope};
 use flamingo_verifier_enclave_types as enclave_types;
 
 use crate::enclave;
 
 /// An API failure, with the status and body to return for it.
 #[derive(Debug)]
-pub struct AppError {
+pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: &'static str,
@@ -26,7 +26,7 @@ pub struct AppError {
     detail: Option<String>,
 }
 
-impl AppError {
+impl ApiError {
     /// Creates an error with the given status and body.
     #[must_use]
     pub const fn new(
@@ -157,7 +157,7 @@ impl AppError {
     }
 }
 
-impl IntoResponse for AppError {
+impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
             tracing::error!(
@@ -177,7 +177,7 @@ impl IntoResponse for AppError {
         }
 
         // The envelope owns its strings, so the `&'static str`s are copied here.
-        let body = ApiErrorResponse {
+        let body = ErrorEnvelope {
             allow_retry: self.allow_retry,
             error: ErrorBody {
                 code: self.code.to_owned(),
@@ -194,7 +194,7 @@ mod tests {
     use axum::http::StatusCode;
     use flamingo_verifier_enclave_types as enclave_types;
 
-    use super::AppError;
+    use super::ApiError;
     use crate::enclave;
 
     #[test]
@@ -211,7 +211,7 @@ mod tests {
                 "enclave_unreachable",
             ),
         ] {
-            let mapped = AppError::enclave_assignment(&error);
+            let mapped = ApiError::enclave_assignment(&error);
             assert_eq!(mapped.status(), status);
             assert_eq!(mapped.code(), code);
             assert!(mapped.allow_retry, "{code} should be retryable");
@@ -228,8 +228,8 @@ mod tests {
             let error = enclave::Error::Operation(operation);
 
             for mapped in [
-                AppError::enclave_assignment(&error),
-                AppError::enclave_match(&error),
+                ApiError::enclave_assignment(&error),
+                ApiError::enclave_match(&error),
             ] {
                 assert_eq!(mapped.status(), StatusCode::SERVICE_UNAVAILABLE);
                 assert_eq!(mapped.code(), "enclave_not_ready");
@@ -245,13 +245,13 @@ mod tests {
         let error = enclave::Error::Operation(enclave_types::Error::RequestNotOpened);
 
         // On the match path the client should re-assign and re-seal.
-        let mapped = AppError::enclave_match(&error);
+        let mapped = ApiError::enclave_match(&error);
         assert_eq!(mapped.status(), StatusCode::CONFLICT);
         assert!(mapped.allow_retry);
 
         // Reaching it from an attestation request means the enclave answered something it was
         // never asked, which is a host bug and not retryable.
-        let mapped = AppError::enclave_assignment(&error);
+        let mapped = ApiError::enclave_assignment(&error);
         assert_eq!(mapped.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!mapped.allow_retry);
     }
@@ -293,12 +293,12 @@ mod tests {
             let wrapped = enclave::Error::Operation(error);
 
             assert_eq!(
-                AppError::enclave_assignment(&wrapped).status(),
+                ApiError::enclave_assignment(&wrapped).status(),
                 on_assignment,
                 "assignment path for {error:?}"
             );
             assert_eq!(
-                AppError::enclave_match(&wrapped).status(),
+                ApiError::enclave_match(&wrapped).status(),
                 on_match,
                 "match path for {error:?}"
             );

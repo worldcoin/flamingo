@@ -1,4 +1,4 @@
-use crate::{AppState, error::AppError};
+use crate::{AppState, error::ApiError};
 use axum::{
     body::Bytes,
     extract::{State, rejection::BytesRejection},
@@ -16,13 +16,13 @@ pub async fn handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
-) -> Result<Response, AppError> {
+) -> Result<Response, ApiError> {
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
         != Some(MATCH_CONTENT_TYPE)
     {
-        return Err(AppError::new(
+        return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported_media_type",
             "Expected application/octet-stream",
@@ -31,14 +31,14 @@ pub async fn handler(
     }
     let body = body.map_err(|error| {
         if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            AppError::new(
+            ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
                 "The sealed request exceeded the body limit",
                 false,
             )
         } else {
-            AppError::new(
+            ApiError::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 "Could not read the sealed request",
@@ -47,7 +47,7 @@ pub async fn handler(
         }
     })?;
     if body.is_empty() {
-        return Err(AppError::new(
+        return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "The sealed request was empty",
@@ -58,7 +58,7 @@ pub async fn handler(
         .enclave_client()
         .run_match(enclave::MatchRequest { body })
         .await
-        .map_err(|error| AppError::enclave_match(&error))?;
+        .map_err(|error| ApiError::enclave_match(&error))?;
     Ok((
         StatusCode::OK,
         [
