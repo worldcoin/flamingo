@@ -21,9 +21,9 @@ for number in "$BOOTSTRAP_TIMEOUT_SECONDS" "$PROVISIONING_IO_TIMEOUT_SECONDS" "$
 done
 (( BOOTSTRAP_TIMEOUT_SECONDS > 0 && POLL_SECONDS > 0 && RETRY_SECONDS > 0 )) || exit 2
 # The pinned artifact and its digest are required; a malformed pin must not start.
-[[ "$WORKER_ARTIFACT_URI" =~ ^s3://[^[:space:]]+\.tar\.gz$ ]] || exit 2
-[[ "$WORKER_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
-[[ "$WORKER_RELEASE_ID" =~ ^biometric-engines-worker-v[0-9A-Za-z][0-9A-Za-z.-]*$ ]] || exit 2
+[[ "$WORKER_ARTIFACT_URI" =~ ^s3://[^[:space:]]+\.tar\.gz$ ]] || { echo "unusable WORKER_ARTIFACT_URI: $WORKER_ARTIFACT_URI" >&2; exit 2; }
+[[ "$WORKER_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "unusable WORKER_ARTIFACT_SHA256: $WORKER_ARTIFACT_SHA256" >&2; exit 2; }
+[[ "$WORKER_RELEASE_ID" =~ ^biometric-engines-worker-v[0-9A-Za-z][0-9A-Za-z.-]*$ ]] || { echo "unusable WORKER_RELEASE_ID: $WORKER_RELEASE_ID" >&2; exit 2; }
 mkdir -p "$(dirname "$WORKER_READY_FILE")"
 state=$(mktemp -d)
 enclave_id=""
@@ -79,16 +79,13 @@ while true; do
     # shellcheck disable=SC2016 # Expanded inside the supervised child.
     timeout --signal=TERM --kill-after=5s "${BOOTSTRAP_TIMEOUT_SECONDS}s" bash -c '
         set -euo pipefail
-        args=(--eif-path "$EIF_PATH" --cpu-count "$ENCLAVE_CPU_COUNT" --memory "$ENCLAVE_MEMORY_SIZE" --enclave-name "$enclave_name")
-        if [[ -n "${ENCLAVE_CID:-}" ]]; then args+=(--enclave-cid "$ENCLAVE_CID"); fi
-        nitro-cli run-enclave "${args[@]}" > "$1/launch.json"
-        cid=$(jq -er .EnclaveCID "$1/launch.json")
-        jq -er .EnclaveID "$1/launch.json" > "$1/enclave-id"
-        # Fetch the pinned artifact into this attempt state, so a retry re-downloads it.
+        # Fetch, verify and pack before launching, so a download or digest failure
+        # never starts (or terminates) an enclave. This attempt state is wiped, so a
+        # retry re-downloads the artifact.
         work="$1/artifact"
         rm -rf "$work"
         mkdir -p "$work"
-        aws s3 cp "$WORKER_ARTIFACT_URI" "$work/worker.tar.gz"
+        aws s3 cp --cli-connect-timeout 10 --cli-read-timeout 60 "$WORKER_ARTIFACT_URI" "$work/worker.tar.gz"
         echo "$WORKER_ARTIFACT_SHA256  $work/worker.tar.gz" | sha256sum -c -
         tar -xzf "$work/worker.tar.gz" -C "$work"
         shopt -s nullglob
@@ -96,7 +93,14 @@ while true; do
         [[ ${#executables[@]} -eq 1 ]] || { echo "artifact has no single worker executable" >&2; exit 1; }
         "$WORKER_TOOL" manifest "$WORKER_RELEASE_ID" "${executables[0]}" > "$work/manifest.json"
         "$WORKER_TOOL" pack "$work/manifest.json" "${executables[0]}" "$work/worker.bundle"
+        args=(--eif-path "$EIF_PATH" --cpu-count "$ENCLAVE_CPU_COUNT" --memory "$ENCLAVE_MEMORY_SIZE" --enclave-name "$enclave_name")
+        if [[ -n "${ENCLAVE_CID:-}" ]]; then args+=(--enclave-cid "$ENCLAVE_CID"); fi
+        nitro-cli run-enclave "${args[@]}" > "$1/launch.json"
+        cid=$(jq -er .EnclaveCID "$1/launch.json")
+        jq -er .EnclaveID "$1/launch.json" > "$1/enclave-id"
         "$WORKER_TOOL" send "$cid" "$work/worker.bundle" "$PROVISIONING_IO_TIMEOUT_SECONDS"
+        # The enclave has the artifact; drop the tarball, tree, manifest and bundle.
+        rm -rf "$work"
         # Provisioning ACK proves initialized worker/key setup, not a bound serving socket.
         until "$WORKER_TOOL" health "$cid"; do sleep 0.2; done
     ' _ "$state" &

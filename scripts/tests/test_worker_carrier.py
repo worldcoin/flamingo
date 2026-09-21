@@ -46,6 +46,7 @@ elif Path(sys.argv[0]).name == 'aws':
         sys.exit(1)
     shutil.copy(root/'artifact.tar.gz', args[-1])
     (root/'downloaded').touch()
+    with (root/'download.log').open('a') as log: log.write('1')
 else:
     if args[0] == 'manifest':
         # The carrier must extract the artifact and hand the real executable to the tool.
@@ -116,6 +117,16 @@ class CarrierTests(unittest.TestCase):
             time.sleep(.02)
         self.fail(f'carrier did not create {name}')
 
+    def wait_for_downloads(self, count):
+        """Wait until the mock has served `count` downloads, proving an attempt ran."""
+        until = time.monotonic()+6
+        while time.monotonic()<until:
+            log = self.root/'download.log'
+            if log.exists() and len(log.read_text()) >= count: return
+            if self.process.poll() is not None: self.fail('carrier exited unexpectedly')
+            time.sleep(.02)
+        self.fail(f'carrier did not download {count} times')
+
     def test_ready_then_shutdown_terminates_only_owned_enclave(self):
         self.start(); self.wait_for('ready')
         self.process.send_signal(signal.SIGTERM)
@@ -150,18 +161,24 @@ class CarrierTests(unittest.TestCase):
 
     def test_digest_mismatch_fails_attempt_without_sending(self):
         self.env['WORKER_ARTIFACT_SHA256'] = '0'*64
-        self.start(); self.wait_for('downloaded'); self.wait_for('terminated')
+        self.start(); self.wait_for('downloaded')
+        # Let the failed attempt finish and retry before asserting nothing launched.
+        self.wait_for_downloads(2)
+        self.assertFalse((self.root/'run-enclave.log').exists())
         self.assertFalse((self.root/'packed').exists())
         self.assertFalse((self.root/'sent').exists())
         self.assertFalse((self.root/'ready').exists())
 
-    def test_failed_download_is_retried_with_fresh_enclave(self):
+    def test_failed_download_launches_no_enclave_and_is_retried(self):
         (self.root/'download-fail').touch()
         self.start(); self.wait_for('ready')
         self.assertTrue((self.root/'download-failed').exists())
-        self.assertTrue((self.root/'terminated').exists())
+        # The failed attempt must launch nothing; the successful retry launches one.
+        self.assertFalse((self.root/'terminated').exists())
         launches = (self.root/'run-enclave.log').read_text().splitlines()
-        self.assertGreaterEqual(len(launches), 2, 'retry reused the enclave')
+        self.assertEqual(len(launches), 1, 'a failed download launched an enclave')
+        for stage in ('downloaded', 'packed', 'sent'):
+            self.assertTrue((self.root/stage).exists(), f'{stage} did not run')
 
 if __name__ == '__main__':
     if not shutil.which('timeout') or not shutil.which('jq'):
