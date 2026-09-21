@@ -1,12 +1,12 @@
 //! Provisioned worker startup and enclave serving on Linux.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use flamingo_verifier_enclave::{
     attestation::{self, NsmAttestor},
+    biometric_engine::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, SandboxBiometricEngine},
     bootstrap::{self, BootWorker},
-    face_engine::{FaceEngine, MAX_IMAGE_BYTES, MAX_REQUEST_BYTES},
     rng, server,
     state::EnclaveState,
 };
@@ -37,10 +37,9 @@ pub(super) fn run() -> anyhow::Result<()> {
             max_threads: boot.max_threads,
         },
         SandboxClientConfig {
-            startup_timeout: Duration::from_secs(120),
-            request_timeout: Duration::from_secs(10),
             max_request_bytes: MAX_REQUEST_BYTES,
             max_image_bytes: MAX_IMAGE_BYTES,
+            ..SandboxClientConfig::default()
         },
         worker_failed,
     )
@@ -68,12 +67,12 @@ fn worker_failed(error: SandboxClientError) -> ! {
 /// Attests boot keys after isolation and model initialization, then accepts requests.
 async fn serve(boot: &mut BootWorker, worker: Worker) -> anyhow::Result<()> {
     worker.check_alive();
-    let face_engine = Box::new(FaceEngine::new(worker));
+    let engine = Box::new(SandboxBiometricEngine::new(worker));
     // Attests both boot keys, so a broken NSM stops the boot and both caches start populated.
     attestation::connect()
         .await
         .context("Nitro Secure Module is unavailable")?;
-    let mut state = EnclaveState::generate(Arc::new(NsmAttestor), face_engine)
+    let mut state = EnclaveState::generate(Arc::new(NsmAttestor), engine)
         .map_err(|error| anyhow!("failed to generate and attest the boot keys: {error:?}"))?;
     let (encryption_refresh, signing_refresh) = state.start_attestation_refresh();
     let state = Arc::new(state);

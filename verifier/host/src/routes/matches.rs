@@ -77,14 +77,14 @@ pub struct UploadPermit {
 }
 
 impl axum::extract::FromRequestParts<AppState> for UploadPermit {
-    type Rejection = AppError;
+    type Rejection = ApiError;
 
     fn from_request_parts(
         _: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         let result = if state.is_draining() {
-            Err(AppError::new(
+            Err(ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "not_ready",
                 "The verifier is not ready",
@@ -95,7 +95,7 @@ impl axum::extract::FromRequestParts<AppState> for UploadPermit {
                 .try_acquire_owned()
                 .map(|permit| Self { _permit: permit })
                 .map_err(|_| {
-                    AppError::new(
+                    ApiError::new(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "not_ready",
                         "The verifier is at capacity or draining",

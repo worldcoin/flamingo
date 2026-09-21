@@ -6,9 +6,12 @@ use std::{
 };
 
 use biometric_engines_protocol::{
-    Failure, Operation, Request, ResponseBody,
-    face::{self, FaceImagePayload, LiveCapture},
+    Failure, Request,
+    face::{self, face_image::Source},
+    failure::Kind,
     protobuf,
+    request::Operation,
+    response::Outcome,
 };
 
 use crate::transport;
@@ -24,6 +27,17 @@ pub struct SandboxClientConfig {
     pub request_timeout: Duration,
     pub max_request_bytes: usize,
     pub max_image_bytes: usize,
+}
+
+impl Default for SandboxClientConfig {
+    fn default() -> Self {
+        Self {
+            startup_timeout: Duration::from_secs(120),
+            request_timeout: Duration::from_secs(10),
+            max_request_bytes: 7 * 1024 * 1024 + 1024,
+            max_image_bytes: 4 * 1024 * 1024,
+        }
+    }
 }
 
 impl SandboxClientConfig {
@@ -85,7 +99,7 @@ impl SandboxClient {
     }
 
     /// Own this call through completion, including when an async caller is cancelled.
-    pub fn evaluate(&mut self, operation: Operation) -> Result<ResponseBody, SandboxClientError> {
+    pub fn evaluate(&mut self, operation: Operation) -> Result<Outcome, SandboxClientError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
@@ -94,7 +108,7 @@ impl SandboxClient {
         let kind = match operation {
             Operation::DeepFace(_) => 0,
             Operation::GrayBadge(_) => 1,
-            Operation::GenerateEmbedding(_) => {
+            Operation::Embedding(_) => {
                 return Err(SandboxClientError::UnsupportedOperation);
             }
         };
@@ -103,11 +117,7 @@ impl SandboxClient {
             .next_id
             .checked_add(1)
             .ok_or(SandboxClientError::RequestIdExhausted)?;
-        let payload = protobuf::encode_request(Request {
-            request_id: id,
-            operation,
-        })
-        .map_err(SandboxClientError::RequestEncoding)?;
+        let payload = protobuf::encode_request(&Request::new(id, operation));
         if payload.len() > self.config.max_request_bytes {
             return Err(SandboxClientError::InvalidImages);
         }
@@ -122,44 +132,40 @@ impl SandboxClient {
     }
 
     fn validate_images(&self, operation: &Operation) -> Result<(), SandboxClientError> {
-        let mut images = Vec::with_capacity(4);
-        let live = match operation {
-            Operation::DeepFace(r) => {
-                images.extend([&r.orb_credential, &r.rtms_challenge]);
-                Some(&r.live)
-            }
-            Operation::GrayBadge(r) => {
-                images.push(&r.rtms_challenge);
-                Some(&r.live)
-            }
-            Operation::GenerateEmbedding(r) => {
-                match &r.image {
-                    FaceImagePayload::OrbCredential(i)
-                    | FaceImagePayload::VanillaSelfie(i)
-                    | FaceImagePayload::RtmsChallenge(i) => images.push(i),
-                    FaceImagePayload::LightGuardSelfie {
-                        illuminated,
-                        unilluminated,
-                        ..
-                    } => images.extend([illuminated, unilluminated]),
-                }
-                None
-            }
+        let image_fields = match operation {
+            Operation::DeepFace(r) => vec![&r.credential, &r.live, &r.challenge],
+            Operation::GrayBadge(r) => vec![&r.live, &r.challenge],
+            Operation::Embedding(_) => return Err(SandboxClientError::UnsupportedOperation),
         };
-        match live {
-            Some(LiveCapture::Vanilla(i)) => images.push(i),
-            Some(LiveCapture::LightGuard {
-                illuminated,
-                unilluminated,
-                ..
-            }) => images.extend([illuminated, unilluminated]),
-            None => {}
+        let mut total = 0_usize;
+        for image in image_fields {
+            let source = image
+                .as_ref()
+                .and_then(|image| image.source.as_ref())
+                .ok_or(SandboxClientError::InvalidImages)?;
+            let images: &[&[u8]] = match source {
+                Source::Orb(bytes) | Source::VanillaSelfie(bytes) | Source::Rtms(bytes) => &[bytes],
+                Source::LightGuard(pair) => {
+                    if !matches!(
+                        face::LightGuardMatchingFrame::try_from(pair.matching_frame),
+                        Ok(face::LightGuardMatchingFrame::Illuminated
+                            | face::LightGuardMatchingFrame::Unilluminated)
+                    ) {
+                        return Err(SandboxClientError::InvalidImages);
+                    }
+                    &[&pair.illuminated, &pair.unilluminated]
+                }
+            };
+            for bytes in images {
+                if bytes.is_empty() || bytes.len() > self.config.max_image_bytes {
+                    return Err(SandboxClientError::InvalidImages);
+                }
+                total = total
+                    .checked_add(bytes.len())
+                    .ok_or(SandboxClientError::InvalidImages)?;
+            }
         }
-        if images
-            .iter()
-            .any(|i| i.0.is_empty() || i.0.len() > self.config.max_image_bytes)
-            || images.iter().map(|i| i.0.len()).sum::<usize>() > self.config.max_request_bytes
-        {
+        if total > self.config.max_request_bytes || total > face::MAX_TOTAL_IMAGE_BYTES {
             return Err(SandboxClientError::InvalidImages);
         }
         Ok(())
@@ -171,7 +177,7 @@ impl SandboxClient {
         id: u64,
         kind: u8,
         deadline: Instant,
-    ) -> Result<ResponseBody, SandboxClientError> {
+    ) -> Result<Outcome, SandboxClientError> {
         let stream = self
             .stream
             .as_mut()
@@ -179,30 +185,39 @@ impl SandboxClient {
         transport::write_frame(stream, payload, deadline).map_err(SandboxClientError::transport)?;
         let bytes = transport::read_frame(stream, MAX_RESPONSE_BYTES, deadline)
             .map_err(SandboxClientError::transport)?;
-        let response = protobuf::decode_response(&bytes).map_err(SandboxClientError::Protocol)?;
+        let response = protobuf::decode_response(&bytes).map_err(SandboxClientError::protocol)?;
         transport::remaining(deadline).map_err(SandboxClientError::transport)?;
         if response.request_id != id {
             return Err(SandboxClientError::WrongResponse);
         }
-        let result = match response.outcome {
-            Ok(result) => result,
-            Err(Failure::Face(error)) if error.code != face::FailureCode::Internal => {
-                return Err(SandboxClientError::AnalysisFailed(error));
+        let mut result = response.outcome.ok_or(SandboxClientError::WrongResponse)?;
+        let scores = match (&mut result, kind) {
+            (Outcome::DeepFace(r), 0) => {
+                r.debug_report = None;
+                vec![
+                    r.similarity_credential_live,
+                    r.similarity_credential_challenge,
+                    r.similarity_live_challenge,
+                ]
             }
-            Err(error) => return Err(SandboxClientError::Protocol(error)),
-        };
-        let scores = match (&result, kind) {
-            (ResponseBody::DeepFace(r), 0) => vec![
-                r.similarity_orb_selfie,
-                r.similarity_orb_challenge,
-                r.similarity_selfie_challenge,
-            ],
-            (ResponseBody::GrayBadge(r), 1) => vec![r.similarity_selfie_challenge],
+            (Outcome::GrayBadge(r), 1) => {
+                r.debug_report = None;
+                vec![r.similarity_live_challenge]
+            }
+            (Outcome::Failure(failure), _) => {
+                if let Some(Kind::Face(error)) = &mut failure.kind {
+                    error.debug_report = None;
+                    if error.code != face::FailureCode::Internal as i32 {
+                        return Err(SandboxClientError::AnalysisFailed(error.clone()));
+                    }
+                }
+                return Err(SandboxClientError::protocol(failure.clone()));
+            }
             _ => return Err(SandboxClientError::WrongResponse),
         };
         if scores
             .iter()
-            .any(|s| !s.is_finite() || !(-1.0..=1.0).contains(s))
+            .any(|s| !s.is_some_and(|s| s.is_finite() && (-1.0..=1.0).contains(&s)))
         {
             return Err(SandboxClientError::InvalidScore);
         }
@@ -213,9 +228,7 @@ impl SandboxClient {
 /// Payload-free errors; only input/biological failures leave the connection reusable.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SandboxClientError {
-    #[error("worker request encoding failed: {0}")]
-    RequestEncoding(Failure),
-    #[error("worker protocol failure: {0}")]
+    #[error("worker protocol failure")]
     Protocol(Failure),
     #[error("worker socket I/O failed: {0}")]
     Transport(Arc<io::Error>),
@@ -233,7 +246,7 @@ pub enum SandboxClientError {
     InvalidScore,
     #[error("worker response ID or operation did not match")]
     WrongResponse,
-    #[error("worker image analysis failed: {0}")]
+    #[error("worker image analysis failed")]
     AnalysisFailed(face::Failure),
     #[error("worker operation is not enabled")]
     UnsupportedOperation,
@@ -242,6 +255,13 @@ pub enum SandboxClientError {
 }
 
 impl SandboxClientError {
+    fn protocol(mut failure: Failure) -> Self {
+        if let Some(Kind::Face(error)) = &mut failure.kind {
+            error.debug_report = None;
+        }
+        Self::Protocol(failure)
+    }
+
     fn transport(error: io::Error) -> Self {
         if matches!(
             error.kind(),

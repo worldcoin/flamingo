@@ -11,6 +11,7 @@ name = "verifier-enclave"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 anyhow.workspace = true
 flamingo-verifier-api-types.workspace = true
 ark-babyjubjub.workspace = true

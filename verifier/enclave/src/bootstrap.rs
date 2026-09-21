@@ -52,7 +52,7 @@ pub fn receive() -> anyhow::Result<BootWorker> {
         time::Duration,
     };
 
-    let config = Config::load_from(Path::new("/etc/flamingo/worker-bootstrap.json"))?;
+    let config = Config::default();
     config.validate()?;
     // Nitro init mounts /tmp noexec. Stage on the executable root filesystem instead;
     // execveat retains the original descriptor's mount flags across the worker's bind mount.

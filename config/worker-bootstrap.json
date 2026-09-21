@@ -1,6 +1,0 @@
-{
-  "max_bundle_bytes": 1073741824,
-  "address_space_bytes": 3221225472,
-  "max_threads": 32,
-  "provisioning_io_timeout_seconds": 120
-}

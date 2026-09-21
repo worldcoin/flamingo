@@ -6,11 +6,14 @@ use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_sealed_types::MATCH_CHANNEL_DOMAIN;
 use pontifex::{ChannelDomain, ChannelEnclave};
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinHandle,
+};
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
-    face_engine::FaceComparator,
+    biometric_engine::BiometricEngine,
     keys::SigningKey,
 };
 
@@ -24,10 +27,9 @@ pub struct EnclaveState {
     attested_encryption_key: AttestedKey,
     /// Cached attestation of the statement key.
     attested_signing_key: AttestedKey,
-    /// Exclusive worker access, held only during the blocking comparison.
-    /// Bounds decrypted requests retained while the worker is busy.
-    pub(crate) admission: Arc<tokio::sync::Semaphore>,
-    pub(crate) comparator: Arc<Mutex<Box<dyn FaceComparator>>>,
+    /// Bounds requests performing decryption, policy and signing.
+    admission: Arc<Semaphore>,
+    engine: Box<dyn BiometricEngine>,
 }
 
 impl EnclaveState {
@@ -42,7 +44,7 @@ impl EnclaveState {
     /// be serialized, or either key cannot be attested.
     pub fn generate(
         attestor: Arc<dyn Attestor>,
-        face_engine: Box<dyn FaceComparator>,
+        engine: Box<dyn BiometricEngine>,
     ) -> Result<Self, enclave_types::Error> {
         let channel = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN)).map_err(
             |error| {
@@ -75,8 +77,8 @@ impl EnclaveState {
             signing_key,
             attested_encryption_key,
             attested_signing_key,
-            admission: Arc::new(tokio::sync::Semaphore::new(4)),
-            comparator: Arc::new(Mutex::new(face_engine)),
+            admission: Arc::new(Semaphore::new(4)),
+            engine,
         })
     }
 
@@ -106,9 +108,17 @@ impl EnclaveState {
 
     /// Checks an idle worker without waiting for an in-flight comparison.
     pub fn check_worker_health(&self) {
-        if let Ok(worker) = self.comparator.try_lock() {
-            worker.check_health();
-        }
+        self.engine.check_health();
+    }
+
+    pub(crate) fn engine(&self) -> &dyn BiometricEngine {
+        self.engine.as_ref()
+    }
+
+    pub(crate) fn admit(&self) -> Result<OwnedSemaphorePermit, enclave_types::Error> {
+        Arc::clone(&self.admission)
+            .try_acquire_owned()
+            .map_err(|_| enclave_types::Error::NotReady)
     }
 
     /// Starts background attestation refresh for both boot keys.
@@ -143,7 +153,7 @@ mod tests {
     use flamingo_verifier_enclave_types as enclave_types;
 
     use super::EnclaveState;
-    use crate::test_support::{EchoAttestor, FailingAttestor, UnusedFaceEngine, state_with};
+    use crate::test_support::{EchoAttestor, FailingAttestor, UnusedBiometricEngine, state_with};
 
     fn state() -> Arc<EnclaveState> {
         state_with(Arc::new(EchoAttestor))
@@ -191,7 +201,8 @@ mod tests {
     #[test]
     fn an_attestor_that_fails_fails_the_boot() {
         let error =
-            EnclaveState::generate(Arc::new(FailingAttestor), Box::new(UnusedFaceEngine)).err();
+            EnclaveState::generate(Arc::new(FailingAttestor), Box::new(UnusedBiometricEngine))
+                .err();
 
         assert_eq!(error, Some(enclave_types::Error::AttestationFailed));
     }

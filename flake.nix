@@ -35,7 +35,6 @@
       };
       enclaveImages = import ./nix/enclave-images.nix {
         inherit system pkgs nitro-util enclaveBins;
-        workerBootstrapConfig = ./config/worker-bootstrap.json;
       };
     in
     {

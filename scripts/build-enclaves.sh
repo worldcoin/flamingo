@@ -15,7 +15,7 @@ set -euo pipefail
 #   <workload>-enclave.eif   the enclave image
 #   <workload>-pcr.json      PCR measurements extracted from the EIF
 #
-# Verifier releases use measured resource budgets in config/worker-bootstrap.json.
+# Verifier resource budgets are compiled into the measured enclave binary.
 # The external executable is added to the carrier separately, never to the EIF.
 
 # A new workload is an entry here plus a `<name>-eif` output in flake.nix.
@@ -77,11 +77,6 @@ command -v nix >/dev/null || {
   echo "[ERROR] nix not found. The OCI image and EIF are built by flake.nix." >&2
   exit 1
 }
-
-if [[ "$workload" == "verifier" ]]; then
-  # Use the exact broker parser and integer bounds, not a shell approximation.
-  nix run --no-update-lock-file .#sandbox-bundle -- validate-config config/worker-bootstrap.json
-fi
 
 mkdir -p "$out_dir"
 out_dir="$(cd "$out_dir" && pwd)"

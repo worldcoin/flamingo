@@ -9,9 +9,11 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use biometric_engines_protocol::{
-    Failure, Operation, Response, ResponseBody,
-    face::{DeepFaceResult, Failure as FaceFailure, FailureCode},
+    Response,
+    face::{DeepFaceResult, Failure as FaceFailure, FailureCode, face_image::Source},
     framing, protobuf,
+    request::Operation,
+    response::Outcome,
 };
 #[cfg(target_os = "linux")]
 #[used]
@@ -107,11 +109,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     framing::write_frame(&mut socket, &protobuf::encode_ready())?;
     while let Some(bytes) = framing::read_frame(&mut socket)? {
         let request = protobuf::decode_request(&bytes)?;
-        let Operation::DeepFace(input) = request.operation else {
+        let Some(Operation::DeepFace(input)) = request.operation else {
             panic!("expected DeepFace")
         };
+        let Some(Source::Orb(credential)) = input.credential.and_then(|image| image.source) else {
+            panic!("expected credential image")
+        };
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-            match input.orb_credential.0[0] {
+            match credential[0] {
                 200 => {
                     std::thread::spawn(|| {
                         loop {
@@ -130,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 205..=219 => {
                     // All calls must kill the whole process, even from a secondary thread.
                     unsafe {
-                        match input.orb_credential.0[0] {
+                        match credential[0] {
                             205 => {
                                 libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
                             }
@@ -272,9 +277,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 250 => {
-                    return Ok(Err(Failure::Face(FaceFailure::new(
-                        FailureCode::InvalidImage,
-                    ))));
+                    return Ok(Outcome::Failure(
+                        FaceFailure::new(FailureCode::InvalidImage).into(),
+                    ));
                 }
                 252 => unsafe {
                     libc::signal(libc::SIGTERM, libc::SIG_IGN);
@@ -286,18 +291,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 254 => return Err(Box::new(io::Error::other("fixture model failed"))),
                 _ => {}
             }
-            Ok(Ok(ResponseBody::DeepFace(DeepFaceResult {
-                similarity_orb_selfie: 0.8,
-                similarity_orb_challenge: 0.9,
-                similarity_selfie_challenge: 0.85,
-            })))
+            Ok(Outcome::DeepFace(DeepFaceResult {
+                similarity_credential_live: Some(0.8),
+                similarity_credential_challenge: Some(0.9),
+                similarity_live_challenge: Some(0.85),
+                debug_report: None,
+            }))
         })()?;
         framing::write_frame(
             &mut socket,
-            &protobuf::encode_response(Response {
-                request_id: request.request_id,
-                outcome: result,
-            }),
+            &protobuf::encode_response(&Response::new(request.request_id, result)),
         )?;
     }
     Ok(())

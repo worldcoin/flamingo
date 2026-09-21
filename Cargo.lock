@@ -347,7 +347,7 @@ dependencies = [
 [[package]]
 name = "biometric-engines-protocol"
 version = "0.1.0"
-source = "git+https://github.com/worldcoin/biometric-engines?rev=60de92b37c2e6dbcb4ad8f543d72fd6024506c96#60de92b37c2e6dbcb4ad8f543d72fd6024506c96"
+source = "git+https://github.com/worldcoin/biometric-engines?rev=1f666cf92f434fa3a3436ef76f0109821eb22f5b#1f666cf92f434fa3a3436ef76f0109821eb22f5b"
 dependencies = [
  "prost",
  "prost-build",
@@ -1042,6 +1042,7 @@ name = "flamingo-verifier-enclave"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "biometric-engines-protocol",
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",

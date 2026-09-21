@@ -8,18 +8,13 @@ use std::{
     path::Path,
 };
 
-use flamingo_verifier_sandbox_bundle::{
-    BootstrapConfig, MAX_BUNDLE_BYTES, MAX_MANIFEST_BYTES, Manifest,
-};
+use flamingo_verifier_sandbox_bundle::{MAX_BUNDLE_BYTES, MAX_MANIFEST_BYTES, Manifest};
 use sha2::{Digest, Sha384};
 
 /// Deployment pipelines pin the emitted executable digest.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("validate-config") if args.len() == 3 => {
-            BootstrapConfig::load_from(Path::new(&args[2]))?.validate()?;
-        }
         Some("manifest") if args.len() == 4 => {
             let executable = Path::new(&args[3]);
             if !fs::symlink_metadata(executable)?.is_file() {
@@ -79,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(concat!(
                 "usage: sandbox-bundle manifest RELEASE_ID EXECUTABLE | ",
                 "pack MANIFEST EXECUTABLE OUTPUT | ",
-                "send CID BUNDLE IO_TIMEOUT_SECONDS | health CID | validate-config CONFIG_PATH"
+                "send CID BUNDLE IO_TIMEOUT_SECONDS | health CID"
             )
             .into());
         }

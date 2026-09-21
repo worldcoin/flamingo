@@ -126,19 +126,14 @@ jobs:
         env:
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
-          worker_bootstrap='null'
-          if [[ "$WORKLOAD" == verifier ]]; then
-            worker_bootstrap=$(jq -c . config/worker-bootstrap.json)
-          fi
           jq -n \
             --arg workload "$WORKLOAD" --arg version "$VERSION" --arg gitSha "$RELEASE_SHA" \
             --arg eifSha256 "$(sha256sum "target/release/$WORKLOAD-enclave.eif" | cut -d' ' -f1)" \
             --arg ociArchiveSha256 "$(sha256sum "target/release/$WORKLOAD-oci.tar.gz" | cut -d' ' -f1)" \
             --argjson measurements "$(cat "target/release/$WORKLOAD-pcr.json")" \
-            --argjson workerBootstrap "$worker_bootstrap" \
             '{workload: $workload, version: $version, gitSha: $gitSha,
               artifacts: {eifSha256: $eifSha256, ociArchiveSha256: $ociArchiveSha256},
-              measurements: $measurements, workerBootstrap: $workerBootstrap}' \
+              measurements: $measurements}' \
             > target/release/manifest.json
       - name: Check public release contents
         run: python3 scripts/check-public-release.py --assets target/release --workload "$WORKLOAD"

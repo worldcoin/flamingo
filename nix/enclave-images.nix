@@ -3,7 +3,6 @@
   pkgs,
   nitro-util,
   enclaveBins,
-  workerBootstrapConfig,
 }:
 let
   nitroLib = nitro-util.lib.${system};
@@ -19,7 +18,6 @@ let
     {
       workload,
       pname,
-      extraRoot ? [ ],
     }:
     let
       version = enclaveBins.${pname}.version;
@@ -30,8 +28,7 @@ let
         paths = [
           enclaveBins.${pname}
           pkgs.cacert
-        ]
-        ++ extraRoot;
+        ];
         pathsToLink = [
           "/bin"
           "/etc"
@@ -96,13 +93,6 @@ let
   verifier = buildEnclaveImage {
     workload = "verifier";
     pname = "verifier-enclave";
-    extraRoot = [
-      (pkgs.runCommand "verifier-bootstrap-config" { } ''
-        mkdir -p "$out/etc/flamingo"
-        cp ${workerBootstrapConfig} "$out/etc/flamingo/worker-bootstrap.json"
-        chmod 0444 "$out/etc/flamingo/worker-bootstrap.json"
-      '')
-    ];
   };
 in
 {

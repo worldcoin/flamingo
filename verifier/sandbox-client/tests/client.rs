@@ -1,10 +1,12 @@
 use biometric_engines_protocol::{
-    Failure, Operation, ProtocolFailure, Response, ResponseBody,
+    EmptyReason, Response,
     face::{
-        DeepFaceRequest, DeepFaceResult, Failure as FaceFailure, FailureCode, GrayBadgeRequest,
-        GrayBadgeResult, ImageBytes, LiveCapture,
+        DeepFaceRequest, DeepFaceResult, FaceImage, Failure as FaceFailure, FailureCode,
+        GrayBadgeRequest, GrayBadgeResult, face_image::Source,
     },
-    framing, protobuf,
+    framing, protobuf, protocol_failure,
+    request::Operation,
+    response::Outcome,
 };
 use flamingo_verifier_sandbox_client::{SandboxClient, SandboxClientConfig, SandboxClientError};
 use std::{io::Write, os::unix::net::UnixStream, thread, time::Duration};
@@ -19,16 +21,23 @@ fn config() -> SandboxClientConfig {
 }
 fn request() -> Operation {
     Operation::DeepFace(DeepFaceRequest {
-        orb_credential: ImageBytes(vec![1]),
-        live: LiveCapture::Vanilla(ImageBytes(vec![2])),
-        rtms_challenge: ImageBytes(vec![3]),
+        credential: Some(FaceImage {
+            source: Some(Source::Orb(vec![1])),
+        }),
+        live: Some(FaceImage {
+            source: Some(Source::VanillaSelfie(vec![2])),
+        }),
+        challenge: Some(FaceImage {
+            source: Some(Source::Rtms(vec![3])),
+        }),
     })
 }
-fn scores() -> ResponseBody {
-    ResponseBody::DeepFace(DeepFaceResult {
-        similarity_orb_selfie: 0.8,
-        similarity_orb_challenge: 0.9,
-        similarity_selfie_challenge: 0.85,
+fn scores() -> Outcome {
+    Outcome::DeepFace(DeepFaceResult {
+        similarity_credential_live: Some(0.8),
+        similarity_credential_challenge: Some(0.9),
+        similarity_live_challenge: Some(0.85),
+        debug_report: None,
     })
 }
 fn ready(stream: &mut UnixStream) {
@@ -68,23 +77,21 @@ fn deepface_graybadge_and_typed_biological_failure_share_one_connection() {
             assert_eq!(r.request_id, id);
             let outcome = match id {
                 1 => {
-                    assert!(matches!(r.operation, Operation::DeepFace(_)));
-                    Err(Failure::Face(FaceFailure::new(FailureCode::InvalidImage)))
+                    assert!(matches!(r.operation, Some(Operation::DeepFace(_))));
+                    Outcome::Failure(FaceFailure::new(FailureCode::InvalidImage).into())
                 }
-                2 => Ok(scores()),
+                2 => scores(),
                 _ => {
-                    assert!(matches!(r.operation, Operation::GrayBadge(_)));
-                    Ok(ResponseBody::GrayBadge(GrayBadgeResult {
-                        similarity_selfie_challenge: 0.7,
-                    }))
+                    assert!(matches!(r.operation, Some(Operation::GrayBadge(_))));
+                    Outcome::GrayBadge(GrayBadgeResult {
+                        similarity_live_challenge: Some(0.7),
+                        debug_report: None,
+                    })
                 }
             };
             framing::write_frame(
                 &mut server,
-                &protobuf::encode_response(Response {
-                    request_id: id,
-                    outcome,
-                }),
+                &protobuf::encode_response(&Response::new(id, outcome)),
             )
             .unwrap();
         }
@@ -100,11 +107,15 @@ fn deepface_graybadge_and_typed_biological_failure_share_one_connection() {
     assert!(matches!(
         client
             .evaluate(Operation::GrayBadge(GrayBadgeRequest {
-                live: LiveCapture::Vanilla(ImageBytes(vec![1])),
-                rtms_challenge: ImageBytes(vec![2])
+                live: Some(FaceImage {
+                    source: Some(Source::VanillaSelfie(vec![1]))
+                }),
+                challenge: Some(FaceImage {
+                    source: Some(Source::Rtms(vec![2]))
+                })
             }))
             .unwrap(),
-        ResponseBody::GrayBadge(_)
+        Outcome::GrayBadge(_)
     ));
     done.send(()).unwrap();
     peer.join().unwrap();
@@ -112,31 +123,38 @@ fn deepface_graybadge_and_typed_biological_failure_share_one_connection() {
 
 #[test]
 fn response_corruption_poisoning_is_permanent() {
-    for case in 0..10 {
+    for case in 0..15 {
         let (client, mut server) = UnixStream::pair().unwrap();
         let peer = thread::spawn(move || {
             ready(&mut server);
             let r = protobuf::decode_request(&framing::read_frame(&mut server).unwrap().unwrap())
                 .unwrap();
-            let mut response = Response {
-                request_id: r.request_id,
-                outcome: Ok(scores()),
-            };
+            let mut response = Response::new(r.request_id, scores());
             match case {
                 0 => response.request_id += 1,
                 1 => {
-                    response.outcome = Ok(ResponseBody::GrayBadge(GrayBadgeResult {
-                        similarity_selfie_challenge: 0.8,
+                    response.outcome = Some(Outcome::GrayBadge(GrayBadgeResult {
+                        similarity_live_challenge: Some(0.8),
+                        debug_report: None,
                     }))
                 }
                 2..=4 => {
-                    let Ok(ResponseBody::DeepFace(ref mut scores)) = response.outcome else {
+                    let Some(Outcome::DeepFace(ref mut scores)) = response.outcome else {
                         unreachable!()
                     };
-                    scores.similarity_selfie_challenge = [f64::NAN, f64::INFINITY, 1.1][case - 2];
+                    scores.similarity_live_challenge =
+                        Some([f64::NAN, f64::INFINITY, 1.1][case - 2]);
                 }
-                5 => response.outcome = Err(Failure::Face(FaceFailure::new(FailureCode::Internal))),
-                6 => response.outcome = Err(Failure::Protocol(ProtocolFailure::UnsupportedVersion)),
+                5 => {
+                    response.outcome = Some(Outcome::Failure(
+                        FaceFailure::new(FailureCode::Internal).into(),
+                    ))
+                }
+                6 => {
+                    response.outcome = Some(Outcome::Failure(
+                        protocol_failure::Reason::UnsupportedVersion(EmptyReason {}).into(),
+                    ))
+                }
                 7 => {
                     server.write_all(&u32::MAX.to_be_bytes()).unwrap();
                     return;
@@ -146,9 +164,33 @@ fn response_corruption_poisoning_is_permanent() {
                     return;
                 }
                 9 => return,
+                10 => response.outcome = None,
+                11 => response.protocol_version += 1,
+                12 => {
+                    let Some(Outcome::DeepFace(ref mut scores)) = response.outcome else {
+                        unreachable!()
+                    };
+                    scores.similarity_credential_live = None;
+                }
+                13 => {
+                    response.outcome = Some(Outcome::Failure(
+                        FaceFailure {
+                            code: 999,
+                            ..FaceFailure::default()
+                        }
+                        .into(),
+                    ))
+                }
+                14 => {
+                    response.outcome = None;
+                    let mut bytes = protobuf::encode_response(&response);
+                    bytes.extend([0x3a, 0]); // Unknown future outcome field 7.
+                    framing::write_frame(&mut server, &bytes).unwrap();
+                    return;
+                }
                 _ => unreachable!(),
             }
-            framing::write_frame(&mut server, &protobuf::encode_response(response)).unwrap();
+            framing::write_frame(&mut server, &protobuf::encode_response(&response)).unwrap();
         });
         let mut client = SandboxClient::new(client, config()).unwrap();
         assert!(client.evaluate(request()).is_err(), "case {case}");
@@ -166,7 +208,9 @@ fn local_validation_does_not_touch_or_poison_socket() {
     let Operation::DeepFace(mut r) = request() else {
         unreachable!()
     };
-    r.orb_credential.0.resize(101, 0);
+    r.credential = Some(FaceImage {
+        source: Some(Source::Orb(vec![0; 101])),
+    });
     assert!(matches!(
         client.evaluate(Operation::DeepFace(r)),
         Err(SandboxClientError::InvalidImages)
@@ -200,4 +244,112 @@ fn partial_progress_does_not_extend_the_request_deadline() {
     ));
     assert!(client.failure().is_some());
     peer.join().unwrap();
+}
+
+#[test]
+fn worker_diagnostics_never_escape_the_client() {
+    for internal in [false, true] {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let (done, wait) = std::sync::mpsc::channel();
+        let peer = thread::spawn(move || {
+            ready(&mut server);
+            let request =
+                protobuf::decode_request(&framing::read_frame(&mut server).unwrap().unwrap())
+                    .unwrap();
+            let mut result = scores();
+            if let Outcome::DeepFace(result) = &mut result {
+                result.debug_report = Some("sensitive model diagnostic".to_owned());
+            }
+            framing::write_frame(
+                &mut server,
+                &protobuf::encode_response(&Response::new(request.request_id, result)),
+            )
+            .unwrap();
+            let request =
+                protobuf::decode_request(&framing::read_frame(&mut server).unwrap().unwrap())
+                    .unwrap();
+            let failure = FaceFailure {
+                debug_report: Some("sensitive image diagnostic".to_owned()),
+                ..FaceFailure::new(if internal {
+                    FailureCode::Internal
+                } else {
+                    FailureCode::InvalidImage
+                })
+            };
+            framing::write_frame(
+                &mut server,
+                &protobuf::encode_response(&Response::new(
+                    request.request_id,
+                    Outcome::Failure(failure.into()),
+                )),
+            )
+            .unwrap();
+            // A real worker stays alive after replying. On macOS, setting a socket
+            // timeout after peer close fails even when response bytes remain buffered.
+            wait.recv().unwrap();
+        });
+        let mut client = SandboxClient::new(client, config()).unwrap();
+        assert_eq!(client.evaluate(request()).unwrap(), scores());
+        let error = client.evaluate(request()).unwrap_err();
+        assert!(!format!("{error} {error:?}").contains("sensitive"));
+        match error {
+            SandboxClientError::AnalysisFailed(failure) => assert!(failure.debug_report.is_none()),
+            SandboxClientError::Protocol(failure) => {
+                let Some(biometric_engines_protocol::failure::Kind::Face(failure)) = failure.kind
+                else {
+                    panic!("expected face failure")
+                };
+                assert!(failure.debug_report.is_none());
+            }
+            error => panic!("unexpected error: {error}"),
+        }
+        assert_eq!(client.failure().is_some(), internal);
+        done.send(()).unwrap();
+        peer.join().unwrap();
+    }
+}
+
+#[test]
+fn malformed_or_oversized_image_sources_are_rejected_locally() {
+    use biometric_engines_protocol::face::LightGuard;
+    for image in [
+        None,
+        Some(FaceImage { source: None }),
+        Some(FaceImage {
+            source: Some(Source::Orb(vec![])),
+        }),
+        Some(FaceImage {
+            source: Some(Source::LightGuard(LightGuard {
+                illuminated: vec![1],
+                unilluminated: vec![2],
+                matching_frame: 0,
+            })),
+        }),
+        Some(FaceImage {
+            source: Some(Source::LightGuard(LightGuard {
+                illuminated: vec![1],
+                unilluminated: vec![2; 101],
+                matching_frame: 1,
+            })),
+        }),
+    ] {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        ready(&mut server);
+        let mut client = SandboxClient::new(client, config()).unwrap();
+        let Operation::DeepFace(mut input) = request() else {
+            unreachable!()
+        };
+        input.live = image;
+        assert!(matches!(
+            client.evaluate(Operation::DeepFace(input)),
+            Err(SandboxClientError::InvalidImages)
+        ));
+        assert!(client.failure().is_none());
+        server.set_nonblocking(true).unwrap();
+        use std::io::Read;
+        assert_eq!(
+            server.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }

@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{SandboxClient, SandboxClientConfig, SandboxClientError};
-use biometric_engines_protocol::{Operation, ResponseBody};
+use biometric_engines_protocol::{request::Operation, response::Outcome};
 
 #[path = "sandbox.rs"]
 mod sandbox;
@@ -87,7 +87,7 @@ impl Worker {
     /// Returns only success or recoverable RPC errors. Fatal errors kill the worker and exit
     /// through the broker's handler; RPC logging already records the original failure.
     #[tracing::instrument(skip_all, fields(dependency = "biometric_worker", pid = self.pid))]
-    pub fn evaluate(&mut self, request: Operation) -> Result<ResponseBody, WorkerError> {
+    pub fn evaluate(&mut self, request: Operation) -> Result<Outcome, WorkerError> {
         self.check_alive();
         let result = self.rpc.evaluate(request);
         if let Some(error) = self.rpc.failure().cloned() {

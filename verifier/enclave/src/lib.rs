@@ -10,13 +10,15 @@
 
 /// Nitro Secure Module attestation.
 pub mod attestation;
+/// Inference operations implemented by the sandboxed biometric worker.
+pub mod biometric_engine;
 /// Single-threaded runtime provisioning with integrity checks.
 #[cfg(target_os = "linux")]
 pub mod bootstrap;
-/// Face embedding generation and comparison.
-pub mod face_engine;
+mod execution;
 /// Boot-scoped key material.
 pub mod keys;
+mod operations;
 /// PCP binding verification (transport-free).
 pub mod pcp;
 /// Nitro hardware RNG verification.

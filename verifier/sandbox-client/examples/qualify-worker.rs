@@ -4,8 +4,9 @@
 /// Uses explicit resource budgets and an approved face fixture; never starts a broker runtime.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use biometric_engines_protocol::{
-        Operation, ResponseBody,
-        face::{DeepFaceRequest, ImageBytes, LiveCapture},
+        face::{DeepFaceRequest, FaceImage, face_image::Source},
+        request::Operation,
+        response::Outcome,
     };
     use flamingo_verifier_sandbox_client::{SandboxClientConfig, SandboxClientError};
     use flamingo_verifier_sandbox_client::{SandboxConfig, Worker, WorkerError};
@@ -28,9 +29,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let request = || {
         Operation::DeepFace(DeepFaceRequest {
-            orb_credential: ImageBytes(image.clone()),
-            live: LiveCapture::Vanilla(ImageBytes(image.clone())),
-            rtms_challenge: ImageBytes(image.clone()),
+            credential: Some(FaceImage {
+                source: Some(Source::Orb(image.clone())),
+            }),
+            live: Some(FaceImage {
+                source: Some(Source::VanillaSelfie(image.clone())),
+            }),
+            challenge: Some(FaceImage {
+                source: Some(Source::Rtms(image.clone())),
+            }),
         })
     };
     let binary = File::open(root.join("bin/verifier-worker"))?;
@@ -52,20 +59,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fatal,
     )?;
     let cold = worker.evaluate(request())?;
-    let ResponseBody::DeepFace(scores) = &cold else {
+    let Outcome::DeepFace(scores) = &cold else {
         unreachable!()
     };
     for score in [
-        scores.similarity_orb_selfie,
-        scores.similarity_orb_challenge,
-        scores.similarity_selfie_challenge,
+        scores.similarity_credential_live,
+        scores.similarity_credential_challenge,
+        scores.similarity_live_challenge,
     ] {
-        assert!((score - 1.0).abs() < 1e-5);
+        assert!((score.unwrap() - 1.0).abs() < 1e-5);
     }
     let invalid = Operation::DeepFace(DeepFaceRequest {
-        orb_credential: ImageBytes(vec![1]),
-        live: LiveCapture::Vanilla(ImageBytes(vec![2])),
-        rtms_challenge: ImageBytes(vec![3]),
+        credential: Some(FaceImage {
+            source: Some(Source::Orb(vec![1])),
+        }),
+        live: Some(FaceImage {
+            source: Some(Source::VanillaSelfie(vec![2])),
+        }),
+        challenge: Some(FaceImage {
+            source: Some(Source::Rtms(vec![3])),
+        }),
     });
     assert!(matches!(
         worker.evaluate(invalid),
@@ -74,14 +87,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(worker.evaluate(request())?, cold);
     let gray = worker.evaluate(Operation::GrayBadge(
         biometric_engines_protocol::face::GrayBadgeRequest {
-            live: LiveCapture::Vanilla(ImageBytes(image.clone())),
-            rtms_challenge: ImageBytes(image),
+            live: Some(FaceImage {
+                source: Some(Source::VanillaSelfie(image.clone())),
+            }),
+            challenge: Some(FaceImage {
+                source: Some(Source::Rtms(image)),
+            }),
         },
     ))?;
-    let ResponseBody::GrayBadge(scores) = gray else {
+    let Outcome::GrayBadge(scores) = gray else {
         unreachable!()
     };
-    assert!((scores.similarity_selfie_challenge - 1.0).abs() < 1e-5);
+    assert!((scores.similarity_live_challenge.unwrap() - 1.0).abs() < 1e-5);
     Ok(())
 }
 

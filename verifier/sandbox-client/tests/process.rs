@@ -5,8 +5,9 @@ use std::{fs::File, os::unix::fs::PermissionsExt, path::Path, process::Command, 
 
 #[cfg(target_os = "linux")]
 use biometric_engines_protocol::{
-    Operation, ResponseBody,
-    face::{DeepFaceRequest, DeepFaceResult, ImageBytes, LiveCapture},
+    face::{DeepFaceRequest, DeepFaceResult, FaceImage, face_image::Source},
+    request::Operation,
+    response::Outcome,
 };
 #[cfg(target_os = "linux")]
 use flamingo_verifier_sandbox_client::{SandboxClientConfig, SandboxClientError};
@@ -51,9 +52,15 @@ fn sandbox(root: &Path) -> SandboxConfig<'_> {
 /// Chooses fixture behavior through the existing comparison message.
 fn images(id: u8) -> Operation {
     Operation::DeepFace(DeepFaceRequest {
-        orb_credential: ImageBytes(vec![id; 8]),
-        live: LiveCapture::Vanilla(ImageBytes(vec![2; 8])),
-        rtms_challenge: ImageBytes(vec![3; 8]),
+        credential: Some(FaceImage {
+            source: Some(Source::Orb(vec![id; 8])),
+        }),
+        live: Some(FaceImage {
+            source: Some(Source::VanillaSelfie(vec![2; 8])),
+        }),
+        challenge: Some(FaceImage {
+            source: Some(Source::Rtms(vec![3; 8])),
+        }),
     })
 }
 
@@ -72,10 +79,11 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
     } else {
         peer()
     })?;
-    let scores = ResponseBody::DeepFace(DeepFaceResult {
-        similarity_orb_selfie: 0.8,
-        similarity_orb_challenge: 0.9,
-        similarity_selfie_challenge: 0.85,
+    let scores = Outcome::DeepFace(DeepFaceResult {
+        similarity_credential_live: Some(0.8),
+        similarity_credential_challenge: Some(0.9),
+        similarity_live_challenge: Some(0.85),
+        debug_report: None,
     });
 
     // The worker checks that unrelated descriptors do not survive launch.
@@ -272,7 +280,7 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
         let Operation::DeepFace(ref mut input) = invalid else {
             unreachable!()
         };
-        input.orb_credential.0.clear();
+        input.credential = None;
         assert!(matches!(
             worker.evaluate(invalid),
             Err(WorkerError::Rpc(SandboxClientError::InvalidImages))
