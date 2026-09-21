@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.4.0...flamingo-verifier-client-v0.5.0) - 2026-09-21
+
+### Other
+
+- [**breaking**] rename ApiErrorResponse to ErrorEnvelope and AppError to ApiError ([#119](https://github.com/worldcoin/flamingo/pull/119))
+
 ## [0.4.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.3.0...flamingo-verifier-client-v0.4.0) - 2026-09-17
 
 ### Added
