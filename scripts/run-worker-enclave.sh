@@ -1,6 +1,5 @@
 #!/bin/bash
-# One owned enclave, with a watchdog spanning artifact fetch, launch, upload and
-# initialization. The pinned worker artifact is fetched from S3 on every attempt.
+# One owned enclave; the watchdog spans artifact fetch, launch, upload and initialization.
 set -euo pipefail
 : "${EIF_PATH:=/home/enclave.eif}"
 : "${WORKER_TOOL:=/home/sandbox-bundle}"
@@ -81,9 +80,7 @@ while true; do
     # shellcheck disable=SC2016 # Expanded inside the supervised child.
     timeout --signal=TERM --kill-after=5s "${BOOTSTRAP_TIMEOUT_SECONDS}s" bash -c '
         set -euo pipefail
-        # Fetch, verify and pack before launching, so a download or digest failure
-        # never starts (or terminates) an enclave. This attempt state is wiped, so a
-        # retry re-downloads the artifact.
+        # Fetch and verify before launching, so a download or digest failure never starts an enclave.
         work="$1/artifact"
         rm -rf "$work"
         mkdir -p "$work"
@@ -101,7 +98,6 @@ while true; do
         cid=$(jq -er .EnclaveCID "$1/launch.json")
         jq -er .EnclaveID "$1/launch.json" > "$1/enclave-id"
         "$WORKER_TOOL" send "$cid" "$work/worker.bundle" "$PROVISIONING_IO_TIMEOUT_SECONDS"
-        # The enclave has the artifact; drop the tarball, tree, manifest and bundle.
         rm -rf "$work"
         # Provisioning ACK proves initialized worker/key setup, not a bound serving socket.
         until "$WORKER_TOOL" health "$cid"; do sleep 0.2; done
@@ -112,7 +108,7 @@ while true; do
         enclave_id=$(cat "$state/enclave-id")
         enclave_cid=$(jq -er .EnclaveCID "$state/launch.json")
         touch "$WORKER_READY_FILE"
-        # A ready attempt resets the backoff, so a later failure retries promptly.
+        # A ready attempt resets the backoff so later failures retry promptly.
         retry_delay="$RETRY_SECONDS"
         echo "worker enclave ready: $enclave_id"
         while nitro-cli describe-enclaves | jq -e --arg id "$enclave_id" 'any(.[]; .EnclaveID == $id and .State == "RUNNING")' >/dev/null; do
@@ -122,8 +118,7 @@ while true; do
     else
         startup_pid=""
         echo "worker enclave bootstrap failed" >&2
-        # Double the delay after consecutive failures; the half guard keeps the
-        # arithmetic in range and the cap keeps recovery prompt.
+        # The half guard keeps the doubled backoff from overshooting the cap.
         retry_delay=$(( retry_delay <= MAX_RETRY_SECONDS / 2 ? retry_delay * 2 : MAX_RETRY_SECONDS ))
     fi
     cleanup

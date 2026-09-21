@@ -16,7 +16,7 @@ set -euo pipefail
 #   <workload>-pcr.json      PCR measurements extracted from the EIF
 #
 # Verifier releases use measured resource budgets in config/worker-bootstrap.json.
-# The external executable is fetched by the carrier at runtime, never added to the EIF.
+# The external executable is never added to the EIF.
 
 # A new workload is an entry here plus a `<name>-eif` output in flake.nix.
 WORKLOADS=("verifier")

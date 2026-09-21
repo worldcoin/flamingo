@@ -49,7 +49,6 @@ elif Path(sys.argv[0]).name == 'aws':
     with (root/'download.log').open('a') as log: log.write('1\\n')
 else:
     if args[0] == 'manifest':
-        # The carrier must extract the artifact and hand the real executable to the tool.
         assert args[1] == os.environ['WORKER_RELEASE_ID'], args
         assert Path(args[2]).name == 'biometric-engines-worker' and Path(args[2]).is_file(), args
         print('{}')
@@ -162,7 +161,6 @@ class CarrierTests(unittest.TestCase):
     def test_digest_mismatch_fails_attempt_without_sending(self):
         self.env['WORKER_ARTIFACT_SHA256'] = '0'*64
         self.start(); self.wait_for('downloaded')
-        # Let the failed attempt finish and retry before asserting nothing launched.
         self.wait_for_downloads(2)
         self.assertFalse((self.root/'run-enclave.log').exists())
         self.assertFalse((self.root/'packed').exists())
@@ -173,7 +171,6 @@ class CarrierTests(unittest.TestCase):
         (self.root/'download-fail').touch()
         self.start(); self.wait_for('ready')
         self.assertTrue((self.root/'download-failed').exists())
-        # The failed attempt must launch nothing; the successful retry launches one.
         self.assertFalse((self.root/'terminated').exists())
         launches = (self.root/'run-enclave.log').read_text().splitlines()
         self.assertEqual(len(launches), 1, 'a failed download launched an enclave')
