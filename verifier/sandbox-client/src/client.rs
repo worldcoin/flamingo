@@ -16,8 +16,9 @@ use biometric_engines_protocol::{
 
 use crate::transport;
 
-/// Replies contain scores or structured failures, never image-sized allocations.
-const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+/// Allows worker diagnostics (LightGuard rejections exceed 40 KiB), stripped after decoding.
+/// Keep allocation bounded before reading the response body.
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_READY_BYTES: usize = 64;
 
 /// Broker-owned limits, independent of the worker's more permissive frame reader.

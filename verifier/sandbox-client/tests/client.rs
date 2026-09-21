@@ -2,7 +2,8 @@ use biometric_engines_protocol::{
     EmptyReason, Response,
     face::{
         DeepFaceRequest, DeepFaceResult, FaceImage, Failure as FaceFailure, FailureCode,
-        GrayBadgeRequest, GrayBadgeResult, face_image::Source,
+        GrayBadgeRequest, GrayBadgeResult, ImageRole, LightGuard, LightGuardMatchingFrame,
+        ValidationReason, ValidationTarget, face_image::Source,
     },
     framing, protobuf, protocol_failure,
     request::Operation,
@@ -121,6 +122,90 @@ fn deepface_graybadge_and_typed_biological_failure_share_one_connection() {
             .unwrap(),
         Outcome::GrayBadge(_)
     ));
+    done.send(()).unwrap();
+    peer.join().unwrap();
+}
+
+#[test]
+fn large_lightguard_rejection_is_stripped_and_connection_remains_usable() {
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let (done, wait) = std::sync::mpsc::channel();
+    let failure = FaceFailure::validation(
+        ValidationReason::LightGuardScoreTooLow,
+        ValidationTarget::LightGuardPair,
+    )
+    .at_image(ImageRole::Live);
+    let expected = failure.clone();
+    let peer = thread::spawn(move || {
+        ready(&mut server);
+        let r =
+            protobuf::decode_request(&framing::read_frame(&mut server).unwrap().unwrap()).unwrap();
+        let failure = FaceFailure {
+            // Size observed in a real worker's LightGuard rejection on Nitro.
+            debug_report: Some("x".repeat(41_739)),
+            ..failure
+        };
+        let response = protobuf::encode_response(&Response::new(
+            r.request_id,
+            Outcome::Failure(failure.into()),
+        ));
+        assert_eq!(response.len(), 41_765);
+        framing::write_frame(&mut server, &response).unwrap();
+
+        let r =
+            protobuf::decode_request(&framing::read_frame(&mut server).unwrap().unwrap()).unwrap();
+        framing::write_frame(
+            &mut server,
+            &protobuf::encode_response(&Response::new(r.request_id, scores())),
+        )
+        .unwrap();
+        wait.recv().unwrap();
+    });
+
+    let Operation::DeepFace(mut input) = request() else {
+        unreachable!()
+    };
+    input.live = Some(FaceImage {
+        source: Some(Source::LightGuard(LightGuard {
+            illuminated: vec![2],
+            unilluminated: vec![3],
+            matching_frame: LightGuardMatchingFrame::Illuminated as i32,
+        })),
+    });
+    let mut client = SandboxClient::new(client, config()).unwrap();
+    let Err(SandboxClientError::AnalysisFailed(failure)) =
+        client.evaluate(Operation::DeepFace(input))
+    else {
+        panic!("expected a recoverable LightGuard rejection")
+    };
+    assert_eq!(failure, expected);
+    assert!(client.failure().is_none());
+    assert_eq!(client.evaluate(request()).unwrap(), scores());
+
+    done.send(()).unwrap();
+    peer.join().unwrap();
+}
+
+#[test]
+fn response_over_256_kib_is_rejected_before_reading_body() {
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let (done, wait) = std::sync::mpsc::channel();
+    let peer = thread::spawn(move || {
+        ready(&mut server);
+        framing::read_frame(&mut server).unwrap().unwrap();
+        server
+            .write_all(&(256_u32 * 1024 + 1).to_be_bytes())
+            .unwrap();
+        wait.recv().unwrap();
+    });
+    let mut client = SandboxClient::new(client, config()).unwrap();
+    let Err(SandboxClientError::Transport(error)) = client.evaluate(request()) else {
+        panic!("expected an oversized response to fail without waiting for its body")
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(client.failure().is_some());
+    assert!(client.evaluate(request()).is_err());
+
     done.send(()).unwrap();
     peer.join().unwrap();
 }
