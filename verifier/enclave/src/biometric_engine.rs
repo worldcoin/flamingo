@@ -157,7 +157,7 @@ mod sandboxed {
         }
     }
 
-    fn image(source: Source) -> FaceImage {
+    const fn image(source: Source) -> FaceImage {
         FaceImage {
             source: Some(source),
         }
