@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Error envelope returned to clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApiErrorResponse {
+pub struct ErrorEnvelope {
     /// Whether the client should retry the request.
     pub allow_retry: bool,
     /// Error details.
@@ -21,12 +21,12 @@ pub struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiErrorResponse, ErrorBody};
+    use super::{ErrorBody, ErrorEnvelope};
 
     /// `allowRetry` is the one camelCase key, and clients branch on `error.code`.
     #[test]
     fn the_envelope_keeps_its_wire_names() {
-        let body = ApiErrorResponse {
+        let body = ErrorEnvelope {
             allow_retry: true,
             error: ErrorBody {
                 code: "reassign_required".to_owned(),
@@ -40,7 +40,7 @@ mod tests {
 
         assert_eq!(serde_json::to_value(&body).expect("should serialize"), json);
         assert_eq!(
-            serde_json::from_value::<ApiErrorResponse>(json).expect("should deserialize"),
+            serde_json::from_value::<ErrorEnvelope>(json).expect("should deserialize"),
             body
         );
     }

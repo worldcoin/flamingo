@@ -16,5 +16,5 @@ mod error;
 mod matches;
 
 pub use assignment::EnclaveAssignmentResponse;
-pub use error::{ApiErrorResponse, ErrorBody};
+pub use error::{ErrorBody, ErrorEnvelope};
 pub use matches::*;

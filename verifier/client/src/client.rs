@@ -3,7 +3,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use flamingo_verifier_api_types::{
-    ApiErrorResponse, EnclaveAssignmentResponse, MATCH_CONTENT_TYPE, MAX_MATCH_BODY_BYTES,
+    EnclaveAssignmentResponse, ErrorEnvelope, MATCH_CONTENT_TYPE, MAX_MATCH_BODY_BYTES,
     MAX_MATCH_RESPONSE_BYTES,
 };
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
@@ -309,8 +309,7 @@ impl FlamingoVerifierClient {
 
     /// Classifies a non-success response, reading the error envelope when there is one.
     fn api_error(status: u16, body: Option<&str>) -> Error {
-        let Some(envelope) =
-            body.and_then(|body| serde_json::from_str::<ApiErrorResponse>(body).ok())
+        let Some(envelope) = body.and_then(|body| serde_json::from_str::<ErrorEnvelope>(body).ok())
         else {
             return Error::Status(status);
         };
