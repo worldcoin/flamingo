@@ -1,4 +1,4 @@
-//! Host-side APIs shared by the provisioner and the manual sandbox-bundle CLI.
+//! Host-side bundle transport used by the deployment provisioner.
 //!
 //! Network I/O is asynchronous: dropping a provisioning future closes its owned
 //! socket. No blocking network task survives cancellation. The caller bounds the
@@ -18,7 +18,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{MAX_BUNDLE_BYTES, MAX_MANIFEST_BYTES, Manifest};
+use crate::{MAX_BUNDLE_BYTES, Manifest};
 
 /// Bounded diagnostics: no paths, manifest contents or arbitrary peer output.
 #[derive(Debug, thiserror::Error)]
@@ -130,7 +130,7 @@ impl Bundle {
         })
     }
 
-    /// Exact metadata bytes used by both CLI packaging and direct transmission.
+    /// Metadata encoded for direct transmission.
     pub fn manifest(&self) -> Result<Vec<u8>, Error> {
         serde_json::to_vec(&self.manifest).map_err(|_| Error::InvalidBundle)
     }
@@ -210,44 +210,6 @@ async fn open(path: &Path) -> Result<File, Error> {
     File::open(path)
         .await
         .map_err(|error| io_error("open", error))
-}
-
-/// Sends a previously packed file; preserves the standalone CLI's interface.
-pub async fn send(cid: u32, path: &Path, io_timeout: Duration) -> Result<(), Error> {
-    let mut file = open(path).await?;
-    let size = file
-        .metadata()
-        .await
-        .map_err(|error| io_error("metadata", error))?
-        .len();
-
-    if size == 0 || size > MAX_BUNDLE_BYTES + MAX_MANIFEST_BYTES as u64 + 4 {
-        return Err(Error::InvalidBundle);
-    }
-
-    let mut stream = connect(cid, io_timeout).await?;
-    let mut remaining = size;
-    let mut buffer = [0; 64 * 1024];
-
-    while remaining != 0 {
-        let length = remaining.min(buffer.len() as u64) as usize;
-        file.read_exact(&mut buffer[..length])
-            .await
-            .map_err(|error| io_error("read", error))?;
-        checked("transfer", io_timeout, stream.write_all(&buffer[..length])).await?;
-        remaining -= length as u64;
-    }
-
-    if file
-        .read(&mut [0])
-        .await
-        .map_err(|error| io_error("read", error))?
-        != 0
-    {
-        return Err(Error::Changed);
-    }
-
-    acknowledge(&mut stream, io_timeout).await
 }
 
 async fn acknowledge(
