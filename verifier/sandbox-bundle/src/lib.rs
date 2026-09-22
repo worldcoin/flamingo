@@ -16,6 +16,9 @@ use tempfile::TempDir;
 mod config;
 pub use config::BootstrapConfig;
 
+/// Host-side bundle preparation, provisioning and health checks.
+pub mod host;
+
 /// The only executable entry point accepted by the public broker.
 pub const WORKER_PATH: &str = "bin/verifier-worker";
 /// Maximum declared JSON bytes, before parsing or artifact allocation.
