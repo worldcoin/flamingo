@@ -992,6 +992,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "flamingo-verifier-carrier"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "flamingo-verifier-client"
 version = "0.4.0"
 dependencies = [

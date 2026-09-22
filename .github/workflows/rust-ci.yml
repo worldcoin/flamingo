@@ -79,7 +79,7 @@ jobs:
       - name: Evaluate the enclave image and converter derivations
         run: |
           set -euo pipefail
-          for output in verifier-enclave sandbox-bundle verifier-oci verifier-eif; do
+          for output in verifier-enclave sandbox-bundle flamingo-carrier verifier-oci verifier-eif; do
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
