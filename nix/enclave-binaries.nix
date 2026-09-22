@@ -78,5 +78,4 @@ let
   });
 in {
   verifier-enclave = buildEnclaveBin "verifier-enclave";
-  sandbox-bundle = buildEnclaveBin "sandbox-bundle";
 }

@@ -213,19 +213,19 @@ fn wrong_architecture_and_unknown_fields_are_rejected() {
 }
 
 /// Offline packaging validates actual local bytes and never silently follows artifact symlinks.
-#[test]
-fn packaging_matches_the_receiver_and_rejects_changed_files() {
+#[tokio::test]
+async fn packaging_matches_the_receiver_and_rejects_changed_files() {
     let fixture = Fixture::new();
     let source = tempfile::tempdir().unwrap();
     let executable = source.path().join("worker");
     fs::write(&executable, &fixture.binary).unwrap();
-    let generated = std::process::Command::new(env!("CARGO_BIN_EXE_sandbox-bundle"))
-        .args(["manifest", &fixture.manifest.release_id])
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(generated.status.success(), "{:?}", generated.stderr);
-    let manifest: Manifest = serde_json::from_slice(&generated.stdout).unwrap();
+    let bundle = flamingo_verifier_sandbox_bundle::host::Bundle::prepare(
+        &fixture.manifest.release_id,
+        &executable,
+    )
+    .await
+    .unwrap();
+    let manifest: Manifest = serde_json::from_slice(&bundle.manifest().unwrap()).unwrap();
     assert_eq!(
         serde_json::to_value(manifest).unwrap(),
         serde_json::to_value(&fixture.manifest).unwrap()
@@ -234,17 +234,6 @@ fn packaging_matches_the_receiver_and_rejects_changed_files() {
     let mut bytes = Vec::new();
     package(&mut bytes, &manifest, &executable).unwrap();
     assert_eq!(bytes, fixture.bundle());
-
-    let manifest_path = source.path().join("manifest.json");
-    let bundle_path = source.path().join("worker.bundle");
-    fs::write(&manifest_path, &manifest).unwrap();
-    let packed = std::process::Command::new(env!("CARGO_BIN_EXE_sandbox-bundle"))
-        .arg("pack")
-        .args([&manifest_path, &executable, &bundle_path])
-        .output()
-        .unwrap();
-    assert!(packed.status.success(), "{:?}", packed.stderr);
-    assert_eq!(fs::read(&bundle_path).unwrap(), bytes);
 
     fs::write(&executable, b"changed").unwrap();
     assert!(package(&mut Vec::new(), &manifest, &executable).is_err());
