@@ -47,7 +47,7 @@ http-body-util = "0.1"
 libc = "0.2"
 minijail = { git = "https://github.com/google/minijail", rev = "b0b5dc6997956cdc027295ade5e425c416f30d33" }
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
-pontifex = { version = "2.0.0", git = "https://github.com/worldcoin/pontifex", rev = "89d79f45d592a5b7446f106e60372fe357c76fa8", default-features = false }
+pontifex = { version = "2.0.0", git = "https://github.com/worldcoin/pontifex", rev = "51d3b1171d8f9d6c915ce1a6ff537058e3292072", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
