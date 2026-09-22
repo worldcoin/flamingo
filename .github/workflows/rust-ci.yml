@@ -79,13 +79,10 @@ jobs:
       - name: Evaluate the enclave image and converter derivations
         run: |
           set -euo pipefail
-          for output in verifier-enclave sandbox-bundle flamingo-enclave-provisioner verifier-oci verifier-eif; do
+          for output in verifier-enclave sandbox-bundle verifier-oci verifier-eif; do
             drv="$(nix eval --raw --no-update-lock-file ".#packages.x86_64-linux.$output.drvPath")"
             echo "$output -> $drv"
           done
       # External inference removes the expensive engine/model build from this image.
-      - name: Build the public verifier image and host provisioner
-        run: |
-          nix build --no-link --no-update-lock-file \
-            .#packages.x86_64-linux.verifier-oci \
-            .#packages.x86_64-linux.flamingo-enclave-provisioner
+      - name: Build the public verifier image
+        run: nix build --no-link --no-update-lock-file .#packages.x86_64-linux.verifier-oci

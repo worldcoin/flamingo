@@ -1055,21 +1055,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flamingo-verifier-enclave-provisioner"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "flamingo-verifier-sandbox-bundle",
- "hex",
- "libc",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "flamingo-verifier-enclave-types"
 version = "0.4.0"
 dependencies = [

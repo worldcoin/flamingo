@@ -79,5 +79,4 @@ let
 in {
   verifier-enclave = buildEnclaveBin "verifier-enclave";
   sandbox-bundle = buildEnclaveBin "sandbox-bundle";
-  flamingo-enclave-provisioner = buildEnclaveBin "flamingo-enclave-provisioner";
 }

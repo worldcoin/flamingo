@@ -118,12 +118,3 @@ echo "OCI image:    $oci_store"
 echo "EIF:          $out_dir/$workload-enclave.eif"
 echo "Measurements: $out_dir/$workload-pcr.json"
 jq . "$out_dir/$workload-pcr.json"
-
-if [[ "$workload" == "verifier" ]]; then
-  provisioner_store=$(nix build .#flamingo-enclave-provisioner --no-update-lock-file --no-link --print-out-paths)
-  mkdir -p "$out_dir/nix/store"
-  while IFS= read -r closure_path; do
-    cp -a "$closure_path" "$out_dir/nix/store/"
-  done < <(nix-store --query --requisites "$provisioner_store")
-  cp "$provisioner_store/bin/flamingo-enclave-provisioner" "$out_dir/flamingo-enclave-provisioner"
-fi
