@@ -16,7 +16,7 @@ set -euo pipefail
 #   <workload>-pcr.json      PCR measurements extracted from the EIF
 #
 # Verifier resource budgets are compiled into the measured enclave binary.
-# The external executable is downloaded at runtime, never added to the EIF or carrier image.
+# The external executable is downloaded at runtime, never added to the EIF or provisioner image.
 
 # A new workload is an entry here plus a `<name>-eif` output in flake.nix.
 WORKLOADS=("verifier")
@@ -120,12 +120,10 @@ echo "Measurements: $out_dir/$workload-pcr.json"
 jq . "$out_dir/$workload-pcr.json"
 
 if [[ "$workload" == "verifier" ]]; then
-  tool_store=$(nix build .#sandbox-bundle --no-update-lock-file --no-link --print-out-paths)
-  carrier_store=$(nix build .#flamingo-carrier --no-update-lock-file --no-link --print-out-paths)
+  provisioner_store=$(nix build .#flamingo-enclave-provisioner --no-update-lock-file --no-link --print-out-paths)
   mkdir -p "$out_dir/nix/store"
   while IFS= read -r closure_path; do
     cp -a "$closure_path" "$out_dir/nix/store/"
-  done < <(nix-store --query --requisites "$tool_store" "$carrier_store")
-  cp "$tool_store/bin/sandbox-bundle" "$out_dir/sandbox-bundle"
-  cp "$carrier_store/bin/flamingo-carrier" "$out_dir/flamingo-carrier"
+  done < <(nix-store --query --requisites "$provisioner_store")
+  cp "$provisioner_store/bin/flamingo-enclave-provisioner" "$out_dir/flamingo-enclave-provisioner"
 fi

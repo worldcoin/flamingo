@@ -1,15 +1,25 @@
 use crate::{config::Config, process};
 use anyhow::{Context, Result, ensure};
+use flamingo_verifier_sandbox_bundle::host::Bundle;
 use sha2::{Digest, Sha256};
-use std::{
-    ffi::OsStr,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{ffi::OsStr, path::Path, time::Duration};
 use tokio::io::AsyncReadExt;
 
-pub async fn download_and_verify(config: &Config, directory: &Path) -> Result<PathBuf> {
-    let archive = directory.join("worker.tar.gz");
+pub async fn fetch(config: &Config, directory: &Path) -> Result<Bundle> {
+    let archive = directory.join("artifact.tar.gz");
+    download(config, &archive).await?;
+    verify(&archive, &config.artifact_sha256).await?;
+
+    let executable = directory.join("executable");
+    extract(&archive, &executable).await?;
+    inspect(&executable).await?;
+
+    Bundle::prepare(&config.release_id, &executable)
+        .await
+        .context("cannot prepare sandbox bundle")
+}
+
+async fn download(config: &Config, archive: &Path) -> Result<()> {
     process::output(
         "aws",
         &[
@@ -26,28 +36,41 @@ pub async fn download_and_verify(config: &Config, directory: &Path) -> Result<Pa
     )
     .await
     .context("S3 download failed")?;
-    let mut file = tokio::fs::File::open(&archive).await?;
+
+    Ok(())
+}
+
+async fn verify(archive: &Path, expected_sha256: &str) -> Result<()> {
+    let mut file = tokio::fs::File::open(archive).await?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0; 64 * 1024];
+
     loop {
         let n = file.read(&mut buffer).await?;
         if n == 0 {
             break;
         }
+
         hash.update(&buffer[..n]);
     }
+
     ensure!(
-        hex::encode(hash.finalize()) == config.artifact_sha256,
+        hex::encode(hash.finalize()) == expected_sha256,
         "archive checksum mismatch"
     );
 
+    Ok(())
+}
+
+async fn extract(archive: &Path, executable: &Path) -> Result<()> {
     let listing = process::output(
         "tar",
         &["-tzf".as_ref(), archive.as_os_str()],
         Duration::from_secs(30),
     )
     .await?;
-    let member = worker_member(std::str::from_utf8(&listing)?)?;
+    let member = bundle_member(std::str::from_utf8(&listing)?)?;
+
     let types = process::output(
         "tar",
         &["-tvzf".as_ref(), archive.as_os_str()],
@@ -60,7 +83,7 @@ pub async fn download_and_verify(config: &Config, directory: &Path) -> Result<Pa
             .all(|line| line.starts_with(['-', 'd'])),
         "archive contains links or special files"
     );
-    let worker = directory.join("worker");
+
     process::to_file(
         "tar",
         &[
@@ -70,61 +93,41 @@ pub async fn download_and_verify(config: &Config, directory: &Path) -> Result<Pa
             member.as_ref(),
         ],
         Duration::from_secs(60),
-        &worker,
+        executable,
     )
-    .await?;
-    let header = readelf("-h", &worker).await?;
-    ensure!(
-        header.contains("Advanced Micro Devices X86-64"),
-        "worker must be an x86_64 ELF"
-    );
-    ensure!(
-        !readelf("-l", &worker).await?.contains("INTERP")
-            && !readelf("-d", &worker).await?.contains("(NEEDED)"),
-        "worker needs an external loader or shared library"
-    );
-
-    let manifest = directory.join("manifest.json");
-    process::to_file(
-        &config.tool,
-        &[
-            "manifest".as_ref(),
-            config.release_id.as_ref(),
-            worker.as_os_str(),
-        ],
-        Duration::from_secs(30),
-        &manifest,
-    )
-    .await?;
-    let bundle = directory.join("worker.bundle");
-    process::output(
-        &config.tool,
-        &[
-            "pack".as_ref(),
-            manifest.as_os_str(),
-            worker.as_os_str(),
-            bundle.as_os_str(),
-        ],
-        Duration::from_secs(60),
-    )
-    .await?;
-    Ok(bundle)
+    .await
 }
 
-async fn readelf(option: &str, worker: &Path) -> Result<String> {
+async fn inspect(executable: &Path) -> Result<()> {
+    let header = readelf("-h", executable).await?;
+    ensure!(
+        header.contains("Advanced Micro Devices X86-64"),
+        "bundle executable must be an x86_64 ELF"
+    );
+    ensure!(
+        !readelf("-l", executable).await?.contains("INTERP")
+            && !readelf("-d", executable).await?.contains("(NEEDED)"),
+        "bundle executable needs an external loader or shared library"
+    );
+
+    Ok(())
+}
+
+async fn readelf(option: &str, executable: &Path) -> Result<String> {
     Ok(String::from_utf8(
         process::output(
             "readelf",
-            &[OsStr::new(option), worker.as_os_str()],
+            &[OsStr::new(option), executable.as_os_str()],
             Duration::from_secs(10),
         )
         .await?,
     )?)
 }
 
-fn worker_member(listing: &str) -> Result<String> {
+fn bundle_member(listing: &str) -> Result<String> {
     let mut root = None;
-    let mut worker = None;
+    let mut executable = None;
+
     for entry in listing.lines() {
         let (directory, filename) = entry
             .split_once('/')
@@ -143,23 +146,26 @@ fn worker_member(listing: &str) -> Result<String> {
             "multiple archive roots"
         );
         root = Some(directory);
+
         if filename == "biometric-engines-worker" {
-            ensure!(worker.is_none(), "duplicate worker executable");
-            worker = Some(entry.to_owned());
+            ensure!(executable.is_none(), "duplicate bundle executable");
+            executable = Some(entry.to_owned());
         } else {
             ensure!(filename.is_empty(), "unexpected archive member");
         }
     }
-    worker.context("archive has no worker executable")
+
+    executable.context("archive has no bundle executable")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn accepts_only_one_worker_under_one_directory() {
+    fn accepts_only_one_executable_under_one_directory() {
         assert_eq!(
-            worker_member("release/\nrelease/biometric-engines-worker\n").unwrap(),
+            bundle_member("release/\nrelease/biometric-engines-worker\n").unwrap(),
             "release/biometric-engines-worker"
         );
         for listing in [
@@ -170,7 +176,7 @@ mod tests {
             "a/biometric-engines-worker\na/lib.so",
             "a/",
         ] {
-            assert!(worker_member(listing).is_err(), "{listing}");
+            assert!(bundle_member(listing).is_err(), "{listing}");
         }
     }
 }

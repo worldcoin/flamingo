@@ -10,7 +10,7 @@ members = [
     "verifier/protocol",
     "verifier/sandbox-client",
     "verifier/sandbox-bundle",
-    "verifier/carrier",
+    "verifier/enclave-provisioner",
 ]
 resolver = "3"
 

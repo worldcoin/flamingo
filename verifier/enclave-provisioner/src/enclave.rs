@@ -1,7 +1,9 @@
 use crate::{config::Config, process};
 use anyhow::{Context, Result, ensure};
+use flamingo_verifier_sandbox_bundle::host;
 use serde::Deserialize;
 use std::{path::Path, time::Duration};
+use tokio::time::sleep;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -32,57 +34,50 @@ impl<'a> Enclave<'a> {
     }
 
     pub async fn launch(&self) -> Result<()> {
-        let c = self.config;
+        let config = self.config;
         let response = process::output(
             "nitro-cli",
             &[
                 "run-enclave".as_ref(),
                 "--eif-path".as_ref(),
-                c.eif.as_os_str(),
+                config.eif.as_os_str(),
                 "--cpu-count".as_ref(),
-                c.cpus.to_string().as_ref(),
+                config.cpus.to_string().as_ref(),
                 "--memory".as_ref(),
-                c.memory_mib.to_string().as_ref(),
+                config.memory_mib.to_string().as_ref(),
                 "--enclave-cid".as_ref(),
-                c.cid.to_string().as_ref(),
+                config.cid.to_string().as_ref(),
                 "--enclave-name".as_ref(),
                 self.name.as_ref(),
             ],
-            c.bootstrap_timeout,
+            config.bootstrap_timeout,
         )
         .await?;
+
         let launch: serde_json::Value = serde_json::from_slice(&response)?;
         ensure!(
-            launch["EnclaveCID"].as_u64() == Some(u64::from(c.cid)),
+            launch["EnclaveCID"].as_u64() == Some(u64::from(config.cid)),
             "unexpected launched CID"
         );
+
         Ok(())
     }
 
-    pub async fn provision(&self, bundle: &Path) -> Result<()> {
-        let c = self.config;
-        process::output(
-            &c.tool,
-            &[
-                "send".as_ref(),
-                c.cid.to_string().as_ref(),
-                bundle.as_os_str(),
-                c.io_timeout.to_string().as_ref(),
-            ],
-            c.bootstrap_timeout,
-        )
-        .await?;
-        Ok(())
+    pub async fn wait_ready(&self) -> Result<()> {
+        while host::health(self.config.cid).await.is_err() {
+            sleep(Duration::from_millis(200)).await;
+        }
+
+        self.running().await
     }
 
-    pub async fn health(&self) -> Result<()> {
-        process::output(
-            &self.config.tool,
-            &["health".as_ref(), self.config.cid.to_string().as_ref()],
-            Duration::from_secs(5),
-        )
-        .await?;
-        Ok(())
+    pub async fn monitor(&self) -> Result<()> {
+        loop {
+            self.running().await?;
+            host::health(self.config.cid).await?;
+
+            sleep(self.config.poll_interval).await;
+        }
     }
 
     pub async fn running(&self) -> Result<()> {
@@ -107,7 +102,7 @@ impl<'a> Enclave<'a> {
         )?)
     }
 
-    pub async fn cleanup(&self) -> Result<()> {
+    pub async fn stop(&self) -> Result<()> {
         // Name lookup also covers a cancelled launch that never returned its enclave ID.
         let owned: Vec<_> = self
             .describe()
@@ -116,6 +111,7 @@ impl<'a> Enclave<'a> {
             .filter(|e| e.name == self.name)
             .collect();
         ensure!(owned.len() <= 1, "duplicate owned enclave name");
+
         if let Some(enclave) = owned.first() {
             let terminated = process::output(
                 "nitro-cli",
@@ -127,6 +123,7 @@ impl<'a> Enclave<'a> {
                 Duration::from_secs(15),
             )
             .await;
+
             if terminated.is_err() {
                 ensure!(
                     !self.describe().await?.iter().any(|e| e.id == enclave.id),
@@ -134,6 +131,7 @@ impl<'a> Enclave<'a> {
                 );
             }
         }
+
         Ok(())
     }
 }

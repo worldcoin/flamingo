@@ -13,9 +13,9 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-vsock.workspace = true
+tokio-vsock = "0.7.2"
 flamingo-verifier-enclave-types.workspace = true
 pontifex = { workspace = true, features = ["client"] }
-tokio.workspace = true

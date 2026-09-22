@@ -71,6 +71,7 @@ pub async fn to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[tokio::test]
     async fn failed_and_timed_out_commands_fail() {
         assert!(
