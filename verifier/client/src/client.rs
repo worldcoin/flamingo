@@ -335,6 +335,11 @@ impl FlamingoVerifierClient {
         }
     }
 
+    /// Applies the transport policy to a request before it is sent.
+    ///
+    /// The browser fetch policy ("include" credentials, "no-store" cache, AbortSignal deadline)
+    /// is enforced here. Those settings are not wire-visible, so they are covered by walletkit's
+    /// browser integration, not by unit tests.
     fn configure_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         #[cfg(target_arch = "wasm32")]
         let request = request.fetch_credentials_include().fetch_cache_no_store();
@@ -677,7 +682,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(all(test, target_arch = "wasm32"))]
-#[path = "browser_tests.rs"]
-mod browser_tests;

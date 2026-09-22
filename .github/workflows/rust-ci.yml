@@ -57,15 +57,11 @@ jobs:
         run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-sandbox-client --verbose
       - name: Bounded protocol client tests
         run: cargo test --locked -p flamingo-verifier-sandbox-client --test client
-      - name: Test browser verifier client
+      - name: Check verifier client on wasm32
         env:
           CC_wasm32_unknown_unknown: clang
-          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
         run: |
-          rustup target add wasm32-unknown-unknown
-          cargo install wasm-bindgen-cli --version 0.2.126 --locked
-          CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" cargo test --locked \
-            -p flamingo-verifier-client --target wasm32-unknown-unknown --lib
+          rustup target add wasm32-unknown-unknown && cargo check --locked -p flamingo-verifier-client --target wasm32-unknown-unknown
       - name: Minijail process tests
         run: |
           RUSTFLAGS="-C target-feature=+crt-static" cargo test --locked \
