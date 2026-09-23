@@ -135,8 +135,8 @@ impl Bundle {
         serde_json::to_vec(&self.manifest).map_err(|_| Error::InvalidBundle)
     }
 
-    /// Connects once, streams the bundle and waits for successful initialization.
-    /// Only connection refusal before transfer is retried, as in the existing CLI.
+    /// Waits for bootstrap, then streams the bundle and awaits initialization once.
+    /// Only pre-transfer connection refusal/reset is retried, within `io_timeout`.
     pub async fn provision(&self, cid: u32, io_timeout: Duration) -> Result<(), Error> {
         let stream = connect(cid, io_timeout).await?;
         self.deliver(stream, io_timeout).await
@@ -245,24 +245,49 @@ async fn connect(cid: u32, deadline: Duration) -> Result<tokio_vsock::VsockStrea
         return Err(Error::InvalidBundle);
     }
 
-    loop {
-        match checked(
-            "connect",
-            deadline,
-            VsockStream::connect(VsockAddr::new(cid, 1001)),
-        )
-        .await
-        {
-            Ok(stream) => return Ok(stream),
-            Err(Error::Io {
-                kind: io::ErrorKind::ConnectionRefused,
-                ..
-            }) => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+    connect_with(deadline, || VsockStream::connect(VsockAddr::new(cid, 1001))).await
+}
+
+#[cfg(any(target_os = "linux", test))]
+async fn connect_with<T, F>(deadline: Duration, mut attempt: impl FnMut() -> F) -> Result<T, Error>
+where
+    F: Future<Output = io::Result<T>>,
+{
+    // Nitro can return from launch before the guest binds bootstrap. Linux virtio-vsock
+    // reports an unbound destination as ECONNRESET, not necessarily ECONNREFUSED.
+    checked("connect", deadline, async {
+        let mut attempts = 0_u32;
+
+        loop {
+            attempts += 1;
+
+            match attempt().await {
+                Ok(stream) => {
+                    if attempts > 1 {
+                        eprintln!("sandbox bundle bootstrap connected after {attempts} attempts");
+                    }
+                    return Ok(stream);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    if attempts == 1 {
+                        eprintln!(
+                            "sandbox bundle waiting for bootstrap ({:?}, errno {:?})",
+                            error.kind(),
+                            error.raw_os_error()
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         }
-    }
+    })
+    .await
 }
 
 #[cfg(not(target_os = "linux"))]
