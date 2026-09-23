@@ -57,11 +57,6 @@ jobs:
         run: cargo test --locked --workspace --all-features --exclude flamingo-verifier-sandbox-client --verbose
       - name: Bounded protocol client tests
         run: cargo test --locked -p flamingo-verifier-sandbox-client --test client
-      - name: Check verifier client on wasm32
-        env:
-          CC_wasm32_unknown_unknown: clang
-        run: |
-          rustup target add wasm32-unknown-unknown && cargo check --locked -p flamingo-verifier-client --target wasm32-unknown-unknown
       - name: Minijail process tests
         run: |
           RUSTFLAGS="-C target-feature=+crt-static" cargo test --locked \
@@ -70,6 +65,19 @@ jobs:
           test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "process") | .executable // empty' target/worker-test-artifacts.json)
           test -n "$test_binary"
           sudo timeout --kill-after=5s 60s "$test_binary"
+
+  wasm-tests:
+    name: WASM browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Test verifier client in headless Firefox
+        run: |
+          nix develop --no-update-lock-file .#default --command \
+            cargo test --locked -p flamingo-verifier-client --target wasm32-unknown-unknown --lib
 
   flake:
     name: Flake eval
