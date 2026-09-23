@@ -31,5 +31,8 @@ hex-literal.workspace = true
 axum.workspace = true
 tokio.workspace = true
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
