@@ -2,6 +2,185 @@ use super::*;
 
 const DEADLINE: Duration = Duration::from_secs(2);
 
+#[tokio::test(start_paused = true)]
+async fn bootstrap_reset_and_refusal_retry_until_connected() {
+    let started = tokio::time::Instant::now();
+    let mut attempts = 0;
+    let connected = connect_with(DEADLINE, || {
+        attempts += 1;
+        std::future::ready(match attempts {
+            1 => Err(io::ErrorKind::ConnectionReset.into()),
+            2 => Err(io::ErrorKind::ConnectionRefused.into()),
+            _ => Ok("connected"),
+        })
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(connected, "connected");
+    assert_eq!(attempts, 3);
+    assert_eq!(started.elapsed(), Duration::from_millis(400));
+}
+
+#[tokio::test(start_paused = true)]
+async fn fatal_connect_errors_are_not_retried() {
+    for kind in [
+        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::InvalidInput,
+        io::ErrorKind::AddrNotAvailable,
+        io::ErrorKind::TimedOut,
+    ] {
+        let mut attempts = 0;
+        let result = connect_with(DEADLINE, || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(io::Error::from(kind)))
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(Error::Io { stage: "connect", kind: actual, .. }) if actual == kind)
+        );
+        assert_eq!(attempts, 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn connect_retries_share_one_deadline() {
+    let started = tokio::time::Instant::now();
+    let mut attempts = 0;
+    let deadline = Duration::from_millis(550);
+    let result = connect_with(deadline, || {
+        attempts += 1;
+        std::future::ready(Err::<(), _>(io::ErrorKind::ConnectionReset.into()))
+    })
+    .await;
+
+    assert!(matches!(result, Err(Error::Timeout("connect"))));
+    assert_eq!(attempts, 3);
+    assert_eq!(started.elapsed(), deadline);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_connect_is_bounded_and_drops_its_operation() {
+    let (sender, mut receiver) = tokio::io::duplex(1);
+    let mut sender = Some(sender);
+    let result = connect_with(DEADLINE, || {
+        let stream = sender.take().unwrap();
+        async move {
+            std::future::pending::<()>().await;
+            Ok(stream)
+        }
+    })
+    .await;
+
+    assert!(matches!(result, Err(Error::Timeout("connect"))));
+    assert_eq!(receiver.read(&mut [0]).await.unwrap(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bootstrap_deadline_cancels_connect_retries() {
+    let mut attempts = 0;
+    let result = timeout(
+        Duration::from_millis(350),
+        connect_with(DEADLINE, || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(io::ErrorKind::ConnectionReset.into()))
+        }),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(attempts, 2);
+    tokio::time::sleep(DEADLINE).await;
+    assert_eq!(attempts, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_pending_connect_closes_its_owned_socket() {
+    let (sender, mut receiver) = tokio::io::duplex(1);
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let connecting = tokio::spawn(async move {
+        let mut resources = Some((sender, started));
+        connect_with(DEADLINE, || {
+            let (stream, started) = resources.take().unwrap();
+            async move {
+                started.send(()).unwrap();
+                std::future::pending::<()>().await;
+                Ok(stream)
+            }
+        })
+        .await
+    });
+
+    waiting.await.unwrap();
+    connecting.abort();
+    assert!(connecting.await.unwrap_err().is_cancelled());
+    assert_eq!(receiver.read(&mut [0]).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn reset_after_connect_fails_transfer_or_ack_without_reconnecting() {
+    struct ResetStream {
+        during_write: bool,
+    }
+
+    impl AsyncWrite for ResetStream {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(if self.during_write {
+                Err(io::ErrorKind::ConnectionReset.into())
+            } else {
+                Ok(bytes.len())
+            })
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncRead for ResetStream {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+        }
+    }
+
+    let (_source, bundle) = fixture(64).await;
+
+    for (during_write, expected_stage) in [(true, "transfer"), (false, "ack-read")] {
+        let mut attempts = 0;
+        let stream = connect_with(DEADLINE, || {
+            attempts += 1;
+            std::future::ready(Ok(ResetStream { during_write }))
+        })
+        .await
+        .unwrap();
+        let result = bundle.deliver(stream, DEADLINE).await;
+
+        assert!(matches!(result, Err(Error::Io {
+            stage, kind: io::ErrorKind::ConnectionReset, ..
+        }) if stage == expected_stage));
+        assert_eq!(attempts, 1);
+    }
+}
+
 async fn fixture(size: usize) -> (tempfile::TempDir, Bundle) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("executable");
