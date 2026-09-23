@@ -8,6 +8,7 @@ use flamingo_verifier_api_types::{
 };
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
 use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use futures_util::StreamExt as _;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -267,7 +268,7 @@ impl FlamingoVerifierClient {
         request: reqwest::RequestBuilder,
         opener: pontifex::ResponseOpener,
     ) -> Result<VerifiedMatchResult, Error> {
-        let mut response = request.send().await.map_err(Error::Request)?;
+        let response = request.send().await.map_err(Error::Request)?;
 
         let status = response.status();
         let content_type = response

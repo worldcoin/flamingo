@@ -15,6 +15,7 @@ base64.workspace = true
 flamingo-verifier-api-types.workspace = true
 flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hex = { workspace = true, features = ["serde"] }
 reqwest.workspace = true
 serde.workspace = true
