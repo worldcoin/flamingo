@@ -8,6 +8,7 @@ use flamingo_verifier_api_types::{
 };
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
 use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use futures_util::StreamExt as _;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -50,6 +51,13 @@ pub struct FlamingoVerifierClient {
     verifier: Verifier,
 }
 
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        clippy::future_not_send,
+        reason = "Fetch and JavaScript futures stay on their originating browser worker"
+    )
+)]
 impl FlamingoVerifierClient {
     /// Builds a client from `config`.
     ///
@@ -62,8 +70,8 @@ impl FlamingoVerifierClient {
 
     /// Builds a client using an externally configured HTTP client builder.
     ///
-    /// The configured cookie store, connection timeout, and request timeout are applied to the
-    /// supplied builder.
+    /// Native clients use a cookie store and connection/request timeouts. Browser clients
+    /// use Fetch credentials and a per-request deadline; the browser manages connections.
     ///
     /// # Errors
     ///
@@ -72,13 +80,13 @@ impl FlamingoVerifierClient {
         config: Config,
         http: reqwest::ClientBuilder,
     ) -> Result<Self, Error> {
+        #[cfg(not(target_arch = "wasm32"))]
         let http = http
             // Replays the ALB's affinity cookie, so the match reaches the enclave that was assigned.
             .cookie_store(true)
             .connect_timeout(config.connect_timeout())
-            .timeout(config.request_timeout())
-            .build()
-            .map_err(Error::Transport)?;
+            .timeout(config.request_timeout());
+        let http = http.build().map_err(Error::Transport)?;
 
         Ok(Self {
             verifier: config.verifier()?,
@@ -91,12 +99,13 @@ impl FlamingoVerifierClient {
     ///
     /// Callers may customize the returned builder before passing it to
     /// [`Self::request_assignment_with`].
+    #[must_use]
     pub fn build_assignment_request(&self) -> reqwest::RequestBuilder {
         let url = format!(
             "{}/v1/enclave-assignment",
             self.config.host_url().as_str().trim_end_matches('/')
         );
-        self.http.post(url)
+        self.configure_request(self.http.post(url))
     }
 
     /// Requests an assignment and returns it only if its attestation verifies.
@@ -125,14 +134,15 @@ impl FlamingoVerifierClient {
     ) -> Result<VerifiedAssignment, Error> {
         let response = request.send().await.map_err(Error::Request)?;
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(Error::Status(status.as_u16()));
-        }
+        assignment_status(response.status())?;
+        let assignment = response.json().await.map_err(Error::MalformedResponse)?;
+        self.verify_assignment(assignment)
+    }
 
-        let assignment: EnclaveAssignmentResponse =
-            response.json().await.map_err(Error::MalformedResponse)?;
-
+    fn verify_assignment(
+        &self,
+        assignment: EnclaveAssignmentResponse,
+    ) -> Result<VerifiedAssignment, Error> {
         let document = STANDARD
             .decode(&assignment.attestation)
             .map_err(|_| Error::MalformedAssignment)?;
@@ -166,9 +176,16 @@ impl FlamingoVerifierClient {
         assignment: &VerifiedAssignment,
         inputs: &MatchInputs,
     ) -> Result<(reqwest::RequestBuilder, pontifex::ResponseOpener), Error> {
+        self.build_match_request_for_consumer(assignment.consumer(), inputs)
+    }
+
+    fn build_match_request_for_consumer(
+        &self,
+        consumer: &ChannelConsumer,
+        inputs: &MatchInputs,
+    ) -> Result<(reqwest::RequestBuilder, pontifex::ResponseOpener), Error> {
         let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
-        let (sealed, opener) = assignment
-            .consumer()
+        let (sealed, opener) = consumer
             .seal_to_enclave(&plaintext)
             .map_err(Error::Channel)?;
         let url = format!(
@@ -180,8 +197,7 @@ impl FlamingoVerifierClient {
         }
 
         let request = self
-            .http
-            .post(url)
+            .configure_request(self.http.post(url))
             .header(reqwest::header::CONTENT_TYPE, MATCH_CONTENT_TYPE)
             .header(reqwest::header::ACCEPT, MATCH_CONTENT_TYPE)
             .body(sealed);
@@ -252,25 +268,47 @@ impl FlamingoVerifierClient {
         request: reqwest::RequestBuilder,
         opener: pontifex::ResponseOpener,
     ) -> Result<VerifiedMatchResult, Error> {
-        let mut response = request.send().await.map_err(Error::Request)?;
+        let response = request.send().await.map_err(Error::Request)?;
 
         let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_owned);
+        let length = response.content_length();
+        self.handle_match_response(
+            status,
+            content_type.as_deref(),
+            length,
+            response.bytes_stream(),
+            opener,
+        )
+        .await
+    }
+
+    async fn handle_match_response<S, B>(
+        &self,
+        status: reqwest::StatusCode,
+        content_type: Option<&str>,
+        length: Option<u64>,
+        stream: S,
+        opener: pontifex::ResponseOpener,
+    ) -> Result<VerifiedMatchResult, Error>
+    where
+        S: futures_util::Stream<Item = Result<B, reqwest::Error>>,
+        B: AsRef<[u8]>,
+    {
         if !status.is_success() {
-            let bytes = bounded_response(&mut response).await?;
+            let bytes = bounded_response(length, stream).await?;
             let body = std::str::from_utf8(&bytes).ok();
             return Err(Self::api_error(status.as_u16(), body));
         }
 
-        if response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|h| h.to_str().ok())
-            != Some(MATCH_CONTENT_TYPE)
-        {
+        if content_type != Some(MATCH_CONTENT_TYPE) {
             return Err(Error::MalformedResult);
         }
-
-        let ciphertext = bounded_response(&mut response).await?;
+        let ciphertext = bounded_response(length, stream).await?;
         let plaintext = opener
             .open_from_enclave(&ciphertext)
             .map_err(Error::Channel)?;
@@ -327,22 +365,46 @@ impl FlamingoVerifierClient {
             allow_retry: envelope.allow_retry,
         }
     }
+
+    /// Applies the transport policy to a request before it is sent.
+    ///
+    /// The browser fetch policy ("include" credentials, "no-store" cache, AbortSignal deadline)
+    /// is enforced here. Those settings are not wire-visible, so they are covered by walletkit's
+    /// browser integration, not by unit tests.
+    fn configure_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        #[cfg(target_arch = "wasm32")]
+        let request = request.fetch_credentials_include().fetch_cache_no_store();
+        request.timeout(self.config.request_timeout())
+    }
 }
 
-async fn bounded_response(response: &mut reqwest::Response) -> Result<Vec<u8>, Error> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_MATCH_RESPONSE_BYTES as u64)
-    {
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        clippy::future_not_send,
+        reason = "Fetch response streams stay on the originating browser worker"
+    )
+)]
+async fn bounded_response<S, B>(length: Option<u64>, stream: S) -> Result<Vec<u8>, Error>
+where
+    S: futures_util::Stream<Item = Result<B, reqwest::Error>>,
+    B: AsRef<[u8]>,
+{
+    if length.is_some_and(|length| length > MAX_MATCH_RESPONSE_BYTES as u64) {
         return Err(Error::MalformedResult);
     }
 
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(Error::MalformedResponse)? {
-        if bytes.len() + chunk.len() > MAX_MATCH_RESPONSE_BYTES {
+    // bytes_stream is available on both native and browser clients. Keep the limit
+    // incremental so a missing Content-Length cannot force a full-body allocation.
+    let mut stream = Box::pin(stream);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(Error::MalformedResponse)?;
+        let chunk = chunk.as_ref();
+        if chunk.len() > MAX_MATCH_RESPONSE_BYTES - bytes.len() {
             return Err(Error::MalformedResult);
         }
-        bytes.extend_from_slice(&chunk);
+        bytes.extend_from_slice(chunk);
     }
 
     Ok(bytes)
@@ -365,302 +427,316 @@ pub enum VerifiedMatchResult {
     /// No statement issued.
     Failed(flamingo_verifier_sealed_types::FailureReason),
 }
+fn assignment_status(status: reqwest::StatusCode) -> Result<(), Error> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(Error::Status(status.as_u16()))
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, SocketAddr};
-    use std::sync::{Arc, Mutex};
-
-    use axum::extract::State;
-    use axum::http::StatusCode;
-    use axum::routing::post;
-    use axum::{Json, Router};
+    use super::*;
+    use crate::PcrMeasurement;
     use flamingo_verifier_protocol::match_token::MatchToken;
-    use flamingo_verifier_sealed_types::{
-        AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult,
-    };
-    use hex_literal::hex;
-    use pontifex::{ChannelConsumer, ChannelDomain, ChannelEnclave};
-    use serde_json::json;
+    use flamingo_verifier_sealed_types::{AttestedStatement, FailureReason};
+    use futures_util::stream;
+    use pontifex::ChannelEnclave;
+    use reqwest::StatusCode;
 
-    use super::{FlamingoVerifierClient, VerifiedMatchResult};
-    use crate::{Config, Error, PcrMeasurement};
-    use axum::body::Bytes;
-    use flamingo_verifier_api_types::MATCH_CONTENT_TYPE;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
-    fn config(base_url: &str) -> Config {
-        let pcrs = vec![PcrMeasurement::new(
-            0,
-            hex!(
-                "108b32466f5dc0a9971e0bc8e3e4074e7821bb2dcad3841bdec9a08b30f173386f0394a01486df181f316b39443dab34"
-            ),
-        )];
-
-        Config::new(base_url, vec![pcrs]).expect("config should be valid")
+    fn client() -> FlamingoVerifierClient {
+        let config = Config::new(
+            "https://verifier.example/",
+            vec![vec![PcrMeasurement::new(0, [1; 48])]],
+        )
+        .unwrap();
+        FlamingoVerifierClient::new(config).unwrap()
     }
 
     fn inputs() -> MatchInputs {
         MatchInputs::GrayBadge(flamingo_verifier_sealed_types::GrayBadgeInputs {
-            live: flamingo_verifier_sealed_types::LiveCapture::Vanilla(b"live".to_vec().into()),
+            live: flamingo_verifier_sealed_types::LiveCapture::Vanilla(
+                b"private-image-marker".to_vec().into(),
+            ),
             rtms_challenge: b"challenge".to_vec().into(),
             match_threshold: 0.5,
         })
     }
 
-    async fn serve(router: Router) -> String {
-        let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .await
-            .expect("should bind an ephemeral port");
-        let address = listener
-            .local_addr()
-            .expect("listener should have an address");
-
-        tokio::spawn(async move {
-            axum::serve(listener, router)
-                .await
-                .expect("stub should run");
-        });
-
-        format!("http://{address}")
-    }
-
-    #[derive(Clone)]
-    struct Enclave {
-        responder: Arc<ChannelEnclave>,
-        answer: MatchResult,
-        seen: Arc<Mutex<Option<Vec<u8>>>>,
-        foreign_reply: bool,
-    }
-
-    fn consumer_for(enclave: &ChannelEnclave) -> ChannelConsumer {
-        ChannelConsumer::from_unverified_public_key(
+    fn exchange(answer: &MatchResult, foreign: bool) -> (Vec<u8>, pontifex::ResponseOpener) {
+        let enclave = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN)).unwrap();
+        let consumer = ChannelConsumer::from_unverified_public_key(
             ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
             &enclave.public_key(),
         )
-        .expect("valid key")
-    }
-
-    async fn request_match_with_consumer(
-        client: &FlamingoVerifierClient,
-        consumer: &ChannelConsumer,
-        inputs: &MatchInputs,
-    ) -> Result<VerifiedMatchResult, Error> {
-        let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
-        let (sealed, opener) = consumer
-            .seal_to_enclave(&plaintext)
-            .map_err(Error::Channel)?;
-        let url = format!(
-            "{}/v1/matches",
-            client.config.host_url().as_str().trim_end_matches('/')
+        .unwrap();
+        let (request, opener) = client()
+            .build_match_request_for_consumer(&consumer, &inputs())
+            .unwrap();
+        let request = request.build().unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.url().path(), "/v1/matches");
+        assert_eq!(
+            request.headers()[reqwest::header::CONTENT_TYPE],
+            MATCH_CONTENT_TYPE
         );
-        let request = client
-            .http
-            .post(url)
-            .header("content-type", MATCH_CONTENT_TYPE)
-            .body(sealed);
-
-        client.request_match_with(request, opener).await
-    }
-
-    async fn serve_enclave(
-        answer: MatchResult,
-        foreign_reply: bool,
-    ) -> (String, Arc<ChannelEnclave>, Arc<Mutex<Option<Vec<u8>>>>) {
-        let responder = Arc::new(
-            ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
-                .expect("channel key"),
+        assert_eq!(
+            request.headers()[reqwest::header::ACCEPT],
+            MATCH_CONTENT_TYPE
         );
-        let seen = Arc::new(Mutex::new(None));
-        let state = Enclave {
-            responder: Arc::clone(&responder),
-            answer,
-            seen: Arc::clone(&seen),
-            foreign_reply,
-        };
-
-        let router =
-            Router::new()
-                .route(
-                    "/v1/matches",
-                    post(
-                        |State(state): State<Enclave>,
-                         headers: axum::http::HeaderMap,
-                         body: Bytes| async move {
-                            assert_eq!(headers["content-type"], MATCH_CONTENT_TYPE);
-                            *state.seen.lock().expect("lock") = Some(body.to_vec());
-                            let ciphertext = body;
-                            let (_, own_sealer) = state
-                                .responder
-                                .open(&ciphertext)
-                                .expect("the enclave should open a request sealed to its own key");
-
-                            let sealer = if state.foreign_reply {
-                                let stranger = ChannelConsumer::from_unverified_public_key(
-                                    ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
-                                    &state.responder.public_key(),
-                                )
-                                .expect("key should decode");
-                                let (other, _) = stranger
-                                    .seal_to_enclave(b"unrelated")
-                                    .expect("sealing should succeed");
-                                state
-                                    .responder
-                                    .open(&other)
-                                    .expect("the enclave opens its own")
-                                    .1
-                            } else {
-                                own_sealer
-                            };
-
-                            let encoded = state
-                                .answer
-                                .to_padded_cbor()
-                                .expect("result should fit the envelope");
-                            let response = sealer.seal(&encoded).expect("sealing should succeed");
-
-                            ([("content-type", MATCH_CONTENT_TYPE)], response)
-                        },
-                    ),
-                )
-                .with_state(state);
-
-        (serve(router).await, responder, seen)
-    }
-
-    async fn serve_error(status: StatusCode, code: &'static str, allow_retry: bool) -> String {
-        let router = Router::new().route(
-            "/v1/matches",
-            post(move || async move {
-                (
-                    status,
-                    Json(json!({
-                        "allowRetry": allow_retry,
-                        "error": { "code": code, "message": "stub" },
-                    })),
-                )
-            }),
+        let body = request.body().unwrap().as_bytes().unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(body).is_err());
+        assert!(
+            !body
+                .windows(b"private-image-marker".len())
+                .any(|w| w == b"private-image-marker")
         );
-
-        serve(router).await
-    }
-
-    #[tokio::test]
-    async fn a_sealed_rejection_round_trips() {
-        let answer = MatchResult::Failed(FailureReason::MatchBelowThreshold(
-            flamingo_verifier_sealed_types::ComparisonRole::SelfieChallenge,
-        ));
-        let (base_url, responder, seen) = serve_enclave(answer.clone(), false).await;
-        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
-
-        let result = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
-            .await
-            .expect("a rejection is a normal return");
-
-        assert!(matches!(
-            result,
-            VerifiedMatchResult::Failed(FailureReason::MatchBelowThreshold(_))
-        ));
-
-        let body = seen.lock().expect("lock should be held").clone().unwrap();
-        let (plaintext, _) = responder.open(&body).unwrap();
+        let (plaintext, sealer) = enclave.open(body).unwrap();
+        assert_eq!(&*plaintext, inputs().to_cbor().unwrap().as_slice());
         assert!(matches!(
             MatchInputs::from_cbor(&plaintext),
             Ok(MatchInputs::GrayBadge(_))
         ));
+        let sealer = if foreign {
+            let (other, _) = consumer.seal_to_enclave(b"unrelated").unwrap();
+            enclave.open(&other).unwrap().1
+        } else {
+            sealer
+        };
+        (
+            sealer.seal(&answer.to_padded_cbor().unwrap()).unwrap(),
+            opener,
+        )
     }
 
-    #[tokio::test]
-    async fn a_reply_from_another_exchange_cannot_be_opened() {
-        let (base_url, responder, _) =
-            serve_enclave(MatchResult::Failed(FailureReason::MalformedInputs), true).await;
-        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
-
-        let error = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
-            .await
-            .expect_err("a reply sealed on another exchange must not open");
-
-        assert!(matches!(error, Error::Channel(_)), "got {error:?}");
-    }
-
-    #[tokio::test]
-    async fn a_stale_assignment_asks_for_a_reassignment() {
-        let base_url = serve_error(StatusCode::CONFLICT, "reassign_required", true).await;
-        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
-        let responder = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
-            .expect("channel key");
-
-        let error = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
-            .await
-            .expect_err("a 409 is an error, not a result");
-
-        assert!(
-            matches!(error, Error::ReassignRequired),
-            "a 409 must be distinguishable so the caller can retry once, got {error:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn other_envelopes_keep_their_code_and_retry_flag() {
-        let base_url = serve_error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", false).await;
-        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
-        let responder = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
-            .expect("channel key");
-
-        let error = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
-            .await
-            .expect_err("a 413 is an error");
-
-        match error {
-            Error::Api {
+    async fn response(
+        status: StatusCode,
+        body: Vec<u8>,
+        opener: pontifex::ResponseOpener,
+    ) -> Result<VerifiedMatchResult, Error> {
+        client()
+            .handle_match_response(
                 status,
-                code,
-                allow_retry,
-            } => {
-                assert_eq!(status, 413);
-                assert_eq!(code, "request_too_large");
-                assert!(!allow_retry);
+                Some(MATCH_CONTENT_TYPE),
+                None,
+                stream::iter([Ok(body)]),
+                opener,
+            )
+            .await
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    async fn a_reply_from_another_exchange_cannot_be_opened() {
+        let (body, opener) = exchange(&MatchResult::Failed(FailureReason::MalformedInputs), true);
+        assert!(matches!(
+            response(StatusCode::OK, body, opener).await,
+            Err(Error::Channel(_))
+        ));
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    async fn error_statuses_preserve_envelopes_and_fallback() {
+        for (status, body) in [
+            (
+                409,
+                br#"{"allowRetry":true,"error":{"code":"reassign_required","message":"stub"}}"#
+                    .as_slice(),
+            ),
+            (
+                413,
+                br#"{"allowRetry":false,"error":{"code":"request_too_large","message":"stub"}}"#
+                    .as_slice(),
+            ),
+            (502, b"not json".as_slice()),
+            (502, &[255]),
+        ] {
+            let (_, opener) = exchange(&MatchResult::Failed(FailureReason::MalformedInputs), false);
+            let error = response(StatusCode::from_u16(status).unwrap(), body.to_vec(), opener)
+                .await
+                .unwrap_err();
+            match status {
+                409 => assert!(matches!(error, Error::ReassignRequired)),
+                413 => match error {
+                    Error::Api {
+                        status,
+                        code,
+                        allow_retry,
+                    } => {
+                        assert_eq!(status, 413);
+                        assert_eq!(code, "request_too_large");
+                        assert!(!allow_retry);
+                    }
+                    other => panic!("unexpected error: {other:?}"),
+                },
+                _ => assert!(matches!(error, Error::Status(502))),
             }
-            other => panic!("expected an envelope, got {other:?}"),
         }
     }
 
-    #[tokio::test]
-    async fn a_status_without_an_envelope_still_surfaces() {
-        let router = Router::new().route(
-            "/v1/matches",
-            post(|| async { (StatusCode::BAD_GATEWAY, "not json") }),
-        );
-        let base_url = serve(router).await;
-        let client = FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
-        let responder = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
-            .expect("channel key");
-
-        let error = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
-            .await
-            .expect_err("a 502 is an error");
-
-        assert!(matches!(error, Error::Status(502)), "got {error:?}");
-    }
-
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     async fn a_statement_whose_attestation_does_not_verify_is_rejected() {
         for attestation in [Vec::new(), b"not a COSE attestation document".to_vec()] {
             let answer = MatchResult::Success(AttestedStatement {
                 token: MatchToken::from_bytes(b"cose-sign1".to_vec()),
                 signing_key_attestation: attestation,
             });
-            let (base_url, responder, _) = serve_enclave(answer, false).await;
-            let client =
-                FlamingoVerifierClient::new(config(&base_url)).expect("client should build");
+            let (body, opener) = exchange(&answer, false);
+            assert!(matches!(
+                response(StatusCode::OK, body, opener).await,
+                Err(Error::Attestation(_))
+            ));
+        }
+    }
 
-            let error = request_match_with_consumer(&client, &consumer_for(&responder), &inputs())
-                .await
-                .expect_err("an unverifiable attestation must not yield a statement");
+    mod assignment {
+        use super::*;
 
-            assert!(
-                matches!(error, Error::Attestation(_)),
-                "expected an attestation failure, got {error:?}"
+        #[cfg_attr(not(target_arch = "wasm32"), test)]
+        #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+        fn rejects_an_assignment_whose_attestation_does_not_verify() {
+            let error = client()
+                .verify_assignment(EnclaveAssignmentResponse {
+                    attestation: "hEBAQEA=".into(),
+                    public_key: "a2V5".into(),
+                })
+                .unwrap_err();
+            assert!(matches!(error, Error::Channel(_)));
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), test)]
+        #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+        fn rejects_malformed_base64_in_either_assignment_field() {
+            for (document, key) in [("!", "a2V5"), ("hEBAQEA=", "!")] {
+                let error = client()
+                    .verify_assignment(EnclaveAssignmentResponse {
+                        attestation: document.into(),
+                        public_key: key.into(),
+                    })
+                    .unwrap_err();
+                assert!(matches!(error, Error::MalformedAssignment));
+            }
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), test)]
+        #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+        fn surfaces_a_host_error_status() {
+            let request = client().build_assignment_request().build().unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(request.url().path(), "/v1/enclave-assignment");
+            assert!(matches!(
+                assignment_status(StatusCode::SERVICE_UNAVAILABLE),
+                Err(Error::Status(503))
+            ));
+            assert!(assignment_status(StatusCode::OK).is_ok());
+        }
+    }
+
+    mod match_exchange {
+        use super::*;
+        use std::task::Poll;
+
+        #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+        #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+        async fn a_sealed_exchange_round_trips_over_raw_ciphertext() {
+            let reason = FailureReason::MatchBelowThreshold(
+                flamingo_verifier_sealed_types::ComparisonRole::SelfieChallenge,
             );
+            let (body, opener) = exchange(&MatchResult::Failed(reason), false);
+            assert_eq!(
+                response(StatusCode::OK, body, opener).await.unwrap(),
+                VerifiedMatchResult::Failed(reason)
+            );
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+        #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+        async fn a_response_of_the_wrong_type_is_rejected() {
+            for content_type in [
+                None,
+                Some("application/json"),
+                Some("application/octet-stream; charset=utf-8"),
+            ] {
+                let (_, opener) =
+                    exchange(&MatchResult::Failed(FailureReason::MalformedInputs), false);
+                let stream =
+                    stream::poll_fn(|_| -> Poll<Option<Result<Vec<u8>, reqwest::Error>>> {
+                        panic!("must reject content type before polling the body")
+                    });
+                assert!(matches!(
+                    client()
+                        .handle_match_response(StatusCode::OK, content_type, None, stream, opener)
+                        .await,
+                    Err(Error::MalformedResult)
+                ));
+            }
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+        #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+        async fn an_oversized_streamed_response_is_rejected_before_it_is_buffered() {
+            for status in [StatusCode::OK, StatusCode::BAD_GATEWAY] {
+                let (_, opener) =
+                    exchange(&MatchResult::Failed(FailureReason::MalformedInputs), false);
+                let mut polls = 0;
+                let stream = stream::poll_fn(|_| {
+                    polls += 1;
+                    Poll::Ready(Some(Ok::<_, reqwest::Error>(match polls {
+                        1 => vec![0; MAX_MATCH_RESPONSE_BYTES],
+                        2 => vec![0],
+                        _ => panic!("must stop polling immediately after the oversized chunk"),
+                    })))
+                });
+                assert!(matches!(
+                    client()
+                        .handle_match_response(
+                            status,
+                            Some(MATCH_CONTENT_TYPE),
+                            None,
+                            stream,
+                            opener
+                        )
+                        .await,
+                    Err(Error::MalformedResult)
+                ));
+                assert_eq!(polls, 2);
+            }
+            let bytes =
+                bounded_response(None, stream::iter([Ok(vec![0; MAX_MATCH_RESPONSE_BYTES])]))
+                    .await
+                    .unwrap();
+            assert_eq!(bytes.len(), MAX_MATCH_RESPONSE_BYTES);
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+        #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+        async fn an_oversized_declared_length_is_rejected_before_it_is_buffered() {
+            for status in [StatusCode::OK, StatusCode::BAD_GATEWAY] {
+                let (_, opener) =
+                    exchange(&MatchResult::Failed(FailureReason::MalformedInputs), false);
+                let stream =
+                    stream::poll_fn(|_| -> Poll<Option<Result<Vec<u8>, reqwest::Error>>> {
+                        panic!("must reject declared length without polling the body")
+                    });
+                assert!(matches!(
+                    client()
+                        .handle_match_response(
+                            status,
+                            Some(MATCH_CONTENT_TYPE),
+                            Some(MAX_MATCH_RESPONSE_BYTES as u64 + 1),
+                            stream,
+                            opener
+                        )
+                        .await,
+                    Err(Error::MalformedResult)
+                ));
+            }
         }
     }
 }
