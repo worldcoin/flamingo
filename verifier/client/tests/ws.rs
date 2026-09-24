@@ -275,6 +275,47 @@ async fn surfaces_a_rejected_upgrade() {
 }
 
 #[tokio::test]
+async fn classifies_an_upgrade_rejected_at_capacity() {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .expect("should bind an ephemeral port");
+    let address = listener
+        .local_addr()
+        .expect("listener should have an address");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("should accept");
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer).await;
+        let body = r#"{"allowRetry":true,"error":{"code":"at_capacity","message":"The host is at its WebSocket connection limit"}}"#;
+        let response = format!(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("should write");
+    });
+
+    let error = FlamingoVerifierClient::new(config(&format!("http://{address}")))
+        .expect("client should build")
+        .connect_v2()
+        .await
+        .expect_err("a capacity rejection must surface");
+
+    assert!(
+        matches!(
+            error,
+            client::Error::ApiFrame {
+                ref code,
+                allow_retry: true
+            } if code == "at_capacity"
+        ),
+        "got {error:?}"
+    );
+}
+
+#[tokio::test]
 async fn rejects_a_host_that_closes_before_the_assignment() {
     let base_url = serve(|mut socket| async move {
         expect_assignment_request(&mut socket).await;

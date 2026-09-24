@@ -93,7 +93,17 @@ pub async fn connect(
     )
     .await
     .map_err(|_| Error::Timeout)?
-    .map_err(Error::WebSocket)?;
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => response
+            .body()
+            .as_deref()
+            .and_then(|body| serde_json::from_slice::<ErrorEnvelope>(body).ok())
+            .map_or_else(
+                || Error::WebSocket(tokio_tungstenite::tungstenite::Error::Http(response)),
+                |envelope| classify_envelope(&envelope),
+            ),
+        other => Error::WebSocket(other),
+    })?;
 
     let assignment = request_assignment(&mut socket, &verifier, config.request_timeout()).await?;
 
@@ -123,7 +133,7 @@ fn websocket_url(host: &Url) -> Result<Url, Error> {
         attribute: "host_url".to_owned(),
         reason: "the base URL scheme could not be mapped to a WebSocket".to_owned(),
     })?;
-    url.set_path("/v2/matches");
+    url.set_path(&format!("{}/v2/matches", host.path().trim_end_matches('/')));
 
     Ok(url)
 }
@@ -565,6 +575,14 @@ mod tests {
         let plain = websocket_url(&url::Url::parse("http://127.0.0.1:8080").unwrap())
             .expect("http should map");
         assert_eq!(plain.as_str(), "ws://127.0.0.1:8080/v2/matches");
+
+        let prefixed =
+            websocket_url(&url::Url::parse("https://verifier.example.com/verifier/").unwrap())
+                .expect("a prefixed base URL should map");
+        assert_eq!(
+            prefixed.as_str(),
+            "wss://verifier.example.com/verifier/v2/matches"
+        );
     }
 
     #[test]
