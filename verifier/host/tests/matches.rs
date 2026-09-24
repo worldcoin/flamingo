@@ -1,4 +1,4 @@
-//! Real-socket tests for the `/v2/matches` WebSocket session.
+//! Real-socket tests for the `/matches` WebSocket session.
 //!
 //! These drive a bound TCP listener rather than the router's `oneshot`, because the upgrade and the
 //! session that follows it only exist on a real connection.
@@ -46,7 +46,7 @@ async fn serve(state: AppState) -> SocketAddr {
 }
 
 async fn connect(address: SocketAddr) -> Client {
-    let (socket, _) = connect_async(format!("ws://{address}/v2/matches"))
+    let (socket, _) = connect_async(format!("ws://{address}/matches"))
         .await
         .expect("the upgrade should succeed");
     socket
@@ -276,7 +276,7 @@ async fn capacity_refuses_with_503_and_releases_on_close() {
     // Keep the first session open in its pre-assignment phase, holding the permit.
     let first = connect(address).await;
 
-    let error = connect_async(format!("ws://{address}/v2/matches"))
+    let error = connect_async(format!("ws://{address}/matches"))
         .await
         .expect_err("the second upgrade should be refused");
     match error {
@@ -290,7 +290,7 @@ async fn capacity_refuses_with_503_and_releases_on_close() {
 
     // The permit is released when the session task drops it; retry until the slot frees up.
     for attempt in 0..100 {
-        if connect_async(format!("ws://{address}/v2/matches"))
+        if connect_async(format!("ws://{address}/matches"))
             .await
             .is_ok()
         {
@@ -331,7 +331,7 @@ async fn stalled_peer_releases_its_slot() {
     // The slot is held while the host waits out the bounded write, and must free within a few idle
     // timeouts rather than never.
     for attempt in 0..100 {
-        if connect_async(format!("ws://{address}/v2/matches"))
+        if connect_async(format!("ws://{address}/matches"))
             .await
             .is_ok()
         {

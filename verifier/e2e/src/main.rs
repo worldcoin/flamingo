@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     let config = load_config()?;
     let client = FlamingoVerifierClient::new(config).context("failed to build the client")?;
     let session = client
-        .connect_v2()
+        .connect()
         .await
         .context("enclave assignment did not verify")?;
 

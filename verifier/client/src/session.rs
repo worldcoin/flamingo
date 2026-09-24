@@ -1,4 +1,4 @@
-//! The v2 WebSocket session for the Flamingo Verifier host.
+//! The WebSocket session for the Flamingo Verifier host.
 //!
 //! A session performs exactly one exchange: the assignment request is answered with the
 //! enclave's attested key, and then the match request is sealed to that key and sent as a
@@ -31,9 +31,9 @@ use crate::error::Error;
 /// The WebSocket the session owns, over plain TCP or TLS.
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// One verified v2 exchange: a WebSocket bound to the enclave assignment delivered on it.
+/// One verified exchange: a WebSocket bound to the enclave assignment delivered on it.
 ///
-/// Created by [`crate::FlamingoVerifierClient::connect_v2`].
+/// Created by [`crate::FlamingoVerifierClient::connect`].
 #[derive(Debug)]
 pub struct FlamingoVerifierSession {
     socket: Socket,
@@ -78,7 +78,7 @@ impl FlamingoVerifierSession {
     }
 }
 
-/// Opens the v2 WebSocket and verifies the assignment the host delivers on it.
+/// Opens the WebSocket and verifies the assignment the host delivers on it.
 pub async fn connect(
     config: &Config,
     verifier: Verifier,
@@ -133,7 +133,7 @@ fn websocket_url(host: &Url) -> Result<Url, Error> {
         attribute: "host_url".to_owned(),
         reason: "the base URL scheme could not be mapped to a WebSocket".to_owned(),
     })?;
-    url.set_path(&format!("{}/v2/matches", host.path().trim_end_matches('/')));
+    url.set_path(&format!("{}/matches", host.path().trim_end_matches('/')));
 
     Ok(url)
 }
@@ -567,21 +567,21 @@ mod tests {
     }
 
     #[test]
-    fn base_urls_map_onto_the_v2_endpoint() {
+    fn base_urls_map_onto_the_matches_endpoint() {
         let secure = websocket_url(&url::Url::parse("https://verifier.example.com").unwrap())
             .expect("https should map");
-        assert_eq!(secure.as_str(), "wss://verifier.example.com/v2/matches");
+        assert_eq!(secure.as_str(), "wss://verifier.example.com/matches");
 
         let plain = websocket_url(&url::Url::parse("http://127.0.0.1:8080").unwrap())
             .expect("http should map");
-        assert_eq!(plain.as_str(), "ws://127.0.0.1:8080/v2/matches");
+        assert_eq!(plain.as_str(), "ws://127.0.0.1:8080/matches");
 
         let prefixed =
             websocket_url(&url::Url::parse("https://verifier.example.com/verifier/").unwrap())
                 .expect("a prefixed base URL should map");
         assert_eq!(
             prefixed.as_str(),
-            "wss://verifier.example.com/verifier/v2/matches"
+            "wss://verifier.example.com/verifier/matches"
         );
     }
 
