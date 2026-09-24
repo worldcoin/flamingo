@@ -59,12 +59,25 @@ docker version
 
 Start the EIF with `nitro-cli run-enclave`, using the CPU and memory allocation for your instance. Use a normal enclave, since the client rejects debug measurements. Set `ENCLAVE_CID` to the running enclave's CID; its vsock port is `1000`.
 
+The host reads every setting from an environment variable and an equivalent CLI flag, with a flag overriding its variable:
+
+| Flag | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `--app-env` | `APP_ENV` | `development` | `production`, `staging`, or `development`. |
+| `--enclave-cid` | `ENCLAVE_CID` | required | Nitro enclave CID. |
+| `--enclave-port` | `ENCLAVE_PORT` | required | Enclave Pontifex port. |
+| `--port` | `PORT` | `8000` | API listen port. |
+| `--ws-idle-timeout-secs` | `WS_IDLE_TIMEOUT_SECS` | `30` | Idle deadline for each v2 session phase. |
+| `--ws-max-connections` | `WS_MAX_CONNECTIONS` | `100` | Concurrent v2 WebSocket sessions per host process. |
+
+`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero.
+
 ```bash
 RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 \
   cargo run --locked --bin flamingo-verifier-host
 ```
 
-The host listens on port `8000` by default; `PORT` overrides it. In another shell:
+In another shell:
 
 ```bash
 curl --fail http://localhost:8000/health
@@ -80,4 +93,6 @@ VERIFIER_CONFIG=./client.json cargo run --locked --bin flamingo-verifier-e2e -- 
   credential.png live.png challenge.png
 ```
 
-The harness fetches an assignment, submits an encrypted DeepFace request, and verifies the result. It defaults to a `0.9` threshold; `MATCH_THRESHOLD` overrides it. It creates `hashes.json` from the supplied credential image for this test. Real callers must supply the credential's original `hashes.json`.
+The harness opens the v2 WebSocket session — one assignment text frame, then one sealed match binary frame over the same socket — submits an encrypted DeepFace request, and verifies the statement and its claims. It defaults to a `0.9` threshold; `MATCH_THRESHOLD` overrides it. It creates `hashes.json` from the supplied credential image for this test. Real callers must supply the credential's original `hashes.json`.
+
+`MATCH_OPERATION=gray_badge` runs the credential-free operation instead and takes only `<live-image> <challenge-image>`. `LIGHT_GUARD_UNILLUMINATED_IMAGE` adds the second frame and `LIGHT_GUARD_MATCHING_FRAME` selects `illuminated` (default) or `unilluminated`.
