@@ -257,10 +257,13 @@ impl ApiError {
         }
     }
 
-    /// Logs this failure once, at the level its status implies.
+    /// Logs failures at a level appropriate to their cause.
     pub fn log(&self) {
-        // Expected busy responses do not need a log per call.
-        if self.status.is_server_error() && self.code != "enclave_not_ready" {
+        // Enclave readiness is expected during startup; capacity rejections warrant a warning.
+        if self.status.is_server_error()
+            && self.code != "enclave_not_ready"
+            && self.code != "at_capacity"
+        {
             tracing::error!(
                 code = self.code,
                 status = %self.status,
@@ -268,7 +271,7 @@ impl ApiError {
                 dependency = "enclave",
                 "request failed"
             );
-        } else if !self.status.is_server_error() {
+        } else if !self.status.is_server_error() || self.code == "at_capacity" {
             tracing::warn!(
                 code = self.code,
                 status = %self.status,
