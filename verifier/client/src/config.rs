@@ -81,6 +81,13 @@ impl Config {
         self
     }
 
+    /// Bounds the whole of a single request, including a WebSocket exchange.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout_millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        self
+    }
+
     /// Loads a configuration from JSON.
     ///
     /// # Errors

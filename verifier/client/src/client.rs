@@ -13,9 +13,103 @@ use pontifex::{ChannelConsumer, ChannelDomain};
 
 use crate::config::Config;
 use crate::error::Error;
+use crate::session::FlamingoVerifierSession;
 
 /// Error code the host uses for a request that did not open.
 const REASSIGN_REQUIRED: &str = "reassign_required";
+
+/// Verifies an assignment response's attestation and binds it to the supplied public key.
+pub fn verify_assignment(
+    verifier: &Verifier,
+    response: &EnclaveAssignmentResponse,
+) -> Result<VerifiedAssignment, Error> {
+    let document = STANDARD
+        .decode(&response.attestation)
+        .map_err(|_| Error::MalformedAssignment)?;
+    let public_key = STANDARD
+        .decode(&response.public_key)
+        .map_err(|_| Error::MalformedAssignment)?;
+    let (consumer, attestation) = ChannelConsumer::from_attestation(
+        ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
+        verifier,
+        &document,
+        &public_key,
+    )
+    .map_err(Error::Channel)?;
+
+    Ok(VerifiedAssignment {
+        attestation,
+        consumer,
+    })
+}
+
+/// Opens a sealed match response and verifies the statement it carries, if any.
+pub fn open_verified_match(
+    verifier: &Verifier,
+    ciphertext: &[u8],
+    opener: pontifex::ResponseOpener,
+) -> Result<VerifiedMatchResult, Error> {
+    let plaintext = opener
+        .open_from_enclave(ciphertext)
+        .map_err(Error::Channel)?;
+    let result = MatchResult::from_padded_cbor(&plaintext).map_err(|_| Error::MalformedResult)?;
+
+    // Only a statement needs the key, so a rejection skips the attestation entirely.
+    if let MatchResult::Success(statement) = result {
+        // Response encryption alone does not authenticate the signing key.
+        let attested = verifier.verify_attestation_document(&statement.signing_key_attestation)?;
+        let signing_key = <[u8; 32]>::try_from(
+            attested
+                .document()
+                .public_key
+                .as_ref()
+                .ok_or(Error::InvalidSigningKey)?
+                .as_slice(),
+        )
+        .map_err(|_| Error::InvalidSigningKey)
+        .and_then(|bytes| {
+            EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
+        })?;
+
+        let claims = match_token::verify(&statement.token, &signing_key)
+            .map_err(|_| Error::StatementInvalid)?;
+        return Ok(VerifiedMatchResult::Success(Box::new(VerifiedMatch {
+            statement,
+            claims,
+        })));
+    }
+
+    match result {
+        MatchResult::Failed(reason) => Ok(VerifiedMatchResult::Failed(reason)),
+        MatchResult::Success(_) => unreachable!("success was verified above"),
+    }
+}
+
+/// Rejects a verified result whose claims do not match the requested inputs.
+pub fn ensure_claims_match(
+    inputs: &MatchInputs,
+    result: &VerifiedMatchResult,
+) -> Result<(), Error> {
+    if let VerifiedMatchResult::Success(verified) = result
+        && !inputs.matches_claims(&verified.claims)
+    {
+        return Err(Error::StatementInvalid);
+    }
+
+    Ok(())
+}
+
+/// Classifies an error envelope received over the v2 WebSocket.
+pub fn classify_envelope(envelope: &ErrorEnvelope) -> Error {
+    if envelope.error.code == REASSIGN_REQUIRED {
+        return Error::ReassignRequired;
+    }
+
+    Error::ApiFrame {
+        code: envelope.error.code.clone(),
+        allow_retry: envelope.allow_retry,
+    }
+}
 
 /// An assignment whose attestation verified and whose encryption key is ready for sealing.
 #[derive(Debug, Clone)]
@@ -133,24 +227,22 @@ impl FlamingoVerifierClient {
         let assignment: EnclaveAssignmentResponse =
             response.json().await.map_err(Error::MalformedResponse)?;
 
-        let document = STANDARD
-            .decode(&assignment.attestation)
-            .map_err(|_| Error::MalformedAssignment)?;
-        let public_key = STANDARD
-            .decode(&assignment.public_key)
-            .map_err(|_| Error::MalformedAssignment)?;
-        let (consumer, attestation) = ChannelConsumer::from_attestation(
-            ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
-            &self.verifier,
-            &document,
-            &public_key,
-        )
-        .map_err(Error::Channel)?;
+        verify_assignment(&self.verifier, &assignment)
+    }
 
-        Ok(VerifiedAssignment {
-            attestation,
-            consumer,
-        })
+    /// Opens the v2 WebSocket, verifies the enclave assignment delivered on it, and returns a
+    /// session that runs exactly one match over that same socket.
+    ///
+    /// The session owns both the socket and the verified assignment, so its match cannot be sent
+    /// over a connection whose assignment was not verified.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the handshake fails, the host rejects or closes the connection, the
+    /// assignment does not arrive or verify, or the exchange exceeds the configured deadline.
+    pub async fn connect_v2(&self) -> Result<FlamingoVerifierSession, Error> {
+        let verifier = self.config.verifier()?;
+        crate::session::connect(&self.config, verifier).await
     }
 
     /// Creates a sealed match request without sending it.
@@ -206,11 +298,7 @@ impl FlamingoVerifierClient {
     ) -> Result<VerifiedMatchResult, Error> {
         let (request, opener) = self.build_match_request(assignment, inputs)?;
         let result = self.request_match_with(request, opener).await?;
-        if let VerifiedMatchResult::Success(verified) = &result
-            && !inputs.matches_claims(&verified.claims)
-        {
-            return Err(Error::StatementInvalid);
-        }
+        ensure_claims_match(inputs, &result)?;
 
         Ok(result)
     }
@@ -271,43 +359,7 @@ impl FlamingoVerifierClient {
         }
 
         let ciphertext = bounded_response(&mut response).await?;
-        let plaintext = opener
-            .open_from_enclave(&ciphertext)
-            .map_err(Error::Channel)?;
-        let result =
-            MatchResult::from_padded_cbor(&plaintext).map_err(|_| Error::MalformedResult)?;
-
-        // Only a statement needs the key, so a rejection skips the attestation entirely.
-        if let MatchResult::Success(statement) = result {
-            // Response encryption alone does not authenticate the signing key.
-            let attested = self
-                .verifier
-                .verify_attestation_document(&statement.signing_key_attestation)?;
-            let signing_key = <[u8; 32]>::try_from(
-                attested
-                    .document()
-                    .public_key
-                    .as_ref()
-                    .ok_or(Error::InvalidSigningKey)?
-                    .as_slice(),
-            )
-            .map_err(|_| Error::InvalidSigningKey)
-            .and_then(|bytes| {
-                EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
-            })?;
-
-            let claims = match_token::verify(&statement.token, &signing_key)
-                .map_err(|_| Error::StatementInvalid)?;
-            return Ok(VerifiedMatchResult::Success(Box::new(VerifiedMatch {
-                statement,
-                claims,
-            })));
-        }
-
-        match result {
-            MatchResult::Failed(reason) => Ok(VerifiedMatchResult::Failed(reason)),
-            MatchResult::Success(_) => unreachable!("success was verified above"),
-        }
+        open_verified_match(&self.verifier, &ciphertext, opener)
     }
 
     /// Classifies a non-success response, reading the error envelope when there is one.

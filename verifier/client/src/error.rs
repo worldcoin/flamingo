@@ -72,4 +72,29 @@ pub enum Error {
     /// The statement did not verify under the attested signing key.
     #[error("match statement did not verify under the attested signing key")]
     StatementInvalid,
+
+    /// The WebSocket handshake or an I/O operation on it failed.
+    #[error("WebSocket transport failed: {0}")]
+    WebSocket(#[source] tokio_tungstenite::tungstenite::Error),
+
+    /// An operation did not finish within its configured deadline.
+    #[error("the host did not respond within the configured deadline")]
+    Timeout,
+
+    /// The host closed the WebSocket before the exchange completed.
+    #[error("the host closed the connection before the exchange completed")]
+    ConnectionClosed,
+
+    /// A frame was not the message the v2 protocol expects at that point.
+    #[error("the host sent an unexpected or malformed message")]
+    MalformedMessage,
+
+    /// The host returned an error envelope over the WebSocket.
+    #[error("host returned error ({code})")]
+    ApiFrame {
+        /// Machine-readable code from the envelope.
+        code: String,
+        /// Whether the host says the request may be retried.
+        allow_retry: bool,
+    },
 }
