@@ -14,7 +14,9 @@
 mod assignment;
 mod error;
 mod matches;
+mod websocket;
 
 pub use assignment::EnclaveAssignmentResponse;
 pub use error::{ErrorBody, ErrorEnvelope};
 pub use matches::*;
+pub use websocket::{ClientMessage, HostMessage};
