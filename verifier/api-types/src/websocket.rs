@@ -1,4 +1,4 @@
-//! JSON text frames for the `/v2/matches` WebSocket.
+//! JSON text frames for the `/matches` WebSocket.
 //!
 //! A session exchanges exactly one assignment request and one assignment response as text frames,
 //! then one sealed match request and one sealed match response as binary frames. The `type` tag
@@ -21,7 +21,7 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostMessage {
-    /// The enclave's encryption key and attestation, as on `POST /v1/enclave-assignment`.
+    /// The enclave's encryption key and attestation.
     Assignment(EnclaveAssignmentResponse),
 }
 
