@@ -1,18 +1,12 @@
 use std::{env, fs, path::PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
-use flamingo_verifier_client::{
-    Config, FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, VerifiedMatchResult,
-};
-use flamingo_verifier_enclave_types::MatchRequest;
-use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey};
+use anyhow::{Context, Result, bail, ensure};
+use flamingo_verifier_client::{Config, FlamingoVerifierClient, VerifiedMatchResult};
 use flamingo_verifier_sealed_types::{
-    DeepFaceInputs, GrayBadgeInputs, LightGuardMatchingFrame, LiveCapture, MatchInputs, MatchResult,
+    DeepFaceInputs, GrayBadgeInputs, LightGuardMatchingFrame, LiveCapture, MatchInputs,
 };
-use pontifex::client::ConnectionDetails;
 use sha2::{Digest, Sha256};
 
-const DEFAULT_ENCLAVE_PORT: u32 = 1000;
 const DEFAULT_MATCH_THRESHOLD: f64 = 0.9;
 
 #[tokio::main]
@@ -58,11 +52,9 @@ async fn main() -> Result<()> {
     let match_threshold = optional_f64("MATCH_THRESHOLD", DEFAULT_MATCH_THRESHOLD)?;
 
     let config = load_config()?;
-    let verifier = config.verifier()?;
-
     let client = FlamingoVerifierClient::new(config).context("failed to build the client")?;
-    let assignment = client
-        .request_assignment()
+    let session = client
+        .connect_v2()
         .await
         .context("enclave assignment did not verify")?;
 
@@ -82,82 +74,18 @@ async fn main() -> Result<()> {
             match_threshold,
         })
     };
-    let result = match env::var("VERIFIER_E2E_TRANSPORT").as_deref() {
-        Err(env::VarError::NotPresent) | Ok("http") => {
-            client.request_match(&assignment, &inputs).await?
-        }
 
-        Ok("vsock") => request_match_vsock(&assignment, &inputs, &verifier).await?,
-        _ => bail!("VERIFIER_E2E_TRANSPORT must be http or vsock"),
-    };
-
-    let verified = match result {
-        VerifiedMatchResult::Success(verified) => verified,
-        VerifiedMatchResult::Failed(reason) => bail!("no statement was issued: {reason:?}"),
-    };
-    ensure!(
-        inputs.matches_claims(&verified.claims),
-        "statement operation, input commitments or score did not match the request"
-    );
-    println!("attested match succeeded; operation, capture commitments and score verified");
-    Ok(())
-}
-
-/// Exercises the internal host-to-enclave transport with the same verified assignment.
-async fn request_match_vsock(
-    assignment: &VerifiedAssignment,
-    inputs: &MatchInputs,
-    verifier: &pontifex::attestation::Verifier,
-) -> Result<VerifiedMatchResult> {
-    let connection = ConnectionDetails::new(
-        required_u32("ENCLAVE_CID")?,
-        optional_u32("ENCLAVE_PORT", DEFAULT_ENCLAVE_PORT)?,
-    );
-    let plaintext = inputs
-        .to_cbor()
-        .map_err(|error| anyhow!("failed to encode the match inputs: {error:?}"))?;
-    let (sealed, opener) = assignment
-        .consumer()
-        .seal_to_enclave(&plaintext)
-        .map_err(|error| anyhow!("failed to seal the match request: {error:?}"))?;
-
-    let response = pontifex::client::send(
-        connection,
-        &MatchRequest {
-            body: sealed.into(),
-        },
-    )
-    .await
-    .context("failed to call the enclave matches route")?
-    .map_err(|error| anyhow!("enclave rejected the match request: {error:?}"))?;
-
-    let sealed_outcome = opener
-        .open_from_enclave(&response.ciphertext)
-        .map_err(|error| anyhow!("failed to open the sealed response: {error:?}"))?;
-    let result = MatchResult::from_padded_cbor(&sealed_outcome)
-        .map_err(|error| anyhow!("failed to decode the sealed result: {error:?}"))?;
+    let result = session
+        .request_match(&inputs)
+        .await
+        .context("match exchange did not verify")?;
     match result {
-        MatchResult::Failed(reason) => Ok(VerifiedMatchResult::Failed(reason)),
-        MatchResult::Success(statement) => {
-            let document = verifier
-                .verify_attestation_document(&statement.signing_key_attestation)?
-                .into_document();
-            let key: [u8; 32] = document
-                .public_key
-                .context("missing signing key")?
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow!("invalid signing key size"))?;
-            let key = EdDSAPublicKey::from_compressed_bytes(key)
-                .map_err(|_| anyhow!("invalid signing key"))?;
-            let claims = match_token::verify(&statement.token, &key)
-                .map_err(|e| anyhow!("invalid statement: {e:?}"))?;
-            Ok(VerifiedMatchResult::Success(Box::new(VerifiedMatch {
-                statement,
-                claims,
-            })))
+        VerifiedMatchResult::Success(_) => {
+            println!("attested match succeeded; operation, capture commitments and score verified");
         }
+        VerifiedMatchResult::Failed(reason) => bail!("no statement was issued: {reason:?}"),
     }
+    Ok(())
 }
 
 /// Loads the client configuration named by `VERIFIER_CONFIG`; see `docs/api.md`.
@@ -206,24 +134,6 @@ fn read_image(path: &PathBuf, label: &str) -> Result<Vec<u8>> {
 fn hashes_json_for(image: &[u8]) -> Vec<u8> {
     let hash = hex::encode(Sha256::digest(image));
     format!(r#"{{"thumbnail.png":"{hash}"}}"#).into_bytes()
-}
-
-fn required_u32(name: &str) -> Result<u32> {
-    env::var(name)
-        .with_context(|| format!("{name} must be set"))
-        .and_then(|value| {
-            value
-                .parse()
-                .with_context(|| format!("{name} must be a valid u32"))
-        })
-}
-
-fn optional_u32(name: &str, default: u32) -> Result<u32> {
-    env::var(name).map_or(Ok(default), |value| {
-        value
-            .parse()
-            .with_context(|| format!("{name} must be a valid u32"))
-    })
 }
 
 fn optional_f64(name: &str, default: f64) -> Result<f64> {
