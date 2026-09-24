@@ -1,8 +1,9 @@
-//! Client for the Flamingo Verifier's enclave-assignment flow.
+//! Client for the Flamingo Verifier host.
 //!
-//! Fetches an assignment, verifies the AWS Nitro attestation document it carries, and yields
-//! a [`ChannelConsumer`] bound to the separately supplied public key. The signed document
-//! commits to that key; Pontifex checks the commitment, measurements, signature and freshness.
+//! Opens a WebSocket session, verifies the AWS Nitro attestation document that commits to the
+//! enclave's encryption key, and runs one sealed match over the verified channel. The session
+//! yields a [`ChannelConsumer`] bound to that key; Pontifex checks the commitment, measurements,
+//! signature and freshness.
 //!
 //! ```no_run
 //! use flamingo_verifier_client::{Config, FlamingoVerifierClient, PcrMeasurement};
@@ -14,8 +15,8 @@
 //!     vec![vec![PcrMeasurement::new(0, pcr0)]],
 //! )?;
 //! let client = FlamingoVerifierClient::new(config)?;
-//! let assignment = client.request_assignment().await?;
-//! let result = client.request_match(&assignment, inputs).await?;
+//! let session = client.connect().await?;
+//! let result = session.request_match(inputs).await?;
 //! # Ok(())
 //! # }
 //! ```

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// `POST /v1/enclave-assignment` response.
+/// The enclave's encryption key and attestation, returned as the assignment in a `/matches` session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnclaveAssignmentResponse {
     /// COSE attestation committing to the encryption key, standard padded base64.

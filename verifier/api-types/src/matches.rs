@@ -1,6 +1,4 @@
 //! Bounds for the opaque binary match exchange.
-/// Media type for encrypted match request and response bodies.
-pub const MATCH_CONTENT_TYPE: &str = "application/octet-stream";
 /// Maximum encoded bytes in one image.
 pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum encoded image bytes across all frames (unchanged intended image budget).
