@@ -3,6 +3,7 @@
 mod enclave_assignment;
 mod health;
 mod matches;
+mod matches_v2;
 mod readiness;
 
 use axum::{
@@ -14,6 +15,7 @@ use axum::{
 use crate::AppState;
 
 pub use matches::MAX_BODY_BYTES as MAX_MATCH_BODY_BYTES;
+pub use matches_v2::MAX_WS_MESSAGE_BYTES;
 
 /// Builds the router with all API routes.
 ///
@@ -29,4 +31,5 @@ pub fn handler() -> Router<AppState> {
             "/v1/matches",
             post(matches::handler).layer(DefaultBodyLimit::max(matches::MAX_BODY_BYTES)),
         )
+        .route("/v2/matches", get(matches_v2::handler))
 }
