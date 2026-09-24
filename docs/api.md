@@ -67,7 +67,7 @@ Image limits are 4 MiB per image and 7 MiB across all frames. `hashes.json` is l
 1. An assignment request text frame, `{"type":"assignment_request"}`. The host answers with an assignment text frame, `{"type":"assignment","attestation":"…","public_key":"…"}`, carrying the same fields as `POST /v1/enclave-assignment`.
 2. One sealed match binary frame — the same ciphertext the v1 route would accept — to which the host answers with one sealed result binary frame.
 
-The client verifies the assignment, seals the match to that key, and verifies the result and its claims without a second round trip for ordering. `FlamingoVerifierClient::connect_v2` returns a session whose `request_match` runs the exchange; the session owns the socket and the verified assignment, so a match cannot be sent over a connection whose assignment was not verified.
+The client verifies the assignment, seals the match to that key, and verifies the result and its claims without a second round trip for ordering. `FlamingoVerifierClient::connect_v2` returns a session whose `request_match` runs the exchange; the session owns the socket and the verified assignment, so a match cannot be sent over a connection whose assignment was not verified. For authenticated gateways, call `build_v2_request()`, add an `Authorization` header with `with_header`, then pass the builder to `connect_v2_with()`.
 
 The upgrade is refused with an HTTP `503 at_capacity` envelope while the host serves `WS_MAX_CONNECTIONS` sessions. Within a session, each phase has `WS_IDLE_TIMEOUT_SECS` to complete; the deadline restarts after a valid assignment exchange and ends when the match frame arrives.
 

@@ -230,6 +230,20 @@ impl FlamingoVerifierClient {
         verify_assignment(&self.verifier, &assignment)
     }
 
+    /// Creates the v2 WebSocket upgrade request without sending it.
+    ///
+    /// Callers may add headers to the returned builder before passing it to
+    /// [`Self::connect_v2_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the configured host URL cannot be used as a WebSocket endpoint.
+    pub fn build_v2_request(
+        &self,
+    ) -> Result<tokio_tungstenite::tungstenite::ClientRequestBuilder, Error> {
+        crate::session::build_request(&self.config)
+    }
+
     /// Opens the v2 WebSocket, verifies the enclave assignment delivered on it, and returns a
     /// session that runs exactly one match over that same socket.
     ///
@@ -241,8 +255,23 @@ impl FlamingoVerifierClient {
     /// Returns [`Error`] if the handshake fails, the host rejects or closes the connection, the
     /// assignment does not arrive or verify, or the exchange exceeds the configured deadline.
     pub async fn connect_v2(&self) -> Result<FlamingoVerifierSession, Error> {
-        let verifier = self.config.verifier()?;
-        crate::session::connect(&self.config, verifier).await
+        self.connect_v2_with(self.build_v2_request()?).await
+    }
+
+    /// Opens a v2 WebSocket with a caller-customized upgrade request.
+    ///
+    /// The `request` should be created from [`Self::build_v2_request`] so it targets this
+    /// client's configured endpoint. The assignment is verified before the session is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the handshake fails, the host rejects or closes the connection, the
+    /// assignment does not arrive or verify, or the exchange exceeds the configured deadline.
+    pub async fn connect_v2_with(
+        &self,
+        request: tokio_tungstenite::tungstenite::ClientRequestBuilder,
+    ) -> Result<FlamingoVerifierSession, Error> {
+        crate::session::connect(&self.config, self.config.verifier()?, request).await
     }
 
     /// Creates a sealed match request without sending it.
