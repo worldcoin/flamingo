@@ -58,16 +58,21 @@ async fn rejects_an_assignment_whose_attestation_does_not_verify() {
     // A syntactically fine response carrying a document signed by nobody.
     let base_url = serve_assignment("hEBAQEA=", "a2V5").await;
 
-    let error = FlamingoVerifierClient::new(config(&base_url))
-        .expect("client should build")
-        .request_assignment()
-        .await
-        .expect_err("an unverifiable document must not be accepted");
+    for config in [
+        config(&base_url),
+        Config::dangerously_skip_measurements(&base_url).unwrap(),
+    ] {
+        let error = FlamingoVerifierClient::new(config)
+            .expect("client should build")
+            .request_assignment()
+            .await
+            .expect_err("an unverifiable document must not be accepted");
 
-    assert!(
-        matches!(error, client::Error::Channel(_)),
-        "unexpected error: {error}"
-    );
+        assert!(
+            matches!(error, client::Error::Channel(_)),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[tokio::test]
