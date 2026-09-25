@@ -32,6 +32,7 @@ axum = "0.8"
 base64 = "0.22"
 bytes = { version = "1", features = ["serde"] }
 ciborium = "0.2"
+clap = { version = "4", features = ["derive", "env"] }
 coset = "0.4.2"
 flamingo-verifier-api-types = { version = "0.4.0", path = "verifier/api-types" }
 flamingo-verifier-client = { path = "verifier/client" }
@@ -41,6 +42,7 @@ flamingo-verifier-sealed-types = { version = "0.4.0", path = "verifier/sealed-ty
 eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
 flamingo-verifier-sandbox-client = { path = "verifier/sandbox-client" }
 flamingo-verifier-sandbox-bundle = { path = "verifier/sandbox-bundle" }
+futures-util = "0.3"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"
@@ -58,7 +60,9 @@ sha2 = { version = "0.10", default-features = false }
 thiserror = "2"
 tempfile = "3.27"
 vsock = "0.5.4"
-tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots", "url"] }
+tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
 telemetry-batteries = { version = "0.4.1", default-features = false }
 tracing = "0.1"

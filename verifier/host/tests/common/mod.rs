@@ -1,11 +1,15 @@
 //! Test doubles shared across the host's integration tests.
+//!
+//! Each integration test binary compiles this module separately and uses only part of it, so unused
+//! items here are expected rather than dead code.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use flamingo_verifier_enclave_types::{KeyAttestation, MatchRequest, MatchResponse};
 use flamingo_verifier_host::enclave::{self, EnclaveClient};
-use flamingo_verifier_host::{AppState, Environment};
+use flamingo_verifier_host::{AppState, HostConfig};
 
 /// An [`EnclaveClient`] answering from fixed results.
 ///
@@ -43,7 +47,12 @@ impl EnclaveClient for StubEnclaveClient {
     }
 }
 
-/// Builds an [`AppState`] backed by `client`.
+/// Builds an [`AppState`] backed by `client`, using the default host configuration.
 pub fn state_with(client: StubEnclaveClient) -> AppState {
-    AppState::new(Environment::Development, Arc::new(client))
+    AppState::new(HostConfig::default(), Arc::new(client))
+}
+
+/// Builds an [`AppState`] backed by `client` with a caller-supplied configuration.
+pub fn state_with_config(config: HostConfig, client: StubEnclaveClient) -> AppState {
+    AppState::new(config, Arc::new(client))
 }

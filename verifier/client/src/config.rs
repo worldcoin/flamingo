@@ -41,7 +41,7 @@ pub struct Config {
     /// Bound on establishing a connection.
     #[serde(default = "default_connect_timeout_millis")]
     connect_timeout_millis: u64,
-    /// Bound on a whole request.
+    /// Bound on a whole exchange.
     #[serde(default = "default_request_timeout_millis")]
     request_timeout_millis: u64,
 }
@@ -78,6 +78,13 @@ impl Config {
     #[must_use]
     pub fn with_max_attestation_age(mut self, max_age: Duration) -> Self {
         self.max_attestation_age_millis = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
+        self
+    }
+
+    /// Bounds each WebSocket exchange phase. Connecting uses `connect_timeout_millis` instead.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout_millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         self
     }
 
@@ -155,7 +162,7 @@ impl Config {
         Duration::from_millis(self.connect_timeout_millis)
     }
 
-    /// Bound on a whole request.
+    /// Bound on a whole exchange.
     #[must_use]
     pub const fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.request_timeout_millis)

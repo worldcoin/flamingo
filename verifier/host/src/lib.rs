@@ -17,4 +17,4 @@ pub mod routes;
 pub mod server;
 
 pub use app_state::AppState;
-pub use environment::Environment;
+pub use environment::{Environment, HostConfig};

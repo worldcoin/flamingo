@@ -13,19 +13,24 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 base64.workspace = true
+clap.workspace = true
 flamingo-verifier-api-types.workspace = true
 flamingo-verifier-enclave-types.workspace = true
 pontifex = { workspace = true, features = ["client"] }
 serde.workspace = true
+serde_json.workspace = true
 telemetry-batteries = { workspace = true, features = ["axum"] }
 tokio.workspace = true
 tracing.workspace = true
+tungstenite.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
 http-body-util.workspace = true
 serde_json.workspace = true
-tower.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite.workspace = true
+tower.workspace = true
