@@ -35,6 +35,9 @@ pub struct Config {
     /// full, which lets several enclave versions be trusted at once during a rollout.
     #[serde(with = "pcr_configs")]
     allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
+    /// Explicit development-only opt-in to all-zero PCR0. Exact PCR matching still applies.
+    #[serde(default)]
+    allow_debug_measurements: bool,
     /// How old an attestation document's own timestamp may be.
     #[serde(default = "default_max_attestation_age_millis")]
     max_attestation_age_millis: u64,
@@ -57,6 +60,31 @@ impl Config {
         host_url: &str,
         allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
     ) -> Result<Self, Error> {
+        Self::new_inner(host_url, allowed_pcr_configs, false)
+    }
+
+    /// Allows explicitly supplied debug measurements for development enclaves.
+    ///
+    /// All-zero PCR0 does not identify the enclave's code. Attestation signature,
+    /// certificate, freshness and exact PCR matching checks still apply.
+    /// Do not use this configuration in production.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid URL, empty policy, missing PCR0, duplicate
+    /// indices or measurements that are not 48 bytes.
+    pub fn new_with_debug_measurements(
+        host_url: &str,
+        allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
+    ) -> Result<Self, Error> {
+        Self::new_inner(host_url, allowed_pcr_configs, true)
+    }
+
+    fn new_inner(
+        host_url: &str,
+        allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
+        allow_debug_measurements: bool,
+    ) -> Result<Self, Error> {
         let host_url = Url::parse(host_url).map_err(|error| Error::InvalidConfig {
             attribute: "host_url".to_string(),
             reason: error.to_string(),
@@ -65,6 +93,7 @@ impl Config {
         let config = Self {
             host_url,
             allowed_pcr_configs,
+            allow_debug_measurements,
             max_attestation_age_millis: default_max_attestation_age_millis(),
             connect_timeout_millis: default_connect_timeout_millis(),
             request_timeout_millis: default_request_timeout_millis(),
@@ -103,13 +132,16 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Rejects an empty policy, a missing or zero PCR0, duplicate indices, or malformed measurements.
+    /// Rejects an empty policy, missing PCR0, duplicate indices, or malformed measurements.
+    /// Zero PCR0 requires the explicit development opt-in.
     pub fn verifier(&self) -> Result<Verifier, Error> {
-        let invalid = || Error::InvalidConfig {
+        let invalid = || {
+            Error::InvalidConfig {
             attribute: "allowed_pcr_configs".to_owned(),
-            reason: "each configuration must pin a nonzero 48-byte PCR0; \
-                     all measurements must be 48 bytes with unique indices"
+            reason: "each configuration must pin a 48-byte PCR0; zero PCR0 requires \
+                     allow_debug_measurements; all measurements must be 48 bytes with unique indices"
                 .to_owned(),
+        }
         };
         if self.allowed_pcr_configs.is_empty() {
             return Err(invalid());
@@ -128,7 +160,7 @@ impl Config {
                 .find(|pcr| pcr.index == 0)
                 .ok_or_else(invalid)?;
             let image = <[u8; 48]>::try_from(pcr0.value.as_slice()).map_err(|_| invalid())?;
-            if image == [0; 48] {
+            if image == [0; 48] && !self.allow_debug_measurements {
                 return Err(invalid());
             }
             let mut config = PcrConfig::new(image);
@@ -137,10 +169,15 @@ impl Config {
             }
             configs.push(config);
         }
-        Ok(Verifier::new(
+        let verifier = Verifier::new(
             configs,
             Duration::from_millis(self.max_attestation_age_millis),
-        ))
+        );
+        Ok(if self.allow_debug_measurements {
+            verifier.with_debug_measurements()
+        } else {
+            verifier
+        })
     }
 
     /// The host to call.
@@ -282,6 +319,55 @@ mod tests {
     }
 
     #[test]
+    fn debug_measurements_require_explicit_opt_in_including_after_round_trip() {
+        let pins = vec![
+            (0..=2)
+                .map(|index| PcrMeasurement::new(index, [0; 48]))
+                .collect::<Vec<_>>(),
+        ];
+        assert!(Config::new("http://localhost:8000", pins.clone()).is_err());
+        let config = Config::new_with_debug_measurements("http://localhost:8000", pins).unwrap();
+        assert!(config.verifier().is_ok());
+        let mut json = serde_json::to_value(config).unwrap();
+        assert_eq!(json["allow_debug_measurements"], true);
+        assert_eq!(json["allowed_pcr_configs"][0][0]["value"], "00".repeat(48));
+        assert!(
+            Config::from_json(&json.to_string())
+                .unwrap()
+                .verifier()
+                .is_ok()
+        );
+        json.as_object_mut()
+            .unwrap()
+            .remove("allow_debug_measurements");
+        assert!(Config::from_json(&json.to_string()).is_err());
+        json["allow_debug_measurements"] = serde_json::json!(false);
+        assert!(Config::from_json(&json.to_string()).is_err());
+    }
+
+    #[test]
+    fn debug_opt_in_does_not_allow_missing_malformed_or_duplicate_pins() {
+        for pins in [
+            vec![],
+            vec![PcrMeasurement::new(1, [0; 48])],
+            vec![PcrMeasurement::new(0, [0; 47])],
+            vec![
+                PcrMeasurement::new(0, [0; 48]),
+                PcrMeasurement::new(1, [0; 49]),
+            ],
+            vec![
+                PcrMeasurement::new(0, [0; 48]),
+                PcrMeasurement::new(0, [0; 48]),
+            ],
+        ] {
+            assert!(
+                Config::new_with_debug_measurements("http://localhost:8000", vec![pins]).is_err()
+            );
+        }
+        assert!(Config::new_with_debug_measurements("http://localhost:8000", vec![]).is_err());
+    }
+
+    #[test]
     fn accepts_pcr_values_with_and_without_the_0x_prefix() {
         // Release metadata records PCRs 0x-prefixed; both spellings should be accepted.
         let json = r#"{
@@ -323,6 +409,7 @@ mod tests {
         )
         .expect("Pontifex measurements should be accepted");
         let json = serde_json::to_value(&config).expect("config should serialize");
+        assert_eq!(json["allow_debug_measurements"], false);
         assert_eq!(
             json["allowed_pcr_configs"],
             serde_json::json!([

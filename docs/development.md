@@ -57,7 +57,7 @@ docker version
 
 ## Run the host and a match
 
-Start the EIF with `nitro-cli run-enclave`, using the CPU and memory allocation for your instance. Use a normal enclave, since the client rejects debug measurements. Set `ENCLAVE_CID` to the running enclave's CID; its vsock port is `1000`.
+Start the EIF with `nitro-cli run-enclave`, using the CPU and memory allocation for your instance. Use a normal enclave by default. For Nitro `--debug-mode`, explicitly enable the [development-only debug measurement option](api.md#client-configuration) and pin its zero PCRs. Set `ENCLAVE_CID` to the running enclave's CID; its vsock port is `1000`.
 
 ```bash
 RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 \

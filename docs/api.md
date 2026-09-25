@@ -19,13 +19,23 @@ Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encr
   "allowed_pcr_configs": [
     [{ "index": 0, "value": "<96-character PCR0 hex>" }]
   ],
+  "allow_debug_measurements": false,
   "max_attestation_age_millis": 3600000,
   "connect_timeout_millis": 5000,
   "request_timeout_millis": 60000
 }
 ```
 
-Only `host_url` and `allowed_pcr_configs` are required. The other fields default to the values shown. Each PCR configuration must include a nonzero, 48-byte PCR0; every measurement must be 48 bytes and each index must be unique. An attestation must match one complete configuration. Debug enclaves report zero measurements and are rejected.
+Only `host_url` and `allowed_pcr_configs` are required. The other fields default to the values shown. By default, each PCR configuration must include a nonzero, 48-byte PCR0; every measurement must be 48 bytes and each index must be unique. An attestation must match one complete configuration. Debug enclaves report zero measurements and are rejected by default.
+
+For Nitro `--debug-mode` development only, set `allow_debug_measurements` to `true`
+and explicitly pin the zero PCR0/1/2 values (48 zero bytes each). Rust callers use
+`Config::new_with_debug_measurements(host_url, allowed_pcr_configs)` so the opt-in
+is present before configuration validation. The option applies to both assignment
+and match signing-key attestation verification. All configured PCRs must still
+match exactly, and signatures, certificate chains, freshness, and channel key
+commitments are still verified. Zero measurements cannot identify enclave code;
+do not enable this option in production.
 
 ## Enclave assignment
 
