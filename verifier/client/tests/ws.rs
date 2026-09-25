@@ -92,7 +92,7 @@ async fn sends_custom_headers_on_the_upgrade() {
             bytes += read;
         }
         let request = String::from_utf8_lossy(&buffer[..bytes]);
-        assert!(request.starts_with("GET /matches HTTP/1.1\r\n"));
+        assert!(request.starts_with("GET /v1/matches HTTP/1.1\r\n"));
         assert!(
             request
                 .to_ascii_lowercase()
@@ -390,7 +390,7 @@ async fn rejects_a_host_that_closes_before_the_assignment() {
 // `accept_hdr_async`'s callback returns tokio-tungstenite's large `ErrorResponse` type.
 #[allow(clippy::result_large_err)]
 #[tokio::test]
-async fn connect_upgrades_the_unversioned_matches_endpoint() {
+async fn connect_upgrades_the_v1_matches_endpoint() {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .await
         .expect("should bind an ephemeral port");
@@ -418,5 +418,5 @@ async fn connect_upgrades_the_unversioned_matches_endpoint() {
         .await;
 
     let path = seen.lock().expect("lock should not be poisoned").clone();
-    assert_eq!(path.as_deref(), Some("/matches"));
+    assert_eq!(path.as_deref(), Some("/v1/matches"));
 }

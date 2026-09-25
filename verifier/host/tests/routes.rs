@@ -31,14 +31,12 @@ fn request(method: Method, uri: &str) -> Request<Body> {
         .expect("request should be valid")
 }
 
-/// The versioned HTTP transport is gone: the assignment and the sealed match exchange now run over
-/// the unversioned `/matches` WebSocket, so the old routes must not answer.
 #[tokio::test]
-async fn versioned_http_routes_are_gone() {
+async fn obsolete_match_routes_are_gone() {
     for (method, uri) in [
         (Method::POST, "/v1/enclave-assignment"),
-        (Method::POST, "/v1/matches"),
         (Method::GET, "/v2/matches"),
+        (Method::GET, "/matches"),
     ] {
         let response = status(
             state_with(StubEnclaveClient::default()),
@@ -48,6 +46,15 @@ async fn versioned_http_routes_are_gone() {
 
         assert_eq!(response, StatusCode::NOT_FOUND, "{uri} should not exist");
     }
+
+    assert_eq!(
+        status(
+            state_with(StubEnclaveClient::default()),
+            request(Method::POST, "/v1/matches"),
+        )
+        .await,
+        StatusCode::METHOD_NOT_ALLOWED,
+    );
 }
 
 /// Readiness is not liveness: with the registry gone the enclave is the only dependency left,

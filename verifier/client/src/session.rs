@@ -143,7 +143,7 @@ fn websocket_url(host: &Url) -> Result<Url, Error> {
         attribute: "host_url".to_owned(),
         reason: "the base URL scheme could not be mapped to a WebSocket".to_owned(),
     })?;
-    url.set_path(&format!("{}/matches", host.path().trim_end_matches('/')));
+    url.set_path(&format!("{}/v1/matches", host.path().trim_end_matches('/')));
 
     Ok(url)
 }
@@ -580,18 +580,18 @@ mod tests {
     fn base_urls_map_onto_the_matches_endpoint() {
         let secure = websocket_url(&url::Url::parse("https://verifier.example.com").unwrap())
             .expect("https should map");
-        assert_eq!(secure.as_str(), "wss://verifier.example.com/matches");
+        assert_eq!(secure.as_str(), "wss://verifier.example.com/v1/matches");
 
         let plain = websocket_url(&url::Url::parse("http://127.0.0.1:8080").unwrap())
             .expect("http should map");
-        assert_eq!(plain.as_str(), "ws://127.0.0.1:8080/matches");
+        assert_eq!(plain.as_str(), "ws://127.0.0.1:8080/v1/matches");
 
         let prefixed =
             websocket_url(&url::Url::parse("https://verifier.example.com/verifier/").unwrap())
                 .expect("a prefixed base URL should map");
         assert_eq!(
             prefixed.as_str(),
-            "wss://verifier.example.com/verifier/matches"
+            "wss://verifier.example.com/verifier/v1/matches"
         );
     }
 
