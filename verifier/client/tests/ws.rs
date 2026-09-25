@@ -1,5 +1,7 @@
 //! End-to-end tests for the WebSocket client against a stub host.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};

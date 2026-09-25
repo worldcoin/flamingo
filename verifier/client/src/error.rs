@@ -46,9 +46,15 @@ pub enum Error {
     #[error("match statement did not verify under the attested signing key")]
     StatementInvalid,
 
-    /// The WebSocket handshake or an I/O operation on it failed.
+    /// The native WebSocket handshake or an I/O operation on it failed.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("WebSocket transport failed: {0}")]
     WebSocket(#[source] tokio_tungstenite::tungstenite::Error),
+
+    /// A browser WebSocket connection or send failed.
+    #[cfg(target_arch = "wasm32")]
+    #[error("browser WebSocket transport failed: {0}")]
+    BrowserWebSocket(#[source] ws_stream_wasm::WsErr),
 
     /// An operation did not finish within its configured deadline.
     #[error("the host did not respond within the configured deadline")]

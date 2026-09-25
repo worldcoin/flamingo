@@ -46,6 +46,18 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets --all-features --
 
+  browser-client:
+    name: Browser client WASM check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: ./.github/actions/setup-rust
+      - name: Install browser target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Check browser verifier client
+        run: cargo check --locked -p flamingo-verifier-client --target wasm32-unknown-unknown --all-targets
+
   cargo-tests:
     name: tests
     runs-on: ubuntu-latest

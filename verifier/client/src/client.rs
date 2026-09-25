@@ -8,9 +8,9 @@ use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchRes
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
+use crate::FlamingoVerifierSession;
 use crate::config::Config;
 use crate::error::Error;
-use crate::session::FlamingoVerifierSession;
 
 /// Error code the host uses for a request that did not open.
 const REASSIGN_REQUIRED: &str = "reassign_required";
@@ -153,11 +153,13 @@ impl FlamingoVerifierClient {
 
     /// Creates the WebSocket upgrade request without sending it.
     ///
-    /// Callers may add headers before passing the builder to [`Self::connect_with`].
+    /// Native-only: callers may add headers before passing the builder to [`Self::connect_with`].
+    /// Browsers cannot set custom WebSocket handshake headers.
     ///
     /// # Errors
     ///
     /// Returns [`Error`] if the configured host URL cannot be used as a WebSocket endpoint.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn build_request(
         &self,
     ) -> Result<tokio_tungstenite::tungstenite::ClientRequestBuilder, Error> {
@@ -175,10 +177,17 @@ impl FlamingoVerifierClient {
     /// Returns [`Error`] if the handshake fails, the host rejects or closes the connection, the
     /// assignment does not arrive or verify, or the exchange exceeds the configured deadline.
     pub async fn connect(&self) -> Result<FlamingoVerifierSession, Error> {
-        self.connect_with(self.build_request()?).await
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.connect_with(self.build_request()?).await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::session_browser::connect(&self.config, self.config.verifier()?).await
+        }
     }
 
-    /// Opens a WebSocket with a caller-customized upgrade request.
+    /// Opens a WebSocket with a caller-customized upgrade request (native only).
     ///
     /// The `request` should be created from [`Self::build_request`] so it targets this client's
     /// configured endpoint. The assignment is verified before the session is returned.
@@ -187,6 +196,7 @@ impl FlamingoVerifierClient {
     ///
     /// Returns [`Error`] if the handshake fails, the host rejects or closes the connection, the
     /// assignment does not arrive or verify, or the exchange exceeds the configured deadline.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn connect_with(
         &self,
         request: tokio_tungstenite::tungstenite::ClientRequestBuilder,
