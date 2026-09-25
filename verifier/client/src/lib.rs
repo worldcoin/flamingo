@@ -28,14 +28,21 @@
     missing_docs,
     dead_code
 )]
+#![cfg_attr(target_arch = "wasm32", allow(clippy::future_not_send))]
 
 mod client;
 mod config;
 mod error;
+#[cfg(not(target_arch = "wasm32"))]
 mod session;
+#[cfg(target_arch = "wasm32")]
+mod session_browser;
 
 pub use client::{FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, VerifiedMatchResult};
 pub use config::Config;
 pub use error::Error;
 pub use pontifex::{ChannelConsumer, PcrMeasurement};
+#[cfg(not(target_arch = "wasm32"))]
 pub use session::FlamingoVerifierSession;
+#[cfg(target_arch = "wasm32")]
+pub use session_browser::FlamingoVerifierSession;
