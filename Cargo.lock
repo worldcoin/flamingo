@@ -2214,7 +2214,7 @@ dependencies = [
 [[package]]
 name = "pontifex"
 version = "2.0.1"
-source = "git+https://github.com/worldcoin/pontifex?rev=39b8d85205cafaeb06eec4d3ae98a7c6c2dc3bb7#39b8d85205cafaeb06eec4d3ae98a7c6c2dc3bb7"
+source = "git+https://github.com/worldcoin/pontifex?rev=ab61c34184542590e21162d0d446df2f59b53a10#ab61c34184542590e21162d0d446df2f59b53a10"
 dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "ciborium",
