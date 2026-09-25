@@ -80,7 +80,7 @@ impl LiveCapture {
     #[must_use]
     pub fn commitment(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
-        hash.update(b"flamingo/live-capture/v2");
+        hash.update(b"flamingo/live-capture/v1");
         hash.update(len_prefix(self.profile.len()));
         hash.update(self.profile.as_bytes());
         hash.update(len_prefix(self.frames.len()));
