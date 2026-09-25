@@ -39,7 +39,11 @@ fn maximum_request_has_bounded_codec_allocations() {
     let mib = 1024 * 1024;
     let request = MatchInputs::DeepFace(DeepFaceInputs {
         orb_credential: vec![1; 3 * mib].into(),
-        live: LiveCapture::vanilla(vec![2; 2 * mib].into()),
+        live: LiveCapture {
+            profile: "vanilla".to_owned(),
+            frames: vec![vec![2; 2 * mib].into()],
+            matching_frame: 0,
+        },
         rtms_challenge: vec![3; 2 * mib].into(),
         hashes_json: b"{}".to_vec().into(),
         match_threshold: 0.5,

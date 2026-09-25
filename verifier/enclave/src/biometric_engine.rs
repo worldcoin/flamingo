@@ -7,7 +7,7 @@ use async_trait::async_trait;
 #[cfg(any(target_os = "linux", test))]
 use biometric_engines_protocol::face::{LightGuard, LightGuardMatchingFrame, face_image::Source};
 #[cfg(any(target_os = "linux", test))]
-use flamingo_verifier_sealed_types::{ByteBuf, capture_profile};
+use flamingo_verifier_sealed_types::ByteBuf;
 use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
 #[cfg(any(target_os = "linux", test))]
 use tokio::{sync::Mutex, time::timeout};
@@ -128,6 +128,11 @@ fn normalized(score: f64) -> f64 {
     f64::from(f32::midpoint(1.0, score as f32))
 }
 
+/// Capture profile for one selfie frame.
+pub const VANILLA_PROFILE: &str = "vanilla";
+/// Capture profile for `LightGuard`: frames are `[illuminated, unilluminated]`.
+pub const LIGHT_GUARD_PROFILE: &str = "light_guard";
+
 /// Maps a capture profile onto the engine's image source; unknown profiles never reach the engine.
 #[cfg(any(target_os = "linux", test))]
 fn live_source(capture: LiveCapture) -> Result<Source, BiometricError> {
@@ -140,10 +145,10 @@ fn live_source(capture: LiveCapture) -> Result<Source, BiometricError> {
     let mut frames = frames.into_iter().map(ByteBuf::into_vec);
 
     match (profile.as_str(), frames.len(), matching_frame) {
-        (capture_profile::VANILLA, 1, 0) => Ok(Source::VanillaSelfie(
+        (VANILLA_PROFILE, 1, 0) => Ok(Source::VanillaSelfie(
             frames.next().ok_or_else(unsupported)?,
         )),
-        (capture_profile::LIGHT_GUARD, 2, 0 | 1) => Ok(Source::LightGuard(LightGuard {
+        (LIGHT_GUARD_PROFILE, 2, 0 | 1) => Ok(Source::LightGuard(LightGuard {
             illuminated: frames.next().ok_or_else(unsupported)?,
             unilluminated: frames.next().ok_or_else(unsupported)?,
             matching_frame: if matching_frame == 0 {
@@ -452,7 +457,7 @@ mod tests {
             let illuminated = vec![1, 2, 3];
             let pointer = illuminated.as_ptr();
             let Ok(Source::LightGuard(pair)) = live_source(capture(
-                capture_profile::LIGHT_GUARD,
+                LIGHT_GUARD_PROFILE,
                 vec![illuminated, vec![4, 5]],
                 matching_frame,
             )) else {
@@ -468,7 +473,7 @@ mod tests {
     #[test]
     fn vanilla_maps_to_a_single_selfie() {
         assert_eq!(
-            live_source(LiveCapture::vanilla(vec![7].into())),
+            live_source(capture(VANILLA_PROFILE, vec![vec![7]], 0)),
             Ok(Source::VanillaSelfie(vec![7]))
         );
     }
@@ -477,13 +482,9 @@ mod tests {
     fn unknown_profiles_and_frame_shapes_are_rejected_before_the_engine() {
         for live in [
             capture("future_pad", vec![vec![1]], 0),
-            capture(capture_profile::VANILLA, vec![vec![1], vec![2]], 0),
-            capture(capture_profile::LIGHT_GUARD, vec![vec![1]], 0),
-            capture(
-                capture_profile::LIGHT_GUARD,
-                vec![vec![1], vec![2], vec![3]],
-                2,
-            ),
+            capture(VANILLA_PROFILE, vec![vec![1], vec![2]], 0),
+            capture(LIGHT_GUARD_PROFILE, vec![vec![1]], 0),
+            capture(LIGHT_GUARD_PROFILE, vec![vec![1], vec![2], vec![3]], 2),
         ] {
             assert_eq!(
                 live_source(live),

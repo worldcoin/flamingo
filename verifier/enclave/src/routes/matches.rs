@@ -193,14 +193,15 @@ async fn sign(
 mod tests {
     use super::*;
     use crate::{
-        biometric_engine::{BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores},
+        biometric_engine::{
+            BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores, LIGHT_GUARD_PROFILE,
+            VANILLA_PROFILE,
+        },
         test_support::{EchoAttestor, UnusedBiometricEngine},
     };
     use flamingo_verifier_protocol::match_token;
     use flamingo_verifier_sealed_types::{ComparisonRole, FailureReason, LiveCapture};
-    use flamingo_verifier_sealed_types::{
-        DeepFaceInputs, GrayBadgeInputs, MATCH_CHANNEL_DOMAIN, capture_profile,
-    };
+    use flamingo_verifier_sealed_types::{DeepFaceInputs, GrayBadgeInputs, MATCH_CHANNEL_DOMAIN};
     use pontifex::{ChannelConsumer, ChannelDomain};
     use sha2::{Digest, Sha256};
 
@@ -219,7 +220,7 @@ mod tests {
             assert_eq!(&credential[..], b"orb");
             let frames: Vec<&[u8]> = live.frames.iter().map(|frame| &frame[..]).collect();
             match live.profile.as_str() {
-                capture_profile::VANILLA => assert_eq!(frames, [b"live"]),
+                VANILLA_PROFILE => assert_eq!(frames, [b"live"]),
                 _ => assert_eq!(frames, [&b"lit"[..], b"dark"]),
             }
             assert_eq!(&challenge[..], b"challenge");
@@ -241,11 +242,19 @@ mod tests {
         }
     }
 
+    fn vanilla(image: &[u8]) -> LiveCapture {
+        LiveCapture {
+            profile: VANILLA_PROFILE.to_owned(),
+            frames: vec![image.to_vec().into()],
+            matching_frame: 0,
+        }
+    }
+
     fn inputs() -> MatchInputs {
         let hash = hex::encode(Sha256::digest(b"orb"));
         MatchInputs::DeepFace(DeepFaceInputs {
             orb_credential: b"orb".to_vec().into(),
-            live: LiveCapture::vanilla(b"live".to_vec().into()),
+            live: vanilla(b"live"),
             rtms_challenge: b"challenge".to_vec().into(),
             hashes_json: format!(r#"{{"thumbnail.png":"{hash}"}}"#)
                 .into_bytes()
@@ -256,7 +265,7 @@ mod tests {
 
     fn gray(threshold: f64) -> MatchInputs {
         MatchInputs::GrayBadge(GrayBadgeInputs {
-            live: LiveCapture::vanilla(b"live".to_vec().into()),
+            live: vanilla(b"live"),
             rtms_challenge: b"challenge".to_vec().into(),
             match_threshold: threshold,
         })
@@ -301,10 +310,7 @@ mod tests {
         };
         let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
         assert!(inputs.matches_claims(&claims));
-        assert_eq!(
-            claims.live_capture_hash,
-            LiveCapture::vanilla(b"live".to_vec().into()).commitment()
-        );
+        assert_eq!(claims.live_capture_hash, vanilla(b"live").commitment());
         assert_eq!(
             claims.challenger_image_hash,
             <[u8; 32]>::from(Sha256::digest(b"challenge"))
@@ -366,7 +372,7 @@ mod tests {
                     MatchInputs::GrayBadge(i) => &mut i.live,
                 };
                 *live = LiveCapture {
-                    profile: capture_profile::LIGHT_GUARD.to_owned(),
+                    profile: LIGHT_GUARD_PROFILE.to_owned(),
                     frames: vec![b"lit".to_vec().into(), b"dark".to_vec().into()],
                     matching_frame,
                 };

@@ -401,7 +401,11 @@ mod tests {
 
     fn inputs() -> MatchInputs {
         MatchInputs::GrayBadge(flamingo_verifier_sealed_types::GrayBadgeInputs {
-            live: flamingo_verifier_sealed_types::LiveCapture::vanilla(b"live".to_vec().into()),
+            live: flamingo_verifier_sealed_types::LiveCapture {
+                profile: "vanilla".to_owned(),
+                frames: vec![b"live".to_vec().into()],
+                matching_frame: 0,
+            },
             rtms_challenge: b"challenge".to_vec().into(),
             match_threshold: 0.5,
         })

@@ -7,7 +7,7 @@ use flamingo_verifier_client::{
 use flamingo_verifier_enclave_types::MatchRequest;
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey};
 use flamingo_verifier_sealed_types::{
-    DeepFaceInputs, GrayBadgeInputs, LiveCapture, MatchInputs, MatchResult, capture_profile,
+    DeepFaceInputs, GrayBadgeInputs, LiveCapture, MatchInputs, MatchResult,
 };
 use pontifex::client::ConnectionDetails;
 use sha2::{Digest, Sha256};
@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
                 _ => bail!("LIGHT_GUARD_MATCHING_FRAME must be illuminated or unilluminated"),
             };
             LiveCapture {
-                profile: capture_profile::LIGHT_GUARD.to_owned(),
+                profile: "light_guard".to_owned(),
                 frames: vec![
                     read_image(&image_paths.live, "illuminated")?.into(),
                     read_image(&PathBuf::from(path), "unilluminated")?.into(),
@@ -49,7 +49,11 @@ async fn main() -> Result<()> {
                 env::var_os("LIGHT_GUARD_MATCHING_FRAME").is_none(),
                 "LIGHT_GUARD_MATCHING_FRAME requires LIGHT_GUARD_UNILLUMINATED_IMAGE"
             );
-            LiveCapture::vanilla(read_image(&image_paths.live, "live")?.into())
+            LiveCapture {
+                profile: "vanilla".to_owned(),
+                frames: vec![read_image(&image_paths.live, "live")?.into()],
+                matching_frame: 0,
+            }
         }
         Err(error) => return Err(error.into()),
     };
