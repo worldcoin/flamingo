@@ -48,10 +48,17 @@ Keep assignment and match requests on the same client instance. The Rust client 
 
 | Operation | Inputs | Current support |
 | --- | --- | --- |
-| `deep_face` | Orb photo, live capture, challenge image, raw `hashes.json`, and threshold. | Three comparisons with vanilla or LightGuard capture, PCP binding and signing. |
+| `deep_face` | Orb photo, live capture, challenge image, raw `hashes.json`, and threshold. | Three comparisons, PCP binding and signing. |
 | `gray_badge` | Live capture, challenge image, and threshold. | Verifies live/challenge similarity and signs a credential-free GrayBadge statement. |
 
-Both operations support `vanilla` and `light_guard` captures. LightGuard sends both illuminated and unilluminated frames and an explicit matching-frame selection to the sandboxed engine. Version-2 signed statements bind the operation, the complete live capture (including both LightGuard frames and the selection), the challenge and the operation-specific score; DeepFace also binds the PCP commitment. Clients reject statements that do not match their request.
+A live capture is `{profile, frames, matching_frame}`: up to 8 ordered frames, the index of the frame used for matching, and a profile naming how the sandboxed engine reads them. The verifier does not interpret the profile; the bundled engine supports:
+
+| Profile | Frames |
+| --- | --- |
+| `vanilla` | `[selfie]` |
+| `light_guard` | `[illuminated, unilluminated]` |
+
+Any other profile or frame layout fails with `unsupported_capture` before inference. Version-2 signed statements bind the operation, the live-capture commitment (profile, every frame in order, and the matching-frame index), the challenge and the operation-specific score; DeepFace also binds the PCP commitment. Clients reject statements that do not match their request.
 
 A `200` response contains a padded, encrypted success or rejection. A success includes the [signed match statement](architecture.md#match-statements) and signing-key attestation. The client verifies both and checks that the claims match the inputs. A rejection contains a failure reason and no signed statement.
 

@@ -51,6 +51,8 @@ pub enum FailureReason {
     InvalidThreshold,
     /// Empty image buffer.
     EmptyImage,
+    /// The engine does not support this capture profile or its frame layout.
+    UnsupportedCapture,
     /// Image or aggregate budget exceeded.
     InputTooLarge,
     /// A named comparison did not meet policy.
