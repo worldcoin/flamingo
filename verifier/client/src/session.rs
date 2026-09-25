@@ -16,8 +16,8 @@ use futures_util::{SinkExt, StreamExt};
 use pontifex::attestation::Verifier;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 use url::Url;
 
@@ -78,18 +78,28 @@ impl FlamingoVerifierSession {
     }
 }
 
+/// Creates the WebSocket upgrade request.
+pub fn build_request(config: &Config) -> Result<ClientRequestBuilder, Error> {
+    let url = websocket_url(config.host_url())?;
+    let uri = url
+        .as_str()
+        .parse::<tokio_tungstenite::tungstenite::http::Uri>()
+        .map_err(|error| Error::WebSocket(error.into()))?;
+    Ok(ClientRequestBuilder::new(uri))
+}
+
 /// Opens the WebSocket and verifies the assignment the host delivers on it.
 pub async fn connect(
     config: &Config,
     verifier: Verifier,
+    request: ClientRequestBuilder,
 ) -> Result<FlamingoVerifierSession, Error> {
-    let url = websocket_url(config.host_url())?;
     let socket_config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MATCH_BODY_BYTES))
         .max_frame_size(Some(MAX_MATCH_BODY_BYTES));
     let (mut socket, _response) = tokio::time::timeout(
         config.connect_timeout(),
-        connect_async_with_config(url.as_str(), Some(socket_config), false),
+        connect_async_with_config(request, Some(socket_config), false),
     )
     .await
     .map_err(|_| Error::Timeout)?
