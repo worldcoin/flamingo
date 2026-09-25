@@ -1,4 +1,4 @@
-//! `GET /matches`: a WebSocket session carrying one assignment and one match.
+//! `GET /v1/matches`: a WebSocket session carrying one assignment and one match.
 //!
 //! The upgrade is refused with an HTTP `503` envelope once the host is at its connection limit. A
 //! session then runs in phases: one assignment-request text frame, the assignment text frame, one

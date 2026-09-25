@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// The enclave's encryption key and attestation, returned as the assignment in a `/matches` session.
+/// The enclave's encryption key and attestation, returned as the assignment in a `/v1/matches` session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnclaveAssignmentResponse {
     /// COSE attestation committing to the encryption key, standard padded base64.

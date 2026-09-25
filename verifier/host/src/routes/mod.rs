@@ -15,5 +15,5 @@ pub fn handler() -> Router<AppState> {
     Router::new()
         .route("/health", get(health::handler))
         .route("/ready", get(readiness::handler))
-        .route("/matches", get(matches::handler))
+        .route("/v1/matches", get(matches::handler))
 }

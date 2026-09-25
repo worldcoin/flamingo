@@ -1,4 +1,4 @@
-//! JSON text frames for the `/matches` WebSocket.
+//! JSON text frames for the `/v1/matches` WebSocket.
 //!
 //! A session exchanges exactly one assignment request and one assignment response as text frames,
 //! then one sealed match request and one sealed match response as binary frames. The `type` tag
