@@ -72,6 +72,56 @@ async fn expect_assignment_request(socket: &mut WebSocketStream<TcpStream>) {
 }
 
 #[tokio::test]
+async fn sends_custom_headers_on_the_upgrade() {
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .expect("should bind an ephemeral port");
+    let address = listener
+        .local_addr()
+        .expect("listener should have an address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("should accept");
+        let mut buffer = [0u8; 2048];
+        let mut bytes = 0;
+        while !buffer[..bytes].ends_with(b"\r\n\r\n") {
+            let read = stream
+                .read(&mut buffer[bytes..])
+                .await
+                .expect("should read upgrade");
+            assert!(read > 0, "upgrade ended before headers");
+            bytes += read;
+        }
+        let request = String::from_utf8_lossy(&buffer[..bytes]);
+        assert!(request.starts_with("GET /matches HTTP/1.1\r\n"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-token\r\n")
+        );
+        stream
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+            .await
+            .expect("should reject upgrade");
+    });
+
+    let client = FlamingoVerifierClient::new(config(&format!("http://{address}")))
+        .expect("client should build");
+    let request = client
+        .build_request()
+        .expect("upgrade request should build")
+        .with_header("Authorization", "Bearer test-token");
+    let error = client
+        .connect_with(request)
+        .await
+        .expect_err("the stub rejects the upgrade");
+    assert!(
+        matches!(error, client::Error::WebSocket(_)),
+        "got {error:?}"
+    );
+    server.await.expect("server should complete");
+}
+
+#[tokio::test]
 async fn rejects_an_assignment_whose_attestation_does_not_verify() {
     let base_url = serve(|mut socket| async move {
         expect_assignment_request(&mut socket).await;

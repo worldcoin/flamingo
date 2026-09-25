@@ -151,6 +151,19 @@ impl FlamingoVerifierClient {
         Ok(Self { config })
     }
 
+    /// Creates the WebSocket upgrade request without sending it.
+    ///
+    /// Callers may add headers before passing the builder to [`Self::connect_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the configured host URL cannot be used as a WebSocket endpoint.
+    pub fn build_request(
+        &self,
+    ) -> Result<tokio_tungstenite::tungstenite::ClientRequestBuilder, Error> {
+        crate::session::build_request(&self.config)
+    }
+
     /// Opens the WebSocket, verifies the enclave assignment delivered on it, and returns a
     /// session that runs exactly one match over that same socket.
     ///
@@ -162,7 +175,23 @@ impl FlamingoVerifierClient {
     /// Returns [`Error`] if the handshake fails, the host rejects or closes the connection, the
     /// assignment does not arrive or verify, or the exchange exceeds the configured deadline.
     pub async fn connect(&self) -> Result<FlamingoVerifierSession, Error> {
-        crate::session::connect(&self.config, self.config.verifier()?).await
+        self.connect_with(self.build_request()?).await
+    }
+
+    /// Opens a WebSocket with a caller-customized upgrade request.
+    ///
+    /// The `request` should be created from [`Self::build_request`] so it targets this client's
+    /// configured endpoint. The assignment is verified before the session is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the handshake fails, the host rejects or closes the connection, the
+    /// assignment does not arrive or verify, or the exchange exceeds the configured deadline.
+    pub async fn connect_with(
+        &self,
+        request: tokio_tungstenite::tungstenite::ClientRequestBuilder,
+    ) -> Result<FlamingoVerifierSession, Error> {
+        crate::session::connect(&self.config, self.config.verifier()?, request).await
     }
 }
 
