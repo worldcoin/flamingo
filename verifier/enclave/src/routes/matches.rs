@@ -199,7 +199,7 @@ mod tests {
     use flamingo_verifier_protocol::match_token;
     use flamingo_verifier_sealed_types::{ComparisonRole, FailureReason, LiveCapture};
     use flamingo_verifier_sealed_types::{
-        DeepFaceInputs, GrayBadgeInputs, LightGuardMatchingFrame, MATCH_CHANNEL_DOMAIN,
+        DeepFaceInputs, GrayBadgeInputs, MATCH_CHANNEL_DOMAIN, capture_profile,
     };
     use pontifex::{ChannelConsumer, ChannelDomain};
     use sha2::{Digest, Sha256};
@@ -217,16 +217,10 @@ mod tests {
             challenge: Vec<u8>,
         ) -> Result<DeepFaceScores, BiometricError> {
             assert_eq!(&credential[..], b"orb");
-            match live {
-                LiveCapture::Vanilla(image) => assert_eq!(&image[..], b"live"),
-                LiveCapture::LightGuard {
-                    illuminated,
-                    unilluminated,
-                    ..
-                } => {
-                    assert_eq!(&illuminated[..], b"lit");
-                    assert_eq!(&unilluminated[..], b"dark");
-                }
+            let frames: Vec<&[u8]> = live.frames.iter().map(|frame| &frame[..]).collect();
+            match live.profile.as_str() {
+                capture_profile::VANILLA => assert_eq!(frames, [b"live"]),
+                _ => assert_eq!(frames, [&b"lit"[..], b"dark"]),
             }
             assert_eq!(&challenge[..], b"challenge");
             Ok(DeepFaceScores {
@@ -251,7 +245,7 @@ mod tests {
         let hash = hex::encode(Sha256::digest(b"orb"));
         MatchInputs::DeepFace(DeepFaceInputs {
             orb_credential: b"orb".to_vec().into(),
-            live: LiveCapture::Vanilla(b"live".to_vec().into()),
+            live: LiveCapture::vanilla(b"live".to_vec().into()),
             rtms_challenge: b"challenge".to_vec().into(),
             hashes_json: format!(r#"{{"thumbnail.png":"{hash}"}}"#)
                 .into_bytes()
@@ -262,7 +256,7 @@ mod tests {
 
     fn gray(threshold: f64) -> MatchInputs {
         MatchInputs::GrayBadge(GrayBadgeInputs {
-            live: LiveCapture::Vanilla(b"live".to_vec().into()),
+            live: LiveCapture::vanilla(b"live".to_vec().into()),
             rtms_challenge: b"challenge".to_vec().into(),
             match_threshold: threshold,
         })
@@ -309,7 +303,7 @@ mod tests {
         assert!(inputs.matches_claims(&claims));
         assert_eq!(
             claims.live_capture_hash,
-            LiveCapture::Vanilla(b"live".to_vec().into()).commitment()
+            LiveCapture::vanilla(b"live".to_vec().into()).commitment()
         );
         assert_eq!(
             claims.challenger_image_hash,
@@ -365,18 +359,15 @@ mod tests {
 
     #[tokio::test]
     async fn light_guard_supports_both_operations_and_frame_selections() {
-        for matching_frame in [
-            LightGuardMatchingFrame::Illuminated,
-            LightGuardMatchingFrame::Unilluminated,
-        ] {
+        for matching_frame in [0, 1] {
             for mut inputs in [inputs(), gray(0.8)] {
                 let live = match &mut inputs {
                     MatchInputs::DeepFace(i) => &mut i.live,
                     MatchInputs::GrayBadge(i) => &mut i.live,
                 };
-                *live = LiveCapture::LightGuard {
-                    illuminated: b"lit".to_vec().into(),
-                    unilluminated: b"dark".to_vec().into(),
+                *live = LiveCapture {
+                    profile: capture_profile::LIGHT_GUARD.to_owned(),
+                    frames: vec![b"lit".to_vec().into(), b"dark".to_vec().into()],
                     matching_frame,
                 };
                 let state = state(Engine { third: 0.9 });

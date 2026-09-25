@@ -228,7 +228,7 @@ impl FlamingoVerifierClient {
     }
 
     /// Submit a typed `GrayBadge` request without credential fields.
-    /// Supports vanilla and `LightGuard` captures and verifies a credential-free statement.
+    /// Verifies a credential-free statement.
     /// # Errors
     /// Returns transport, attestation or contract errors.
     pub async fn gray_badge(
@@ -401,7 +401,7 @@ mod tests {
 
     fn inputs() -> MatchInputs {
         MatchInputs::GrayBadge(flamingo_verifier_sealed_types::GrayBadgeInputs {
-            live: flamingo_verifier_sealed_types::LiveCapture::Vanilla(b"live".to_vec().into()),
+            live: flamingo_verifier_sealed_types::LiveCapture::vanilla(b"live".to_vec().into()),
             rtms_challenge: b"challenge".to_vec().into(),
             match_threshold: 0.5,
         })

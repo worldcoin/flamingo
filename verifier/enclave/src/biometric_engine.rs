@@ -4,6 +4,10 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+#[cfg(any(target_os = "linux", test))]
+use biometric_engines_protocol::face::{LightGuard, LightGuardMatchingFrame, face_image::Source};
+#[cfg(any(target_os = "linux", test))]
+use flamingo_verifier_sealed_types::{ByteBuf, capture_profile};
 use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
 #[cfg(any(target_os = "linux", test))]
 use tokio::{sync::Mutex, time::timeout};
@@ -124,20 +128,46 @@ fn normalized(score: f64) -> f64 {
     f64::from(f32::midpoint(1.0, score as f32))
 }
 
+/// Maps a capture profile onto the engine's image source; unknown profiles never reach the engine.
+#[cfg(any(target_os = "linux", test))]
+fn live_source(capture: LiveCapture) -> Result<Source, BiometricError> {
+    let LiveCapture {
+        profile,
+        frames,
+        matching_frame,
+    } = capture;
+    let unsupported = || BiometricError::Rejected(FailureReason::UnsupportedCapture);
+    let mut frames = frames.into_iter().map(ByteBuf::into_vec);
+
+    match (profile.as_str(), frames.len(), matching_frame) {
+        (capture_profile::VANILLA, 1, 0) => Ok(Source::VanillaSelfie(
+            frames.next().ok_or_else(unsupported)?,
+        )),
+        (capture_profile::LIGHT_GUARD, 2, 0 | 1) => Ok(Source::LightGuard(LightGuard {
+            illuminated: frames.next().ok_or_else(unsupported)?,
+            unilluminated: frames.next().ok_or_else(unsupported)?,
+            matching_frame: if matching_frame == 0 {
+                LightGuardMatchingFrame::Illuminated
+            } else {
+                LightGuardMatchingFrame::Unilluminated
+            } as i32,
+        })),
+        _ => Err(unsupported()),
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use sandboxed::SandboxBiometricEngine;
 
 #[cfg(target_os = "linux")]
 mod sandboxed {
     use super::{
-        BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores, normalized,
+        BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores, live_source,
+        normalized,
     };
     use async_trait::async_trait;
     use biometric_engines_protocol::{
-        face::{
-            DeepFaceRequest, FaceImage, GrayBadgeRequest, LightGuard, LightGuardMatchingFrame,
-            face_image::Source,
-        },
+        face::{DeepFaceRequest, FaceImage, GrayBadgeRequest, face_image::Source},
         request::Operation,
         response::Outcome,
     };
@@ -177,28 +207,6 @@ mod sandboxed {
         }
     }
 
-    fn live_source(capture: LiveCapture) -> Source {
-        match capture {
-            LiveCapture::Vanilla(image) => Source::VanillaSelfie(image.into_vec()),
-            LiveCapture::LightGuard {
-                illuminated,
-                unilluminated,
-                matching_frame,
-            } => Source::LightGuard(LightGuard {
-                illuminated: illuminated.into_vec(),
-                unilluminated: unilluminated.into_vec(),
-                matching_frame: match matching_frame {
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated => {
-                        LightGuardMatchingFrame::Illuminated as i32
-                    }
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated => {
-                        LightGuardMatchingFrame::Unilluminated as i32
-                    }
-                },
-            }),
-        }
-    }
-
     const fn image(source: Source) -> FaceImage {
         FaceImage {
             source: Some(source),
@@ -216,7 +224,7 @@ mod sandboxed {
             let Outcome::DeepFace(scores) = self
                 .run(Operation::DeepFace(DeepFaceRequest {
                     credential: Some(image(Source::Orb(credential))),
-                    live: Some(image(live_source(live))),
+                    live: Some(image(live_source(live)?)),
                     challenge: Some(image(Source::Rtms(challenge))),
                 }))
                 .await?
@@ -249,7 +257,7 @@ mod sandboxed {
         ) -> Result<GrayBadgeScores, BiometricError> {
             let Outcome::GrayBadge(scores) = self
                 .run(Operation::GrayBadge(GrayBadgeRequest {
-                    live: Some(image(live_source(live))),
+                    live: Some(image(live_source(live)?)),
                     challenge: Some(image(Source::Rtms(challenge))),
                 }))
                 .await?
@@ -268,39 +276,6 @@ mod sandboxed {
         fn check_health(&self) {
             if let Ok(worker) = self.executor.worker.try_lock() {
                 worker.check_alive();
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod capture_tests {
-        use super::*;
-
-        #[test]
-        fn light_guard_preserves_both_frames_and_the_selected_matching_frame() {
-            for (matching_frame, expected) in [
-                (
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated,
-                    LightGuardMatchingFrame::Illuminated,
-                ),
-                (
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated,
-                    LightGuardMatchingFrame::Unilluminated,
-                ),
-            ] {
-                let illuminated = vec![1, 2, 3];
-                let pointer = illuminated.as_ptr();
-                let Source::LightGuard(pair) = live_source(LiveCapture::LightGuard {
-                    illuminated: illuminated.into(),
-                    unilluminated: vec![4, 5].into(),
-                    matching_frame,
-                }) else {
-                    panic!("must preserve LightGuard source")
-                };
-                assert_eq!(pair.illuminated, vec![1, 2, 3]);
-                assert_eq!(pair.illuminated.as_ptr(), pointer);
-                assert_eq!(pair.unilluminated, vec![4, 5]);
-                assert_eq!(pair.matching_frame, expected as i32);
             }
         }
     }
@@ -458,5 +433,62 @@ mod tests {
             .status()
             .unwrap();
         assert_eq!(status.code(), Some(1));
+    }
+
+    fn capture(profile: &str, frames: Vec<Vec<u8>>, matching_frame: u32) -> LiveCapture {
+        LiveCapture {
+            profile: profile.to_owned(),
+            frames: frames.into_iter().map(Into::into).collect(),
+            matching_frame,
+        }
+    }
+
+    #[test]
+    fn light_guard_preserves_both_frames_and_the_selected_matching_frame() {
+        for (matching_frame, expected) in [
+            (0, LightGuardMatchingFrame::Illuminated),
+            (1, LightGuardMatchingFrame::Unilluminated),
+        ] {
+            let illuminated = vec![1, 2, 3];
+            let pointer = illuminated.as_ptr();
+            let Ok(Source::LightGuard(pair)) = live_source(capture(
+                capture_profile::LIGHT_GUARD,
+                vec![illuminated, vec![4, 5]],
+                matching_frame,
+            )) else {
+                panic!("must preserve LightGuard source")
+            };
+            assert_eq!(pair.illuminated, vec![1, 2, 3]);
+            assert_eq!(pair.illuminated.as_ptr(), pointer);
+            assert_eq!(pair.unilluminated, vec![4, 5]);
+            assert_eq!(pair.matching_frame, expected as i32);
+        }
+    }
+
+    #[test]
+    fn vanilla_maps_to_a_single_selfie() {
+        assert_eq!(
+            live_source(LiveCapture::vanilla(vec![7].into())),
+            Ok(Source::VanillaSelfie(vec![7]))
+        );
+    }
+
+    #[test]
+    fn unknown_profiles_and_frame_shapes_are_rejected_before_the_engine() {
+        for live in [
+            capture("future_pad", vec![vec![1]], 0),
+            capture(capture_profile::VANILLA, vec![vec![1], vec![2]], 0),
+            capture(capture_profile::LIGHT_GUARD, vec![vec![1]], 0),
+            capture(
+                capture_profile::LIGHT_GUARD,
+                vec![vec![1], vec![2], vec![3]],
+                2,
+            ),
+        ] {
+            assert_eq!(
+                live_source(live),
+                Err(BiometricError::Rejected(FailureReason::UnsupportedCapture))
+            );
+        }
     }
 }

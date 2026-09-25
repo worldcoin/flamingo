@@ -47,81 +47,93 @@ pub struct GrayBadgeInputs {
     pub match_threshold: f64,
 }
 
-/// Which `LightGuard` frame supplies the matching embedding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LightGuardMatchingFrame {
-    /// Illuminated frame.
-    Illuminated,
-    /// Unilluminated frame.
-    Unilluminated,
-}
-
 /// Whether a normalized cosine value is finite and within [0, 1].
 #[must_use]
 pub fn valid_similarity(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
+/// Capture profiles the bundled engine understands. The verifier itself does not interpret them.
+pub mod capture_profile {
+    /// One selfie frame.
+    pub const VANILLA: &str = "vanilla";
+    /// `LightGuard` challenge-response: frames are `[illuminated, unilluminated]`.
+    pub const LIGHT_GUARD: &str = "light_guard";
+}
+
+/// Maximum frames in one live capture.
+pub const MAX_LIVE_FRAMES: usize = 8;
+/// Maximum UTF-8 bytes in a capture profile name.
+pub const MAX_CAPTURE_PROFILE_BYTES: usize = 32;
+
+/// A live capture: ordered frames whose meaning the sandboxed engine derives from `profile`.
+///
 /// Capture bytes are deliberately not Debug or Clone.
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum LiveCapture {
-    /// Single vanilla image.
-    Vanilla(ByteBuf),
-    /// Explicit challenge-response pair.
-    LightGuard {
-        /// Illuminated frame.
-        illuminated: ByteBuf,
-        /// Unilluminated frame.
-        unilluminated: ByteBuf,
-        /// Frame selected for matching.
-        matching_frame: LightGuardMatchingFrame,
-    },
+#[serde(deny_unknown_fields)]
+pub struct LiveCapture {
+    /// Names how the engine reads `frames`, e.g. [`capture_profile::LIGHT_GUARD`].
+    pub profile: String,
+    /// Encoded frames, in the order the profile defines.
+    pub frames: Vec<ByteBuf>,
+    /// Index into `frames` of the frame that supplies the matching embedding.
+    pub matching_frame: u32,
 }
 
 impl LiveCapture {
-    /// Commits to the capture kind, both `LightGuard` frames and the matching-frame selection.
-    /// Frame hashes have fixed width, so their boundaries cannot be reinterpreted.
+    /// A single-frame vanilla capture.
+    #[must_use]
+    pub fn vanilla(image: ByteBuf) -> Self {
+        Self {
+            profile: capture_profile::VANILLA.to_owned(),
+            frames: vec![image],
+            matching_frame: 0,
+        }
+    }
+
+    /// Commits to the profile, every frame in order and the matching-frame index.
+    /// The profile is length-prefixed and frame hashes have fixed width, so no boundary can shift.
     #[must_use]
     pub fn commitment(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
-        hash.update(b"flamingo/live-capture/v1");
-
-        match self {
-            Self::Vanilla(image) => {
-                hash.update([0]);
-                hash.update(Sha256::digest(image));
-            }
-            Self::LightGuard {
-                illuminated,
-                unilluminated,
-                matching_frame,
-            } => {
-                hash.update([1]);
-                hash.update(Sha256::digest(illuminated));
-                hash.update(Sha256::digest(unilluminated));
-                hash.update([match matching_frame {
-                    LightGuardMatchingFrame::Illuminated => 1,
-                    LightGuardMatchingFrame::Unilluminated => 2,
-                }]);
-            }
+        hash.update(b"flamingo/live-capture/v2");
+        hash.update(len_prefix(self.profile.len()));
+        hash.update(self.profile.as_bytes());
+        hash.update(len_prefix(self.frames.len()));
+        for frame in &self.frames {
+            hash.update(Sha256::digest(frame));
         }
+        hash.update(self.matching_frame.to_be_bytes());
 
         hash.finalize().into()
     }
 
-    fn images(&self) -> impl Iterator<Item = &ByteBuf> {
-        let (first, second) = match self {
-            Self::Vanilla(image) => (image, None),
-            Self::LightGuard {
-                illuminated,
-                unilluminated,
-                ..
-            } => (illuminated, Some(unilluminated)),
-        };
-        std::iter::once(first).chain(second)
+    /// Profile-independent shape checks; the engine adapter checks the profile itself.
+    fn validate(&self) -> Result<(), FailureReason> {
+        let matching_frame = usize::try_from(self.matching_frame).unwrap_or(usize::MAX);
+        if self.profile.is_empty()
+            || self.profile.len() > MAX_CAPTURE_PROFILE_BYTES
+            || self.frames.is_empty()
+            || self.frames.len() > MAX_LIVE_FRAMES
+            || matching_frame >= self.frames.len()
+        {
+            return Err(FailureReason::MalformedInputs);
+        }
+
+        Ok(())
     }
+
+    fn images(&self) -> impl Iterator<Item = &ByteBuf> {
+        self.frames.iter()
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "callers pass lengths bounded by validation"
+)]
+const fn len_prefix(len: usize) -> [u8; 4] {
+    (len as u32).to_be_bytes()
 }
 
 impl MatchInputs {
@@ -185,6 +197,8 @@ impl MatchInputs {
         if !valid_similarity(threshold) {
             return Err(FailureReason::InvalidThreshold);
         }
+
+        live.validate()?;
 
         if hashes.is_some_and(|b| b.is_empty() || b.len() > MAX_HASHES_JSON_BYTES) {
             return Err(FailureReason::InvalidHashesJson);
@@ -360,13 +374,13 @@ mod tests {
     fn claims_bind_operation_input_hashes_and_enforce_the_threshold() {
         let inputs = MatchInputs::DeepFace(DeepFaceInputs {
             orb_credential: b"orb".to_vec().into(),
-            live: LiveCapture::Vanilla(b"live".to_vec().into()),
+            live: LiveCapture::vanilla(b"live".to_vec().into()),
             rtms_challenge: b"challenge".to_vec().into(),
             hashes_json: b"hashes".to_vec().into(),
             match_threshold: 0.5,
         });
         let claims = MatchClaims {
-            live_capture_hash: LiveCapture::Vanilla(b"live".to_vec().into()).commitment(),
+            live_capture_hash: LiveCapture::vanilla(b"live".to_vec().into()).commitment(),
             operation: MatchOperation::DeepFace {
                 credential_claim: Sha256::digest(b"hashes").into(),
             },
@@ -403,23 +417,24 @@ mod tests {
         let MatchInputs::DeepFace(mut inputs) = inputs else {
             unreachable!()
         };
-        inputs.live = LiveCapture::LightGuard {
-            illuminated: b"live".to_vec().into(),
-            unilluminated: b"other".to_vec().into(),
-            matching_frame: LightGuardMatchingFrame::Illuminated,
-        };
+        inputs.live = capture(capture_profile::LIGHT_GUARD, &[b"live", b"other"], 0);
         assert!(!MatchInputs::DeepFace(inputs).matches_claims(&claims));
     }
 
+    fn capture(profile: &str, frames: &[&[u8]], matching_frame: u32) -> LiveCapture {
+        LiveCapture {
+            profile: profile.to_owned(),
+            frames: frames.iter().map(|frame| frame.to_vec().into()).collect(),
+            matching_frame,
+        }
+    }
+
     #[test]
-    fn light_guard_commitment_binds_every_frame_selection_and_capture_kind() {
-        let capture =
-            |illuminated: &[u8], unilluminated: &[u8], matching_frame| LiveCapture::LightGuard {
-                illuminated: illuminated.to_vec().into(),
-                unilluminated: unilluminated.to_vec().into(),
-                matching_frame,
-            };
-        let live = capture(b"lit", b"dark", LightGuardMatchingFrame::Illuminated);
+    fn commitment_binds_profile_every_frame_order_and_selection() {
+        let light_guard = |frames: &[&[u8]], matching_frame| {
+            capture(capture_profile::LIGHT_GUARD, frames, matching_frame)
+        };
+        let live = light_guard(&[b"lit", b"dark"], 0);
         let claims = MatchClaims {
             live_capture_hash: live.commitment(),
             operation: MatchOperation::GrayBadge,
@@ -436,11 +451,15 @@ mod tests {
         assert!(inputs(live).matches_claims(&claims));
 
         for changed in [
-            capture(b"changed", b"dark", LightGuardMatchingFrame::Illuminated),
-            capture(b"lit", b"changed", LightGuardMatchingFrame::Illuminated),
-            capture(b"lit", b"dark", LightGuardMatchingFrame::Unilluminated),
-            capture(b"dark", b"lit", LightGuardMatchingFrame::Illuminated),
-            LiveCapture::Vanilla(b"lit".to_vec().into()),
+            light_guard(&[b"changed", b"dark"], 0),
+            light_guard(&[b"lit", b"changed"], 0),
+            light_guard(&[b"lit", b"dark"], 1),
+            light_guard(&[b"dark", b"lit"], 0),
+            light_guard(&[b"lit", b"dark", b"extra"], 0),
+            capture("other", &[b"lit", b"dark"], 0),
+            // Moving bytes between the profile and a frame must not collide.
+            capture("light_guar", &[b"lit", b"dark"], 0),
+            LiveCapture::vanilla(b"lit".to_vec().into()),
         ] {
             assert!(!inputs(changed).matches_claims(&claims));
         }
@@ -448,7 +467,7 @@ mod tests {
 
     fn request() -> MatchInputs {
         MatchInputs::GrayBadge(GrayBadgeInputs {
-            live: LiveCapture::Vanilla(vec![1, 2, 3].into()),
+            live: LiveCapture::vanilla(vec![1, 2, 3].into()),
             rtms_challenge: vec![4, 5].into(),
             match_threshold: 0.5,
         })
@@ -520,14 +539,39 @@ mod tests {
     }
 
     #[test]
+    fn malformed_capture_shapes_are_rejected() {
+        let long_profile = "p".repeat(MAX_CAPTURE_PROFILE_BYTES + 1);
+        let too_many: Vec<&[u8]> = vec![b"frame"; MAX_LIVE_FRAMES + 1];
+        for live in [
+            capture("", &[b"frame"], 0),
+            capture(&long_profile, &[b"frame"], 0),
+            capture(capture_profile::VANILLA, &[], 0),
+            capture(capture_profile::VANILLA, &too_many, 0),
+            capture(capture_profile::LIGHT_GUARD, &[b"lit", b"dark"], 2),
+            capture(capture_profile::LIGHT_GUARD, &[b"lit", b"dark"], u32::MAX),
+        ] {
+            let inputs = MatchInputs::GrayBadge(GrayBadgeInputs {
+                live,
+                rtms_challenge: b"challenge".to_vec().into(),
+                match_threshold: 0.5,
+            });
+            assert_eq!(inputs.validate(), Err(FailureReason::MalformedInputs));
+        }
+        // The profile is opaque here; only the engine adapter knows which profiles exist.
+        let unknown = MatchInputs::GrayBadge(GrayBadgeInputs {
+            live: capture("future_pad", &[b"a", b"b", b"c"], 2),
+            rtms_challenge: b"challenge".to_vec().into(),
+            match_threshold: 0.5,
+        });
+        assert_eq!(unknown.validate(), Ok(()));
+    }
+
+    #[test]
     fn ownership_conversion_keeps_the_image_allocation() {
         let image = vec![1u8; 1024];
         let pointer = image.as_ptr();
-        let capture = LiveCapture::Vanilla(image.into());
-        let LiveCapture::Vanilla(image) = capture else {
-            unreachable!()
-        };
-        let image = image.into_vec();
+        let capture = LiveCapture::vanilla(image.into());
+        let image = capture.frames.into_iter().next().unwrap().into_vec();
         assert_eq!(image.as_ptr(), pointer);
     }
 }

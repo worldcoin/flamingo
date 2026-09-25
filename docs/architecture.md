@@ -16,7 +16,7 @@ DeepFace compares each pair of images: Orb photo and selfie, Orb photo and chall
 
 The enclave checks that the Orb photo matches the `thumbnail.png` hash in the supplied `hashes.json`. It does not verify the Orb's signature or prove that the credential came from an Orb. The downstream proof must bind this commitment to an issuer-signed credential.
 
-Version-2 BabyJubJub EdDSA statements bind the operation, live capture and challenge image. DeepFace additionally commits to raw `hashes.json` and reports the Orb/live score; GrayBadge has no credential commitment and reports the live/challenge score. Both operations accept vanilla or LightGuard captures. LightGuard commitments cover both frames and the matching-frame selection. The threshold and DeepFace’s other two scores remain enclave policy checks. See the [token format](../verifier/protocol/src/match_token.rs).
+Version-2 BabyJubJub EdDSA statements bind the operation, live capture and challenge image. DeepFace additionally commits to raw `hashes.json` and reports the Orb/live score; GrayBadge has no credential commitment and reports the live/challenge score. Live captures are PAD-agnostic: ordered frames plus a matching-frame index and an engine-defined profile, all covered by the live-capture commitment. The threshold and DeepFace’s other two scores remain enclave policy checks. See the [token format](../verifier/protocol/src/match_token.rs).
 
 ## Repository layout
 
