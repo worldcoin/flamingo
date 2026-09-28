@@ -8,17 +8,13 @@ use tokio::net::TcpListener;
 
 use crate::{AppState, routes};
 
-const DEFAULT_PORT: u16 = 8000;
-
 /// Starts the API server.
 ///
 /// # Errors
 ///
-/// Returns an error when the configured port is invalid, the listener cannot bind, or the server
-/// exits unexpectedly.
+/// Returns an error when the listener cannot bind or the server exits unexpectedly.
 pub async fn start(state: AppState) -> anyhow::Result<()> {
-    let port = std::env::var("PORT").map_or(Ok(DEFAULT_PORT), |value| value.parse())?;
-    let address = SocketAddr::from(([0, 0, 0, 0], port));
+    let address = SocketAddr::from(([0, 0, 0, 0], state.config().port.get()));
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind API to {address}"))?;

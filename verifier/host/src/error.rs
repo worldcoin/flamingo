@@ -155,12 +155,115 @@ impl ApiError {
         )
         .with_detail(format!("{operation:?}"))
     }
-}
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        // Expected busy responses do not need a log per call.
-        if self.status.is_server_error() && self.code != "enclave_not_ready" {
+    /// The client's text frame was not a message this API understands.
+    #[must_use]
+    pub const fn invalid_message() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_message",
+            "The message was not a valid request",
+            false,
+        )
+    }
+
+    /// The client sent a frame that is not valid at this point in the session.
+    #[must_use]
+    pub const fn unexpected_frame() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "protocol_error",
+            "The frame was out of order for this session",
+            false,
+        )
+    }
+
+    /// The client's sealed match request was empty.
+    #[must_use]
+    pub const fn empty_request() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The sealed request was empty",
+            false,
+        )
+    }
+
+    /// The client's sealed match request exceeded the byte limit.
+    #[must_use]
+    pub const fn request_too_large() -> Self {
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request_too_large",
+            "The sealed request exceeded the body limit",
+            false,
+        )
+    }
+
+    /// The WebSocket session idled past its deadline before the match frame arrived.
+    #[must_use]
+    pub const fn idle_timeout() -> Self {
+        Self::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "idle_timeout",
+            "The WebSocket session was idle for too long",
+            true,
+        )
+    }
+
+    /// The host is already serving the maximum number of WebSocket sessions.
+    #[must_use]
+    pub const fn at_capacity() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "at_capacity",
+            "The host is at its WebSocket connection limit",
+            true,
+        )
+    }
+
+    /// A host-side invariant failed while serving a session.
+    #[must_use]
+    pub fn internal_error(detail: &'static str) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Internal server error",
+            false,
+        )
+        .with_detail(detail)
+    }
+
+    /// The peer closed or the transport failed while the host was sending.
+    #[must_use]
+    pub const fn client_disconnected() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "client_disconnected",
+            "The client disconnected",
+            false,
+        )
+    }
+
+    /// Builds the JSON envelope shared by HTTP responses and WebSocket text frames.
+    #[must_use]
+    pub fn envelope(&self) -> ErrorEnvelope {
+        ErrorEnvelope {
+            allow_retry: self.allow_retry,
+            error: ErrorBody {
+                code: self.code.to_owned(),
+                message: self.message.to_owned(),
+            },
+        }
+    }
+
+    /// Logs failures at a level appropriate to their cause.
+    pub fn log(&self) {
+        // Enclave readiness is expected during startup; capacity rejections warrant a warning.
+        if self.status.is_server_error()
+            && self.code != "enclave_not_ready"
+            && self.code != "at_capacity"
+        {
             tracing::error!(
                 code = self.code,
                 status = %self.status,
@@ -168,7 +271,7 @@ impl IntoResponse for ApiError {
                 dependency = "enclave",
                 "request failed"
             );
-        } else if !self.status.is_server_error() {
+        } else if !self.status.is_server_error() || self.code == "at_capacity" {
             tracing::warn!(
                 code = self.code,
                 status = %self.status,
@@ -176,17 +279,13 @@ impl IntoResponse for ApiError {
                 "request rejected"
             );
         }
+    }
+}
 
-        // The envelope owns its strings, so the `&'static str`s are copied here.
-        let body = ErrorEnvelope {
-            allow_retry: self.allow_retry,
-            error: ErrorBody {
-                code: self.code.to_owned(),
-                message: self.message.to_owned(),
-            },
-        };
-
-        (self.status, Json(body)).into_response()
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        self.log();
+        (self.status, Json(self.envelope())).into_response()
     }
 }
 
