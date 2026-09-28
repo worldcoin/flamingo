@@ -33,8 +33,11 @@ pub struct Config {
     host_url: Url,
     /// Measurements to trust. A document is accepted if it matches any one configuration in
     /// full, which lets several enclave versions be trusted at once during a rollout.
-    #[serde(with = "pcr_configs")]
+    #[serde(default, with = "pcr_configs")]
     allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
+    /// Explicit development-only bypass of all PCR measurement checks.
+    #[serde(default)]
+    dangerously_skip_measurements: bool,
     /// How old an attestation document's own timestamp may be.
     #[serde(default = "default_max_attestation_age_millis")]
     max_attestation_age_millis: u64,
@@ -57,6 +60,30 @@ impl Config {
         host_url: &str,
         allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
     ) -> Result<Self, Error> {
+        Self::new_inner(host_url, allowed_pcr_configs, false)
+    }
+
+    /// Creates a configuration that bypasses all PCR measurement checks.
+    ///
+    /// No measurements are required. Certificate chain, signature, freshness, and
+    /// channel public-key commitment verification remain enabled.
+    ///
+    /// # Warning
+    /// Accepts any enclave code with otherwise valid attestation, including Nitro
+    /// debug enclaves. Use only for development, never in production.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `host_url` is not a valid URL.
+    pub fn dangerously_skip_measurements(host_url: &str) -> Result<Self, Error> {
+        Self::new_inner(host_url, vec![], true)
+    }
+
+    fn new_inner(
+        host_url: &str,
+        allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
+        dangerously_skip_measurements: bool,
+    ) -> Result<Self, Error> {
         let host_url = Url::parse(host_url).map_err(|error| Error::InvalidConfig {
             attribute: "host_url".to_string(),
             reason: error.to_string(),
@@ -65,6 +92,7 @@ impl Config {
         let config = Self {
             host_url,
             allowed_pcr_configs,
+            dangerously_skip_measurements,
             max_attestation_age_millis: default_max_attestation_age_millis(),
             connect_timeout_millis: default_connect_timeout_millis(),
             request_timeout_millis: default_request_timeout_millis(),
@@ -103,8 +131,13 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Rejects an empty policy, a missing or zero PCR0, duplicate indices, or malformed measurements.
+    /// Without the explicit measurement bypass, rejects an empty policy, missing
+    /// or zero PCR0, duplicate indices, or malformed measurements.
     pub fn verifier(&self) -> Result<Verifier, Error> {
+        let max_age = Duration::from_millis(self.max_attestation_age_millis);
+        if self.dangerously_skip_measurements {
+            return Ok(Verifier::new(vec![], max_age).dangerously_skip_measurements());
+        }
         let invalid = || Error::InvalidConfig {
             attribute: "allowed_pcr_configs".to_owned(),
             reason: "each configuration must pin a nonzero 48-byte PCR0; \
@@ -137,10 +170,7 @@ impl Config {
             }
             configs.push(config);
         }
-        Ok(Verifier::new(
-            configs,
-            Duration::from_millis(self.max_attestation_age_millis),
-        ))
+        Ok(Verifier::new(configs, max_age))
     }
 
     /// The host to call.
@@ -282,6 +312,71 @@ mod tests {
     }
 
     #[test]
+    fn measurement_skip_is_explicit_and_survives_json_round_trip() {
+        assert!(Config::dangerously_skip_measurements("not a URL").is_err());
+        let config = Config::dangerously_skip_measurements("http://localhost:8000").unwrap();
+        assert!(config.verifier().is_ok());
+        let mut json = serde_json::to_value(config).unwrap();
+        assert_eq!(json["dangerously_skip_measurements"], true);
+        assert_eq!(json["allowed_pcr_configs"], serde_json::json!([]));
+        assert!(
+            Config::from_json(&json.to_string())
+                .unwrap()
+                .verifier()
+                .is_ok()
+        );
+        json.as_object_mut().unwrap().remove("allowed_pcr_configs");
+        assert!(
+            Config::from_json(&json.to_string())
+                .unwrap()
+                .verifier()
+                .is_ok()
+        );
+        json.as_object_mut()
+            .unwrap()
+            .remove("dangerously_skip_measurements");
+        assert!(Config::from_json(&json.to_string()).is_err());
+        json["dangerously_skip_measurements"] = serde_json::json!(false);
+        assert!(Config::from_json(&json.to_string()).is_err());
+        json.as_object_mut()
+            .unwrap()
+            .remove("dangerously_skip_measurements");
+        json["allow_debug_measurements"] = serde_json::json!(true);
+        assert!(Config::from_json(&json.to_string()).is_err());
+    }
+
+    #[test]
+    fn measurement_skip_ignores_supplied_pins() {
+        for pins in [
+            vec![],
+            vec![PcrMeasurement::new(1, [0; 48])],
+            vec![PcrMeasurement::new(0, [0; 48])],
+            vec![PcrMeasurement::new(0, [0; 47])],
+            vec![
+                PcrMeasurement::new(0, [1; 48]),
+                PcrMeasurement::new(1, [0; 49]),
+            ],
+            vec![
+                PcrMeasurement::new(0, [1; 48]),
+                PcrMeasurement::new(0, [1; 48]),
+            ],
+        ] {
+            let mut config =
+                Config::dangerously_skip_measurements("http://localhost:8000").unwrap();
+            config.allowed_pcr_configs = vec![pins];
+            let mut json = serde_json::to_value(config).unwrap();
+            assert!(
+                Config::from_json(&json.to_string())
+                    .unwrap()
+                    .verifier()
+                    .is_ok()
+            );
+            json["dangerously_skip_measurements"] = serde_json::json!(false);
+            assert!(Config::from_json(&json.to_string()).is_err());
+        }
+    }
+
+    #[test]
     fn accepts_pcr_values_with_and_without_the_0x_prefix() {
         // Release metadata records PCRs 0x-prefixed; both spellings should be accepted.
         let json = r#"{
@@ -323,6 +418,7 @@ mod tests {
         )
         .expect("Pontifex measurements should be accepted");
         let json = serde_json::to_value(&config).expect("config should serialize");
+        assert_eq!(json["dangerously_skip_measurements"], false);
         assert_eq!(
             json["allowed_pcr_configs"],
             serde_json::json!([
