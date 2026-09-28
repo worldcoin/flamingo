@@ -39,14 +39,19 @@ jobs:
         timeout-minutes: 10
         run: cargo fetch --locked
 
-      # Publish the prepared version before scanning history for the next release PR.
-      # Older commits can contain private dependencies that this job cannot fetch.
+      # Publish the prepared version before preparing the next release PR.
       - name: Publish crates
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Limit release analysis to the public workspace
+        # release-plz 0.3.160 packages historical commits before checking release
+        # boundaries. Earlier snapshots need private biometric-engine dependencies.
+        # Make the public-workspace migration the root of this temporary checkout.
+        run: git rev-parse ec2b0b7186c958638687ef6b87c32066ffd9f382 > "$(git rev-parse --git-path shallow)"
 
       - name: Update release PR
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
