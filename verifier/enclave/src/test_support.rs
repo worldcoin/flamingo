@@ -4,11 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use flamingo_verifier_enclave_types as enclave_types;
-use flamingo_verifier_sealed_types::FailureReason;
 
 use crate::{
     attestation::Attestor,
-    face_engine::{DeepFaceScores, FaceComparator, GrayBadgeScores},
+    biometric_engine::{BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores},
     state::EnclaveState,
 };
 
@@ -91,22 +90,32 @@ impl Attestor for FailsAfterSuccessesAttestor {
 }
 
 /// Panics if a test reaches it, for paths that must reject before comparing faces.
-pub struct UnusedFaceEngine;
+pub struct UnusedBiometricEngine;
 
-impl FaceComparator for UnusedFaceEngine {
-    fn deep_face(&self, _: &[u8], _: &[u8], _: &[u8]) -> Result<DeepFaceScores, FailureReason> {
-        panic!("Face Engine was called unexpectedly")
+#[async_trait::async_trait]
+impl BiometricEngine for UnusedBiometricEngine {
+    async fn deepface(
+        &self,
+        _: Vec<u8>,
+        _: flamingo_verifier_sealed_types::LiveCapture,
+        _: Vec<u8>,
+    ) -> Result<DeepFaceScores, BiometricError> {
+        panic!("biometric engine was called unexpectedly")
     }
 
-    fn gray_badge(&self, _: &[u8], _: &[u8]) -> Result<GrayBadgeScores, FailureReason> {
-        panic!("Face Engine was called unexpectedly")
+    async fn graybadge(
+        &self,
+        _: flamingo_verifier_sealed_types::LiveCapture,
+        _: Vec<u8>,
+    ) -> Result<GrayBadgeScores, BiometricError> {
+        panic!("biometric engine was called unexpectedly")
     }
 }
 
-/// Builds state whose Face Engine must not be called.
+/// Builds state whose biometric engine must not be called.
 pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
     Arc::new(
-        EnclaveState::generate(attestor, Arc::new(UnusedFaceEngine))
+        EnclaveState::generate(attestor, Box::new(UnusedBiometricEngine))
             .expect("boot state should generate"),
     )
 }

@@ -31,6 +31,7 @@ lib.genAttrs
         packages = with pkgs; [
           (rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml"))
           clang
+          protobuf
           pkg-config
           jq
         ];

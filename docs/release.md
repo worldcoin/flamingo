@@ -17,13 +17,13 @@ The [release workflow](../.github/workflows/release-enclaves.yml) runs on `verif
 
 The workflow pushes the OCI image before creating the draft release. Approval before that push depends on the GitHub `release` environment's protection rules.
 
-The EIF contains private face-engine code. Confirm its distribution with the `biometric-engines` owners before publishing it publicly.
+Public EIFs and OCI images exclude the biometric engine and models; the worker is provisioned separately at runtime.
 
 To build without publishing:
 
 ```bash
 gh workflow run release-enclaves.yml \
-  -f workload=verifier -f ref=main -f version=0.4.0 -f dry_run=true
+  -f workload=verifier --ref main -f version=0.4.0 -f dry_run=true
 ```
 
 ## Measurements

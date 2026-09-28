@@ -48,10 +48,10 @@ Keep assignment and match requests on the same client instance. The Rust client 
 
 | Operation | Inputs | Current support |
 | --- | --- | --- |
-| `deep_face` | Orb photo, live capture, challenge image, raw `hashes.json`, and threshold. | Single-image (`vanilla`) capture. |
-| `gray_badge` | Live capture, challenge image, and threshold. | Returns encrypted `unsupported_operation` for vanilla capture. |
+| `deep_face` | Orb photo, live capture, challenge image, raw `hashes.json`, and threshold. | Three comparisons with vanilla or LightGuard capture, PCP binding and signing. |
+| `gray_badge` | Live capture, challenge image, and threshold. | Verifies live/challenge similarity and signs a credential-free GrayBadge statement. |
 
-Both operations define a `light_guard` capture with illuminated and unilluminated frames. The enclave currently rejects that capture with encrypted `unsupported_capture`.
+Both operations support `vanilla` and `light_guard` captures. LightGuard sends both illuminated and unilluminated frames and an explicit matching-frame selection to the sandboxed engine. Version-2 signed statements bind the operation, the complete live capture (including both LightGuard frames and the selection), the challenge and the operation-specific score; DeepFace also binds the PCP commitment. Clients reject statements that do not match their request.
 
 A `200` response contains a padded, encrypted success or rejection. A success includes the [signed match statement](architecture.md#match-statements) and signing-key attestation. The client verifies both and checks that the claims match the inputs. A rejection contains a failure reason and no signed statement.
 

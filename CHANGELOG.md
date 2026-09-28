@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.4.0...flamingo-verifier-client-v0.5.0) - 2026-09-21
+## [0.5.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.4.0...flamingo-verifier-client-v0.5.0) - 2026-09-28
+
+### Added
+
+- *(client)* add an explicit dangerous measurement bypass using Pontifex 2.1.0 ([#130](https://github.com/worldcoin/flamingo/pull/130))
+- *(sandbox)* [**breaking**] integrate external biometric operations with updated match claims and rejection types ([#112](https://github.com/worldcoin/flamingo/pull/112))
 
 ### Other
 

@@ -10,10 +10,6 @@ on:
         required: true
         type: choice
         options: [verifier]
-      ref:
-        description: "Branch, tag, or commit SHA to build."
-        required: true
-        type: string
       version:
         description: "Release version, without the v prefix."
         required: true
@@ -47,7 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - id: release
         env:
           INPUT_WORKLOAD: ${{ inputs.workload }}
@@ -87,24 +84,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.prepare.outputs.sha }}
-      - id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.BIOMETRIC_ENGINES_APP_ID }}
-          private-key: ${{ secrets.BIOMETRIC_ENGINES_APP_PRIVATE_KEY }}
-          owner: worldcoin
-          repositories: biometric-engines
-      - env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          git config --global credential."https://github.com".helper \
-            '!f() { echo username=x-access-token; echo "password=${GH_APP_TOKEN}"; }; f'
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - env:
-          GH_APP_TOKEN: ${{ steps.token.outputs.token }}
-          HUGGING_FACE_TOKEN: ${{ secrets.HUGGING_FACE_TOKEN }}
-        run: scripts/build-enclaves.sh --workload "$WORKLOAD" target/release
+      - name: Build enclave
+        run: |
+          scripts/build-enclaves.sh --workload "$WORKLOAD" target/enclave-build
+          mkdir -p target/release
+          # Public staging excludes the private carrier and its provisioning tools.
+          install -m 0644 "target/enclave-build/$WORKLOAD-enclave.eif" "target/release/"
+          install -m 0644 "target/enclave-build/$WORKLOAD-pcr.json" "target/release/"
       - name: Package OCI layout
         run: |
           oci_store=$(nix build --no-link --no-update-lock-file --print-out-paths ".#${WORKLOAD}-oci")
@@ -115,19 +104,14 @@ jobs:
         env:
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
-          face_models='{}'
-          if [[ "$WORKLOAD" == verifier ]]; then
-            face_models=$(nix eval --json --no-update-lock-file .#faceModels | jq 'map_values({url, hash})')
-          fi
           jq -n \
             --arg workload "$WORKLOAD" --arg version "$VERSION" --arg gitSha "$RELEASE_SHA" \
             --arg eifSha256 "$(sha256sum "target/release/$WORKLOAD-enclave.eif" | cut -d' ' -f1)" \
             --arg ociArchiveSha256 "$(sha256sum "target/release/$WORKLOAD-oci.tar.gz" | cut -d' ' -f1)" \
             --argjson measurements "$(cat "target/release/$WORKLOAD-pcr.json")" \
-            --argjson faceModels "$face_models" \
             '{workload: $workload, version: $version, gitSha: $gitSha,
               artifacts: {eifSha256: $eifSha256, ociArchiveSha256: $ociArchiveSha256},
-              measurements: $measurements, faceModels: $faceModels}' \
+              measurements: $measurements}' \
             > target/release/manifest.json
       - id: outputs
         run: |
@@ -157,7 +141,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.prepare.outputs.sha }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: enclave-release
@@ -189,9 +174,14 @@ jobs:
           mv "$RUNNER_TEMP/manifest.json" assets/manifest.json
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: assets/*
+          subject-path: |
+            assets/${{ needs.prepare.outputs.workload }}-enclave.eif
+            assets/${{ needs.prepare.outputs.workload }}-oci.tar.gz
+            assets/${{ needs.prepare.outputs.workload }}-pcr.json
+            assets/manifest.json
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKLOAD: ${{ needs.prepare.outputs.workload }}
           TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
           PCR0: ${{ needs.build.outputs.PCR0 }}
@@ -211,4 +201,6 @@ jobs:
           OCI image: \`$OCI_REF\`
           EOF
           gh release create --draft --target "$RELEASE_SHA" -t "$TAG" \
-            -F "$RUNNER_TEMP/body.md" "$TAG" assets/*
+            -F "$RUNNER_TEMP/body.md" "$TAG" \
+            "assets/$WORKLOAD-enclave.eif" "assets/$WORKLOAD-oci.tar.gz" \
+            "assets/$WORKLOAD-pcr.json" assets/manifest.json
