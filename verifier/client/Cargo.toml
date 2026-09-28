@@ -17,12 +17,14 @@ flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 hex = { workspace = true, features = ["serde"] }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 url.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 flamingo-verifier-protocol.workspace = true

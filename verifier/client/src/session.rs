@@ -5,6 +5,7 @@
 //! single binary frame. The socket and the verified assignment are held together, so a match
 //! cannot be sent over a connection whose assignment was never verified.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use flamingo_verifier_api_types::{
@@ -18,7 +19,9 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
+use tokio_tungstenite::{
+    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
+};
 use url::Url;
 
 use crate::client::{
@@ -99,7 +102,7 @@ pub async fn connect(
         .max_frame_size(Some(MAX_MATCH_BODY_BYTES));
     let (mut socket, _response) = tokio::time::timeout(
         config.connect_timeout(),
-        connect_async_with_config(request, Some(socket_config), false),
+        connect_async_tls_with_config(request, Some(socket_config), false, Some(tls_connector()?)),
     )
     .await
     .map_err(|_| Error::Timeout)?
@@ -123,6 +126,23 @@ pub async fn connect(
         verifier,
         request_timeout: config.request_timeout(),
     })
+}
+
+/// The TLS connector for `wss` hosts, trusting the webpki roots.
+///
+/// The crypto provider is chosen explicitly: rustls otherwise panics when no provider, or more
+/// than one, is enabled through crate features across the dependency graph.
+fn tls_connector() -> Result<Connector, Error> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| Error::WebSocket(tokio_tungstenite::tungstenite::Error::Tls(error.into())))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
 }
 
 /// Maps the configured HTTP base URL onto its WebSocket endpoint.

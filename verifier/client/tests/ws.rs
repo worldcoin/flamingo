@@ -425,3 +425,30 @@ async fn connect_upgrades_the_v1_matches_endpoint() {
     let path = seen.lock().expect("lock should not be poisoned").clone();
     assert_eq!(path.as_deref(), Some("/v1/matches"));
 }
+
+#[tokio::test]
+async fn a_failed_tls_handshake_is_an_error_not_a_panic() {
+    // Plain TCP that closes immediately: the client must build its TLS configuration and then
+    // fail the handshake, rather than panic for want of a rustls crypto provider.
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .expect("should bind an ephemeral port");
+    let address = listener
+        .local_addr()
+        .expect("listener should have an address");
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("should accept");
+        drop(stream);
+    });
+
+    let error = FlamingoVerifierClient::new(config(&format!("https://{address}")))
+        .expect("client should build")
+        .connect()
+        .await
+        .expect_err("a closed TLS handshake must fail");
+
+    assert!(
+        matches!(error, client::Error::WebSocket(_)),
+        "got {error:?}"
+    );
+}
