@@ -34,10 +34,7 @@ mod config;
 mod error;
 mod session;
 
-pub use client::{
-    FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, VerifiedMatchResponse,
-    VerifiedMatchResult,
-};
+pub use client::{FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, VerifiedMatchResult};
 pub use config::Config;
 pub use error::Error;
 pub use pontifex::{ChannelConsumer, PcrMeasurement};

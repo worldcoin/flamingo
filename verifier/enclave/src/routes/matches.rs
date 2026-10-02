@@ -3,8 +3,8 @@ use std::sync::Arc;
 use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
 use flamingo_verifier_protocol::match_token::{MatchClaims, MatchOperation};
 use flamingo_verifier_sealed_types::{
-    AttestedStatement, ComparisonRole, DeepFaceInputs, FailureReason, GrayBadgeInputs, MatchInputs,
-    MatchObservations, MatchResponse as SealedResponse, MatchResult, valid_similarity,
+    AttestedStatement, ComparisonRole, DebugReport, DeepFaceInputs, FailureReason, GrayBadgeInputs,
+    MatchInputs, MatchResult, valid_similarity,
 };
 use sha2::{Digest, Sha256};
 
@@ -32,7 +32,10 @@ pub async fn handler(
     let result = match inputs {
         Ok(MatchInputs::DeepFace(inputs)) => deepface(state, inputs).await?,
         Ok(MatchInputs::GrayBadge(inputs)) => graybadge(state, inputs).await?,
-        Err(reason) => MatchResult::Failed(reason).into(),
+        Err(reason) => MatchResult::Failed {
+            reason,
+            debug_report: DebugReport::NotProduced,
+        },
     };
 
     blocking(move || {
@@ -51,7 +54,7 @@ pub async fn handler(
 async fn deepface(
     state: Arc<EnclaveState>,
     inputs: DeepFaceInputs,
-) -> Result<SealedResponse, enclave_types::Error> {
+) -> Result<MatchResult, enclave_types::Error> {
     let prepared = blocking(move || {
         let input = MatchInputs::DeepFace(inputs);
         input.validate()?;
@@ -72,7 +75,12 @@ async fn deepface(
     .await?;
     let (inputs, mut claims) = match prepared {
         Ok(prepared) => prepared,
-        Err(reason) => return Ok(MatchResult::Failed(reason).into()),
+        Err(reason) => {
+            return Ok(MatchResult::Failed {
+                reason,
+                debug_report: DebugReport::NotProduced,
+            });
+        }
     };
 
     let scores = match state
@@ -88,37 +96,28 @@ async fn deepface(
         Err(error) => return error.into_result(),
     };
 
-    let observations = MatchObservations::DeepFace {
-        credential_live: scores.credential_live,
-        credential_challenge: scores.credential_challenge,
-        live_challenge: scores.live_challenge,
-    };
     for (score, role) in [
         (scores.credential_live, ComparisonRole::OrbSelfie),
         (scores.credential_challenge, ComparisonRole::OrbChallenge),
         (scores.live_challenge, ComparisonRole::SelfieChallenge),
     ] {
         if let Err(reason) = check_score(score, inputs.match_threshold, role) {
-            let mut response =
-                crate::biometric_engine::BiometricError::Rejected(reason).into_result()?;
-            response.observations = Some(observations);
-            response.debug_report = scores.debug_report;
-            return Ok(response);
+            return crate::biometric_engine::BiometricError::AnalysisRejected {
+                reason,
+                debug_report: scores.debug_report,
+            }
+            .into_result();
         }
     }
 
     claims.match_coefficient = token_score(scores.credential_live);
-    Ok(SealedResponse {
-        outcome: sign(state, claims).await?,
-        observations: Some(observations),
-        debug_report: scores.debug_report,
-    })
+    sign(state, claims, scores.debug_report).await
 }
 
 async fn graybadge(
     state: Arc<EnclaveState>,
     inputs: GrayBadgeInputs,
-) -> Result<SealedResponse, enclave_types::Error> {
+) -> Result<MatchResult, enclave_types::Error> {
     let prepared = blocking(move || {
         let input = MatchInputs::GrayBadge(inputs);
         input.validate()?;
@@ -137,7 +136,12 @@ async fn graybadge(
     .await?;
     let (inputs, mut claims) = match prepared {
         Ok(prepared) => prepared,
-        Err(reason) => return Ok(MatchResult::Failed(reason).into()),
+        Err(reason) => {
+            return Ok(MatchResult::Failed {
+                reason,
+                debug_report: DebugReport::NotProduced,
+            });
+        }
     };
 
     let scores = match state
@@ -148,27 +152,20 @@ async fn graybadge(
         Ok(scores) => scores,
         Err(error) => return error.into_result(),
     };
-    let observations = MatchObservations::GrayBadge {
-        live_challenge: scores.live_challenge,
-    };
     if let Err(reason) = check_score(
         scores.live_challenge,
         inputs.match_threshold,
         ComparisonRole::SelfieChallenge,
     ) {
-        let mut response =
-            crate::biometric_engine::BiometricError::Rejected(reason).into_result()?;
-        response.observations = Some(observations);
-        response.debug_report = scores.debug_report;
-        return Ok(response);
+        return crate::biometric_engine::BiometricError::AnalysisRejected {
+            reason,
+            debug_report: scores.debug_report,
+        }
+        .into_result();
     }
 
     claims.match_coefficient = token_score(scores.live_challenge);
-    Ok(SealedResponse {
-        outcome: sign(state, claims).await?,
-        observations: Some(observations),
-        debug_report: scores.debug_report,
-    })
+    sign(state, claims, scores.debug_report).await
 }
 
 fn check_score(
@@ -198,17 +195,21 @@ const fn token_score(score: f64) -> f32 {
 async fn sign(
     state: Arc<EnclaveState>,
     claims: MatchClaims,
+    debug_report: DebugReport,
 ) -> Result<MatchResult, enclave_types::Error> {
     let signing_key_attestation = state.signing_key_attestation().await;
 
     blocking(move || {
-        Ok(MatchResult::Success(AttestedStatement {
-            token: state
-                .signing_key()
-                .sign_claims(&claims)
-                .map_err(|_| enclave_types::Error::Internal)?,
-            signing_key_attestation,
-        }))
+        Ok(MatchResult::Success {
+            statement: AttestedStatement {
+                token: state
+                    .signing_key()
+                    .sign_claims(&claims)
+                    .map_err(|_| enclave_types::Error::Internal)?,
+                signing_key_attestation,
+            },
+            debug_report,
+        })
     })
     .await?
 }
@@ -298,7 +299,7 @@ mod tests {
         Arc::new(EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine)).unwrap())
     }
 
-    async fn exchange(state: Arc<EnclaveState>, inputs: &MatchInputs) -> (SealedResponse, usize) {
+    async fn exchange(state: Arc<EnclaveState>, inputs: &MatchInputs) -> (MatchResult, usize) {
         let consumer = ChannelConsumer::from_unverified_public_key(
             ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
             &state.channel().public_key(),
@@ -317,10 +318,8 @@ mod tests {
         .unwrap();
         let size = response.ciphertext.len();
         (
-            SealedResponse::from_padded_cbor(
-                &opener.open_from_enclave(&response.ciphertext).unwrap(),
-            )
-            .unwrap(),
+            MatchResult::from_padded_cbor(&opener.open_from_enclave(&response.ciphertext).unwrap())
+                .unwrap(),
             size,
         )
     }
@@ -330,21 +329,14 @@ mod tests {
         let state = state(Engine { third: 0.85 });
         let inputs = inputs();
         let (result, _) = exchange(Arc::clone(&state), &inputs).await;
-        assert_eq!(
-            result.observations,
-            Some(MatchObservations::DeepFace {
-                credential_live: f64::from(0.95f32),
-                credential_challenge: f64::from(0.9f32),
-                live_challenge: f64::from(0.85f32),
-            })
-        );
-        assert!(matches!(
-            result.debug_report,
-            flamingo_verifier_sealed_types::DebugReport::Available { .. }
-        ));
-        let MatchResult::Success(statement) = result.outcome else {
+        let MatchResult::Success {
+            statement,
+            debug_report,
+        } = result
+        else {
             panic!("expected signed result")
         };
+        assert!(matches!(debug_report, DebugReport::Available { .. }));
         let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
         assert!(inputs.matches_claims(&claims));
         assert_eq!(
@@ -370,15 +362,16 @@ mod tests {
     #[tokio::test]
     async fn third_comparison_is_a_required_gate_and_failure_is_padded() {
         let (success, success_len) = exchange(state(Engine { third: 0.9 }), &inputs()).await;
-        assert!(matches!(success.outcome, MatchResult::Success(_)));
+        let MatchResult::Success { debug_report, .. } = success else {
+            panic!("expected success")
+        };
         let (failure, failure_len) = exchange(state(Engine { third: 0.1 }), &inputs()).await;
-        assert_eq!(failure.debug_report, success.debug_report);
-        assert!(failure.observations.is_some());
         assert_eq!(
-            failure.outcome,
-            MatchResult::Failed(FailureReason::MatchBelowThreshold(
-                ComparisonRole::SelfieChallenge
-            ))
+            failure,
+            MatchResult::Failed {
+                reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
+                debug_report,
+            }
         );
         assert_eq!(success_len, failure_len);
     }
@@ -388,26 +381,24 @@ mod tests {
         let state = state(Engine { third: 0.9 });
         let inputs = gray(0.8);
         let (result, length) = exchange(Arc::clone(&state), &inputs).await;
-        assert!(result.observations.is_some());
-        assert!(matches!(
-            result.debug_report,
-            flamingo_verifier_sealed_types::DebugReport::Available { .. }
-        ));
-        let MatchResult::Success(statement) = result.outcome else {
+        let MatchResult::Success {
+            statement,
+            debug_report,
+        } = result
+        else {
             panic!("expected signed GrayBadge result")
         };
+        assert!(matches!(debug_report, DebugReport::Available { .. }));
         let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
         assert_eq!(claims.operation, MatchOperation::GrayBadge);
         assert!(inputs.matches_claims(&claims));
-
         let (failure, failure_length) = exchange(state, &gray(0.95)).await;
-        assert_eq!(failure.debug_report, result.debug_report);
-        assert!(failure.observations.is_some());
         assert_eq!(
-            failure.outcome,
-            MatchResult::Failed(FailureReason::MatchBelowThreshold(
-                ComparisonRole::SelfieChallenge
-            ))
+            failure,
+            MatchResult::Failed {
+                reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
+                debug_report,
+            }
         );
         assert_eq!(length, failure_length);
     }
@@ -430,14 +421,14 @@ mod tests {
                 };
                 let state = state(Engine { third: 0.9 });
                 let (result, _) = exchange(Arc::clone(&state), &inputs).await;
-                assert!(result.observations.is_some());
-                assert!(matches!(
-                    result.debug_report,
-                    flamingo_verifier_sealed_types::DebugReport::Available { .. }
-                ));
-                let MatchResult::Success(statement) = result.outcome else {
+                let MatchResult::Success {
+                    statement,
+                    debug_report,
+                } = result
+                else {
                     panic!("expected LightGuard result")
                 };
+                assert!(matches!(debug_report, DebugReport::Available { .. }));
                 let claims =
                     match_token::verify(&statement.token, state.signing_public_key()).unwrap();
                 assert!(inputs.matches_claims(&claims));
@@ -472,9 +463,11 @@ mod tests {
         assert_eq!(
             exchange(state(UnusedBiometricEngine), &MatchInputs::DeepFace(inputs))
                 .await
-                .0
-                .outcome,
-            MatchResult::Failed(FailureReason::ThumbnailHashMismatch)
+                .0,
+            MatchResult::Failed {
+                reason: FailureReason::ThumbnailHashMismatch,
+                debug_report: DebugReport::NotProduced
+            }
         );
     }
 }

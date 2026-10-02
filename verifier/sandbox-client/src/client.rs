@@ -16,7 +16,7 @@ use biometric_engines_protocol::{
 
 use crate::transport;
 
-/// Allows worker diagnostics (LightGuard rejections exceed 40 KiB), stripped after decoding.
+/// Allows worker diagnostics (LightGuard rejections exceed 40 KiB).
 /// Keep allocation bounded before reading the response body.
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_READY_BYTES: usize = 64;
@@ -231,7 +231,7 @@ impl SandboxClient {
     }
 }
 
-/// Payload-free errors; only input/biological failures leave the connection reusable.
+/// Only input/biological failures leave the connection reusable; reports are redacted from Debug.
 #[derive(Clone, thiserror::Error)]
 pub enum SandboxClientError {
     #[error("worker protocol failure")]

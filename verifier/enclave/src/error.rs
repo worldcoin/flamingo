@@ -325,16 +325,15 @@ mod tests {
             failure.debug_report = Some("{\"frame\":1}".to_owned());
             let response = BiometricError::from(failure).into_result().unwrap();
             assert_eq!(
-                response.outcome,
-                flamingo_verifier_sealed_types::MatchResult::Failed(FailureReason::ImageRejected {
-                    image: ImageRole::LiveSelfie,
-                    reason: ImageFailureReason::EyesClosed,
-                    target: Some(expected),
-                })
-            );
-            assert_eq!(
-                response.debug_report,
-                Some("{\"frame\":1}".to_owned()).into()
+                response,
+                flamingo_verifier_sealed_types::MatchResult::Failed {
+                    reason: FailureReason::ImageRejected {
+                        image: ImageRole::LiveSelfie,
+                        reason: ImageFailureReason::EyesClosed,
+                        target: Some(expected),
+                    },
+                    debug_report: Some("{\"frame\":1}".to_owned()).into(),
+                }
             );
         }
     }

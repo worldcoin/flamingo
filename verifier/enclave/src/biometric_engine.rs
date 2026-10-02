@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResponse};
+use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
 #[cfg(any(target_os = "linux", test))]
 use tokio::{sync::Mutex, time::timeout};
 
@@ -59,11 +59,8 @@ pub enum BiometricError {
 }
 
 impl BiometricError {
-    pub(crate) fn into_result(
-        self,
-    ) -> Result<MatchResponse, flamingo_verifier_enclave_types::Error> {
+    pub(crate) fn into_result(self) -> Result<MatchResult, flamingo_verifier_enclave_types::Error> {
         use flamingo_verifier_enclave_types::Error;
-        use flamingo_verifier_sealed_types::MatchResult;
 
         match self {
             Self::Busy => Err(Error::NotReady),
@@ -76,12 +73,14 @@ impl BiometricError {
             Self::AnalysisRejected {
                 reason,
                 debug_report,
-            } => Ok(MatchResponse {
-                outcome: MatchResult::Failed(reason),
-                observations: None,
+            } => Ok(MatchResult::Failed {
+                reason,
                 debug_report,
             }),
-            Self::Rejected(reason) => Ok(MatchResult::Failed(reason).into()),
+            Self::Rejected(reason) => Ok(MatchResult::Failed {
+                reason,
+                debug_report: DebugReport::NotProduced,
+            }),
         }
     }
 }
@@ -165,7 +164,7 @@ mod sandboxed {
         response::Outcome,
     };
     use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
-    use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResponse};
+    use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
 
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
@@ -340,7 +339,6 @@ mod tests {
     #[test]
     fn infrastructure_errors_stay_distinct_from_encrypted_rejections() {
         use flamingo_verifier_enclave_types::Error;
-        use flamingo_verifier_sealed_types::MatchResult;
 
         assert_eq!(BiometricError::Busy.into_result(), Err(Error::NotReady));
         for error in [
@@ -351,7 +349,10 @@ mod tests {
         }
         assert_eq!(
             BiometricError::Rejected(FailureReason::MalformedInputs).into_result(),
-            Ok(MatchResult::Failed(FailureReason::MalformedInputs).into())
+            Ok(MatchResult::Failed {
+                reason: FailureReason::MalformedInputs,
+                debug_report: DebugReport::NotProduced
+            })
         );
     }
 

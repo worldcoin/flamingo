@@ -1,5 +1,5 @@
 //! Typed CBOR payloads. Image ownership moves across inference adapters without cloning.
-use crate::{Error, FailureReason};
+use crate::{DebugReport, Error, FailureReason};
 use flamingo_verifier_api_types::{
     MAX_HASHES_JSON_BYTES, MAX_IMAGE_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_IMAGE_BYTES,
 };
@@ -278,11 +278,22 @@ pub struct AttestedStatement {
 /// Signed success or encrypted request/biometric rejection.
 /// Infrastructure failures remain host errors or terminate the broker; they are not rejections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum MatchResult {
     /// The match held; carries the signed statement and the attestation for its key.
-    Success(AttestedStatement),
+    Success {
+        /// Signed statement and signing-key attestation.
+        statement: AttestedStatement,
+        /// Original bounded worker diagnostics.
+        debug_report: DebugReport,
+    },
     /// No statement was issued; carries why. No attestation: nothing to verify.
-    Failed(FailureReason),
+    Failed {
+        /// Semantic rejection.
+        reason: FailureReason,
+        /// Original bounded worker diagnostics, if produced.
+        debug_report: DebugReport,
+    },
 }
 
 #[cfg(test)]
@@ -450,22 +461,30 @@ mod tests {
 
     #[test]
     fn every_outcome_has_identical_envelope_size() {
-        use crate::{MATCH_RESPONSE_ENVELOPE_LEN, MatchResponse};
-        let success = MatchResult::Success(AttestedStatement {
-            token: MatchToken::from_bytes(vec![1; 512]),
-            signing_key_attestation: vec![2; 5000],
-        });
-        let failure = MatchResult::Failed(FailureReason::MalformedInputs);
-        let image_failure = MatchResult::Failed(FailureReason::ImageRejected {
-            image: crate::ImageRole::LiveSelfie,
-            reason: crate::ImageFailureReason::EyesClosed,
-            target: Some(crate::ValidationTarget::Image),
-        });
+        use crate::MATCH_RESPONSE_ENVELOPE_LEN;
+        let success = MatchResult::Success {
+            statement: AttestedStatement {
+                token: MatchToken::from_bytes(vec![1; 512]),
+                signing_key_attestation: vec![2; 5000],
+            },
+            debug_report: DebugReport::NotProduced,
+        };
+        let failure = MatchResult::Failed {
+            reason: FailureReason::MalformedInputs,
+            debug_report: DebugReport::NotProduced,
+        };
+        let image_failure = MatchResult::Failed {
+            reason: FailureReason::ImageRejected {
+                image: crate::ImageRole::LiveSelfie,
+                reason: crate::ImageFailureReason::EyesClosed,
+                target: Some(crate::ValidationTarget::Image),
+            },
+            debug_report: DebugReport::NotProduced,
+        };
         for result in [success, failure, image_failure] {
-            let result = MatchResponse::from(result);
             let encoded = result.to_padded_cbor().unwrap();
             assert_eq!(encoded.len(), MATCH_RESPONSE_ENVELOPE_LEN);
-            assert_eq!(MatchResponse::from_padded_cbor(&encoded), Ok(result));
+            assert_eq!(MatchResult::from_padded_cbor(&encoded), Ok(result));
         }
     }
 

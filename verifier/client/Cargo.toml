@@ -27,7 +27,6 @@ url.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
-sha2.workspace = true
 flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 hex-literal.workspace = true

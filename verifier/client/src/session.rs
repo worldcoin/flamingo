@@ -25,7 +25,7 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::client::{
-    VerifiedAssignment, VerifiedMatchResponse, classify_envelope, ensure_claims_match,
+    VerifiedAssignment, VerifiedMatchResult, classify_envelope, ensure_claims_match,
     open_verified_match, verify_assignment,
 };
 use crate::config::Config;
@@ -65,7 +65,7 @@ impl FlamingoVerifierSession {
     pub async fn request_match(
         mut self,
         inputs: &MatchInputs,
-    ) -> Result<VerifiedMatchResponse, Error> {
+    ) -> Result<VerifiedMatchResult, Error> {
         let result = exchange_match(
             &mut self.socket,
             self.assignment.consumer(),
@@ -200,7 +200,7 @@ async fn exchange_match(
     inputs: &MatchInputs,
     verifier: &Verifier,
     request_timeout: Duration,
-) -> Result<VerifiedMatchResponse, Error> {
+) -> Result<VerifiedMatchResult, Error> {
     let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
     let (sealed, opener) = consumer
         .seal_to_enclave(&plaintext)
@@ -279,7 +279,7 @@ mod tests {
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
     use flamingo_verifier_protocol::match_token::MatchToken;
     use flamingo_verifier_sealed_types::{
-        AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResponse,
+        AttestedStatement, DebugReport, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs,
         MatchResult,
     };
     use futures_util::{SinkExt, StreamExt};
@@ -290,8 +290,8 @@ mod tests {
     use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
 
     use super::{Socket, exchange_match, websocket_url};
+    use crate::VerifiedMatchResult;
     use crate::error::Error;
-    use crate::{VerifiedMatchResponse, VerifiedMatchResult};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -363,10 +363,12 @@ mod tests {
         )
     }
 
-    async fn rejection_round_trip(foreign_reply: bool) -> Result<VerifiedMatchResponse, Error> {
+    async fn rejection_round_trip(foreign_reply: bool) -> Result<VerifiedMatchResult, Error> {
         let responder = responder();
-        let mut answer = MatchResponse::from(MatchResult::Failed(FailureReason::MalformedInputs));
-        answer.debug_report = Some("{\"diagnostic\":1}".to_owned()).into();
+        let answer = MatchResult::Failed {
+            reason: FailureReason::MalformedInputs,
+            debug_report: Some("{\"diagnostic\":1}".to_owned()).into(),
+        };
         let server = Arc::clone(&responder);
 
         let mut socket = connect_to_stub(move |mut socket| async move {
@@ -410,14 +412,15 @@ mod tests {
             .await
             .expect("a rejection is a normal return");
 
-        assert_eq!(
-            result.debug_report,
-            Some("{\"diagnostic\":1}".to_owned()).into()
-        );
-        assert!(matches!(
-            result.outcome,
-            VerifiedMatchResult::Failed(FailureReason::MalformedInputs)
-        ));
+        let VerifiedMatchResult::Failed {
+            reason,
+            debug_report,
+        } = result
+        else {
+            panic!("expected rejection")
+        };
+        assert_eq!(reason, FailureReason::MalformedInputs);
+        assert_eq!(debug_report, Some("{\"diagnostic\":1}".to_owned()).into());
     }
 
     #[tokio::test]
@@ -565,10 +568,13 @@ mod tests {
     #[tokio::test]
     async fn a_statement_whose_attestation_does_not_verify_is_rejected_over_the_socket() {
         let responder = responder();
-        let answer = MatchResult::Success(AttestedStatement {
-            token: MatchToken::from_bytes(b"cose-sign1".to_vec()),
-            signing_key_attestation: b"not a COSE attestation document".to_vec(),
-        });
+        let answer = MatchResult::Success {
+            statement: AttestedStatement {
+                token: MatchToken::from_bytes(b"cose-sign1".to_vec()),
+                signing_key_attestation: b"not a COSE attestation document".to_vec(),
+            },
+            debug_report: DebugReport::NotProduced,
+        };
         let server = Arc::clone(&responder);
 
         let mut socket = connect_to_stub(move |mut socket| async move {
@@ -581,9 +587,7 @@ mod tests {
                 panic!("expected a binary match frame");
             };
             let (_, sealer) = server.open(&ciphertext).expect("opens its own request");
-            let encoded = MatchResponse::from(answer)
-                .to_padded_cbor()
-                .expect("fits the envelope");
+            let encoded = answer.to_padded_cbor().expect("fits the envelope");
             socket
                 .send(Message::Binary(sealer.seal(&encoded).unwrap().into()))
                 .await
