@@ -80,10 +80,10 @@ async fn main() -> Result<()> {
         .await
         .context("match exchange did not verify")?;
     match result {
-        VerifiedMatchResult::Success(_) => {
+        VerifiedMatchResult::Success { .. } => {
             println!("attested match succeeded; operation, capture commitments and score verified");
         }
-        VerifiedMatchResult::Failed(reason) => bail!("no statement was issued: {reason:?}"),
+        VerifiedMatchResult::Failed { reason, .. } => bail!("no statement was issued: {reason:?}"),
     }
     Ok(())
 }

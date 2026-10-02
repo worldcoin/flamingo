@@ -279,7 +279,8 @@ mod tests {
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
     use flamingo_verifier_protocol::match_token::MatchToken;
     use flamingo_verifier_sealed_types::{
-        AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult,
+        AttestedStatement, DebugReport, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs,
+        MatchResult,
     };
     use futures_util::{SinkExt, StreamExt};
     use pontifex::attestation::PcrConfig;
@@ -364,7 +365,10 @@ mod tests {
 
     async fn rejection_round_trip(foreign_reply: bool) -> Result<VerifiedMatchResult, Error> {
         let responder = responder();
-        let answer = MatchResult::Failed(FailureReason::MalformedInputs);
+        let answer = MatchResult::Failed {
+            reason: FailureReason::MalformedInputs,
+            debug_report: Some("{\"diagnostic\":1}".to_owned()).into(),
+        };
         let server = Arc::clone(&responder);
 
         let mut socket = connect_to_stub(move |mut socket| async move {
@@ -408,10 +412,15 @@ mod tests {
             .await
             .expect("a rejection is a normal return");
 
-        assert!(matches!(
-            result,
-            VerifiedMatchResult::Failed(FailureReason::MalformedInputs)
-        ));
+        let VerifiedMatchResult::Failed {
+            reason,
+            debug_report,
+        } = result
+        else {
+            panic!("expected rejection")
+        };
+        assert_eq!(reason, FailureReason::MalformedInputs);
+        assert_eq!(debug_report, Some("{\"diagnostic\":1}".to_owned()).into());
     }
 
     #[tokio::test]
@@ -559,10 +568,13 @@ mod tests {
     #[tokio::test]
     async fn a_statement_whose_attestation_does_not_verify_is_rejected_over_the_socket() {
         let responder = responder();
-        let answer = MatchResult::Success(AttestedStatement {
-            token: MatchToken::from_bytes(b"cose-sign1".to_vec()),
-            signing_key_attestation: b"not a COSE attestation document".to_vec(),
-        });
+        let answer = MatchResult::Success {
+            statement: AttestedStatement {
+                token: MatchToken::from_bytes(b"cose-sign1".to_vec()),
+                signing_key_attestation: b"not a COSE attestation document".to_vec(),
+            },
+            debug_report: DebugReport::NotProduced,
+        };
         let server = Arc::clone(&responder);
 
         let mut socket = connect_to_stub(move |mut socket| async move {

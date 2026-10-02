@@ -1,5 +1,5 @@
 //! Typed CBOR payloads. Image ownership moves across inference adapters without cloning.
-use crate::{Error, FailureReason};
+use crate::{DebugReport, Error, FailureReason};
 use flamingo_verifier_api_types::{
     MAX_HASHES_JSON_BYTES, MAX_IMAGE_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_IMAGE_BYTES,
 };
@@ -191,23 +191,39 @@ impl MatchInputs {
         }
 
         let mut total = 0usize;
-        for image in live
+        for (image, role) in live
             .images()
-            .chain(std::iter::once(challenge))
-            .chain(credential)
+            .map(|image| (image, crate::ImageRole::LiveSelfie))
+            .chain(std::iter::once((
+                challenge,
+                crate::ImageRole::RtmsChallenge,
+            )))
+            .chain(credential.map(|image| (image, crate::ImageRole::OrbCredential)))
         {
             if image.is_empty() {
-                return Err(FailureReason::EmptyImage);
+                return Err(FailureReason::InputRejected {
+                    reason: crate::InputFailureReason::EmptyImage,
+                    image: Some(role),
+                    limit_bytes: None,
+                });
             }
 
             if image.len() > MAX_IMAGE_BYTES {
-                return Err(FailureReason::InputTooLarge);
+                return Err(FailureReason::InputRejected {
+                    reason: crate::InputFailureReason::ImageTooLarge,
+                    image: Some(role),
+                    limit_bytes: Some(MAX_IMAGE_BYTES as u64),
+                });
             }
             total += image.len();
         }
 
         if total > MAX_TOTAL_IMAGE_BYTES {
-            return Err(FailureReason::InputTooLarge);
+            return Err(FailureReason::InputRejected {
+                reason: crate::InputFailureReason::TotalImagesTooLarge,
+                image: None,
+                limit_bytes: Some(MAX_TOTAL_IMAGE_BYTES as u64),
+            });
         }
 
         Ok(())
@@ -259,97 +275,25 @@ pub struct AttestedStatement {
     pub signing_key_attestation: Vec<u8>,
 }
 
-/// The authoritative result of a match.
-///
-/// Everything the enclave learns after opening the request travels in here rather than in the error
-/// it returns to the host. Once a request has been opened there is a channel to answer on, so
-/// surfacing any of it in the clear would tell the host about a plaintext it cannot read.
-///
-/// [`Self::Failed`] spans both a correct negative answer and unusable input: a match that scored
-/// below the threshold failed in the same sense that a malformed payload did — no statement was
-/// issued. It is *not* a transport error, and a client must not treat it as one.
+/// Signed success or encrypted request/biometric rejection.
+/// Infrastructure failures remain host errors or terminate the broker; they are not rejections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum MatchResult {
     /// The match held; carries the signed statement and the attestation for its key.
-    Success(AttestedStatement),
+    Success {
+        /// Signed statement and signing-key attestation.
+        statement: AttestedStatement,
+        /// Original bounded worker diagnostics.
+        debug_report: DebugReport,
+    },
     /// No statement was issued; carries why. No attestation: nothing to verify.
-    Failed(FailureReason),
-}
-
-/// Fixed plaintext size of every sealed match response.
-pub const MATCH_RESULT_ENVELOPE_LEN: usize = 16 * 1024;
-const MATCH_RESULT_LENGTH_LEN: usize = 2;
-
-impl MatchResult {
-    /// Encodes the result as CBOR.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Encoding`] if CBOR encoding fails.
-    pub fn to_cbor(&self) -> Result<Vec<u8>, Error> {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(self, &mut encoded).map_err(|_| Error::Encoding)?;
-
-        Ok(encoded)
-    }
-
-    /// Encodes this result in the fixed-size sealed-response envelope.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::ResponseTooLarge`] when the result exceeds the envelope.
-    pub fn to_padded_cbor(&self) -> Result<Vec<u8>, Error> {
-        let encoded = self.to_cbor()?;
-        let max_result_len = MATCH_RESULT_ENVELOPE_LEN - MATCH_RESULT_LENGTH_LEN;
-        let length: u16 = encoded
-            .len()
-            .try_into()
-            .map_err(|_| Error::ResponseTooLarge)?;
-        if encoded.len() > max_result_len {
-            return Err(Error::ResponseTooLarge);
-        }
-
-        let mut envelope = vec![0; MATCH_RESULT_ENVELOPE_LEN];
-        envelope[..MATCH_RESULT_LENGTH_LEN].copy_from_slice(&length.to_be_bytes());
-        envelope[MATCH_RESULT_LENGTH_LEN..MATCH_RESULT_LENGTH_LEN + encoded.len()]
-            .copy_from_slice(&encoded);
-        Ok(envelope)
-    }
-
-    /// Decodes a result.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Malformed`] if the bytes are not this framing.
-    pub fn from_cbor(bytes: &[u8]) -> Result<Self, Error> {
-        ciborium::from_reader(bytes).map_err(|_| Error::Malformed)
-    }
-
-    /// Decodes a result from the fixed-size sealed-response envelope.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Malformed`] for an invalid envelope or result.
-    pub fn from_padded_cbor(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != MATCH_RESULT_ENVELOPE_LEN {
-            return Err(Error::Malformed);
-        }
-
-        let length = u16::from_be_bytes(
-            bytes[..MATCH_RESULT_LENGTH_LEN]
-                .try_into()
-                .map_err(|_| Error::Malformed)?,
-        ) as usize;
-        let result_end = MATCH_RESULT_LENGTH_LEN
-            .checked_add(length)
-            .filter(|end| *end <= bytes.len())
-            .ok_or(Error::Malformed)?;
-        if bytes[result_end..].iter().any(|byte| *byte != 0) {
-            return Err(Error::Malformed);
-        }
-
-        Self::from_cbor(&bytes[MATCH_RESULT_LENGTH_LEN..result_end])
-    }
+    Failed {
+        /// Semantic rejection.
+        reason: FailureReason,
+        /// Original bounded worker diagnostics, if produced.
+        debug_report: DebugReport,
+    },
 }
 
 #[cfg(test)]
@@ -493,28 +437,53 @@ mod tests {
         };
         inputs.rtms_challenge = vec![0; MAX_IMAGE_BYTES + 1].into();
         let inputs = MatchInputs::GrayBadge(inputs);
-        assert_eq!(inputs.validate(), Err(FailureReason::InputTooLarge));
+        assert_eq!(
+            inputs.validate(),
+            Err(FailureReason::InputRejected {
+                reason: crate::InputFailureReason::ImageTooLarge,
+                image: Some(crate::ImageRole::RtmsChallenge),
+                limit_bytes: Some(MAX_IMAGE_BYTES as u64)
+            })
+        );
         // A caller can bypass our encoder; the enclave must validate decoded fields too.
         let mut encoded = Vec::new();
         ciborium::into_writer(&inputs, &mut encoded).unwrap();
         let decoded = MatchInputs::from_cbor(&encoded).unwrap();
-        assert_eq!(decoded.validate(), Err(FailureReason::InputTooLarge));
+        assert_eq!(
+            decoded.validate(),
+            Err(FailureReason::InputRejected {
+                reason: crate::InputFailureReason::ImageTooLarge,
+                image: Some(crate::ImageRole::RtmsChallenge),
+                limit_bytes: Some(MAX_IMAGE_BYTES as u64)
+            })
+        );
     }
 
     #[test]
     fn every_outcome_has_identical_envelope_size() {
-        let success = MatchResult::Success(AttestedStatement {
-            token: MatchToken::from_bytes(vec![1; 512]),
-            signing_key_attestation: vec![2; 5000],
-        });
-        let failure = MatchResult::Failed(FailureReason::MalformedInputs);
-        let image_failure = MatchResult::Failed(FailureReason::ImageRejected {
-            image: crate::ImageRole::LiveSelfie,
-            reason: crate::ImageFailureReason::EyesClosed,
-        });
+        use crate::MATCH_RESPONSE_ENVELOPE_LEN;
+        let success = MatchResult::Success {
+            statement: AttestedStatement {
+                token: MatchToken::from_bytes(vec![1; 512]),
+                signing_key_attestation: vec![2; 5000],
+            },
+            debug_report: DebugReport::NotProduced,
+        };
+        let failure = MatchResult::Failed {
+            reason: FailureReason::MalformedInputs,
+            debug_report: DebugReport::NotProduced,
+        };
+        let image_failure = MatchResult::Failed {
+            reason: FailureReason::ImageRejected {
+                image: crate::ImageRole::LiveSelfie,
+                reason: crate::ImageFailureReason::EyesClosed,
+                target: Some(crate::ValidationTarget::Image),
+            },
+            debug_report: DebugReport::NotProduced,
+        };
         for result in [success, failure, image_failure] {
             let encoded = result.to_padded_cbor().unwrap();
-            assert_eq!(encoded.len(), MATCH_RESULT_ENVELOPE_LEN);
+            assert_eq!(encoded.len(), MATCH_RESPONSE_ENVELOPE_LEN);
             assert_eq!(MatchResult::from_padded_cbor(&encoded), Ok(result));
         }
     }

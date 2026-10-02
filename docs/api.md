@@ -39,7 +39,7 @@ The sealed match payload contains CBOR with one operation:
 
 Both operations support `vanilla` and `light_guard` captures. LightGuard sends both illuminated and unilluminated frames and an explicit matching-frame selection to the sandboxed engine. Version-2 signed statements bind the operation, the complete live capture (including both LightGuard frames and the selection), the challenge and the operation-specific score; DeepFace also binds the PCP commitment. Clients reject statements that do not match their request.
 
-A binary result frame contains a padded, encrypted success or rejection. A success includes the [signed match statement](architecture.md#match-statements) and signing-key attestation. The client verifies both and checks that the claims match the inputs. A rejection contains a failure reason and no signed statement.
+A binary result frame contains a padded, encrypted success or rejection. A success includes the [signed match statement](architecture.md#match-statements) and signing-key attestation. The client verifies both and checks that the claims match the inputs. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 192 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix and channel domain `flamingo-verifier/matches/v3`, requiring matching enclave/client versions.
 
 Image limits are 4 MiB per image and 7 MiB across all frames. `hashes.json` is limited to 64 KiB. The [API constants](../verifier/api-types/src/matches.rs) define the complete request and response limits, including encoding overhead.
 

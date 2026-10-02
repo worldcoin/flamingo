@@ -2,14 +2,18 @@
 use crate::biometric_engine::BiometricError;
 use biometric_engines_protocol::face::{self, FailureCode, failure::Location};
 use flamingo_verifier_sealed_types::{
-    ComparisonRole, FailureReason, ImageFailureReason, ImageRole,
+    ComparisonRole, FailureReason, ImageFailureReason, ImageRole, InputFailureReason,
+    ValidationTarget,
 };
 
-impl From<&face::Failure> for BiometricError {
-    fn from(failure: &face::Failure) -> Self {
-        match worker_failure(failure) {
+impl From<face::Failure> for BiometricError {
+    fn from(failure: face::Failure) -> Self {
+        match worker_failure(&failure) {
             FailureReason::Internal => Self::Internal,
-            reason => Self::Rejected(reason),
+            reason => Self::AnalysisRejected {
+                reason,
+                debug_report: failure.debug_report.into(),
+            },
         }
     }
 }
@@ -26,24 +30,11 @@ fn worker_failure(failure: &face::Failure) -> FailureReason {
         return FailureReason::Internal;
     }
 
+    let mut target = None;
     let reason = match code {
         FailureCode::Unspecified | FailureCode::Internal => return FailureReason::Internal,
-        FailureCode::InvalidRequest => {
-            return match failure
-                .invalid_request_reason
-                .and_then(|details| details.reason)
-            {
-                Some(face::invalid_request_reason::Reason::EmptyImage(_)) => {
-                    FailureReason::EmptyImage
-                }
-                Some(
-                    face::invalid_request_reason::Reason::ImageTooLarge(_)
-                    | face::invalid_request_reason::Reason::TotalImagesTooLarge(_),
-                ) => FailureReason::InputTooLarge,
-                Some(_) => FailureReason::MalformedInputs,
-                None => FailureReason::Internal,
-            };
-        }
+        FailureCode::InvalidRequest => return invalid_request(failure),
+
         FailureCode::MatchingFailed => {
             return match failure.location {
                 Some(Location::Comparison(role)) => match face::ComparisonRole::try_from(role) {
@@ -69,12 +60,15 @@ fn worker_failure(failure: &face::Failure) -> FailureReason {
             let Some(validation) = failure.validation_failure else {
                 return FailureReason::Internal;
             };
-            if matches!(
-                face::ValidationTarget::try_from(validation.target),
-                Err(_) | Ok(face::ValidationTarget::Unspecified)
-            ) {
-                return FailureReason::Internal;
-            }
+            target = Some(match face::ValidationTarget::try_from(validation.target) {
+                Ok(face::ValidationTarget::Image) => ValidationTarget::Image,
+                Ok(face::ValidationTarget::IlluminatedFrame) => ValidationTarget::IlluminatedFrame,
+                Ok(face::ValidationTarget::UnilluminatedFrame) => {
+                    ValidationTarget::UnilluminatedFrame
+                }
+                Ok(face::ValidationTarget::LightGuardPair) => ValidationTarget::LightGuardPair,
+                _ => return FailureReason::Internal,
+            });
 
             let Ok(reason) = face::ValidationReason::try_from(validation.reason) else {
                 return FailureReason::Internal;
@@ -94,7 +88,54 @@ fn worker_failure(failure: &face::Failure) -> FailureReason {
         },
         _ => return FailureReason::Internal,
     };
-    FailureReason::ImageRejected { image, reason }
+    FailureReason::ImageRejected {
+        image,
+        reason,
+        target,
+    }
+}
+
+fn invalid_request(failure: &face::Failure) -> FailureReason {
+    use face::invalid_request_reason::Reason;
+    let (reason, limit_bytes) = match failure
+        .invalid_request_reason
+        .and_then(|details| details.reason)
+    {
+        Some(Reason::MissingImage(_)) => (InputFailureReason::MissingImage, None),
+        Some(Reason::MissingSource(_)) => (InputFailureReason::MissingSource, None),
+        Some(Reason::InvalidMatchingFrame(_)) => (InputFailureReason::InvalidMatchingFrame, None),
+        Some(Reason::EmptyImage(_)) => (InputFailureReason::EmptyImage, None),
+        Some(Reason::ImageTooLarge(limit)) => {
+            (InputFailureReason::ImageTooLarge, Some(limit.limit_bytes))
+        }
+        Some(Reason::TotalImagesTooLarge(limit)) => (
+            InputFailureReason::TotalImagesTooLarge,
+            Some(limit.limit_bytes),
+        ),
+        None => return FailureReason::Internal,
+    };
+    let image = match failure.location {
+        None => None,
+        Some(Location::Image(role)) => match image_role(role) {
+            Some(role) => Some(role),
+            None => return FailureReason::Internal,
+        },
+        Some(Location::Comparison(_)) => return FailureReason::Internal,
+    };
+    FailureReason::InputRejected {
+        reason,
+        image,
+        limit_bytes,
+    }
+}
+
+fn image_role(role: i32) -> Option<ImageRole> {
+    match face::ImageRole::try_from(role).ok()? {
+        face::ImageRole::Credential => Some(ImageRole::OrbCredential),
+        face::ImageRole::Live => Some(ImageRole::LiveSelfie),
+        face::ImageRole::Challenge => Some(ImageRole::RtmsChallenge),
+        _ => None,
+    }
 }
 
 const fn validation_reason(reason: face::ValidationReason) -> Option<ImageFailureReason> {
@@ -166,7 +207,8 @@ mod tests {
             worker_failure(&failure),
             FailureReason::ImageRejected {
                 image: ImageRole::LiveSelfie,
-                reason: ImageFailureReason::EyesClosed
+                reason: ImageFailureReason::EyesClosed,
+                target: Some(ValidationTarget::Image),
             }
         );
         assert_eq!(
@@ -223,29 +265,76 @@ mod tests {
     }
 
     #[test]
-    fn invalid_request_reasons_preserve_public_mapping_without_diagnostics() {
+    fn invalid_request_reasons_preserve_location_and_limits() {
         use face::invalid_request_reason::Reason;
         for (reason, expected) in [
             (
                 Reason::EmptyImage(face::EmptyReason {}),
-                FailureReason::EmptyImage,
+                InputFailureReason::EmptyImage,
             ),
             (
                 Reason::ImageTooLarge(face::ByteLimitExceeded { limit_bytes: 1 }),
-                FailureReason::InputTooLarge,
+                InputFailureReason::ImageTooLarge,
             ),
             (
                 Reason::TotalImagesTooLarge(face::ByteLimitExceeded { limit_bytes: 2 }),
-                FailureReason::InputTooLarge,
+                InputFailureReason::TotalImagesTooLarge,
             ),
             (
                 Reason::MissingSource(face::EmptyReason {}),
-                FailureReason::MalformedInputs,
+                InputFailureReason::MissingSource,
             ),
         ] {
-            let mut failure = face::Failure::invalid(reason);
-            failure.debug_report = Some("must never reach the API".to_owned());
-            assert_eq!(worker_failure(&failure), expected);
+            let limit_bytes = match reason {
+                Reason::ImageTooLarge(limit) | Reason::TotalImagesTooLarge(limit) => {
+                    Some(limit.limit_bytes)
+                }
+                _ => None,
+            };
+            let failure = face::Failure::invalid(reason).at_image(face::ImageRole::Live);
+            assert_eq!(
+                worker_failure(&failure),
+                FailureReason::InputRejected {
+                    reason: expected,
+                    image: Some(ImageRole::LiveSelfie),
+                    limit_bytes
+                }
+            );
+        }
+    }
+    #[test]
+    fn lightguard_targets_and_report_survive_worker_rejection() {
+        for (worker_target, expected) in [
+            (face::ValidationTarget::Image, ValidationTarget::Image),
+            (
+                face::ValidationTarget::IlluminatedFrame,
+                ValidationTarget::IlluminatedFrame,
+            ),
+            (
+                face::ValidationTarget::UnilluminatedFrame,
+                ValidationTarget::UnilluminatedFrame,
+            ),
+            (
+                face::ValidationTarget::LightGuardPair,
+                ValidationTarget::LightGuardPair,
+            ),
+        ] {
+            let mut failure =
+                face::Failure::validation(face::ValidationReason::EyesClosed, worker_target)
+                    .at_image(face::ImageRole::Live);
+            failure.debug_report = Some("{\"frame\":1}".to_owned());
+            let response = BiometricError::from(failure).into_result().unwrap();
+            assert_eq!(
+                response,
+                flamingo_verifier_sealed_types::MatchResult::Failed {
+                    reason: FailureReason::ImageRejected {
+                        image: ImageRole::LiveSelfie,
+                        reason: ImageFailureReason::EyesClosed,
+                        target: Some(expected),
+                    },
+                    debug_report: Some("{\"frame\":1}".to_owned()).into(),
+                }
+            );
         }
     }
 }

@@ -10,12 +10,17 @@
 
 mod errors;
 mod messages;
+mod response;
 
 /// Pontifex channel domain shared by the consumer and enclave.
-pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v2";
+pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v3";
 
-pub use errors::{ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole};
+pub use errors::{
+    ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole, InputFailureReason,
+    ValidationTarget,
+};
 pub use messages::*;
+pub use response::*;
 pub use serde_bytes::ByteBuf;
 
 /// Bound on sealed match bytes before decryption.

@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
+use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
 #[cfg(any(target_os = "linux", test))]
 use tokio::{sync::Mutex, time::timeout};
 
@@ -19,7 +19,7 @@ pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_IMAG
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Normalized inference scores; policy and signed claims belong to the operation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct DeepFaceScores {
     /// Credential versus live image.
     pub credential_live: f64,
@@ -27,6 +27,8 @@ pub struct DeepFaceScores {
     pub credential_challenge: f64,
     /// Live versus challenge image.
     pub live_challenge: f64,
+    /// Original bounded worker diagnostics.
+    pub debug_report: DebugReport,
 }
 
 /// Normalized credential-free inference score.
@@ -34,6 +36,8 @@ pub struct DeepFaceScores {
 pub struct GrayBadgeScores {
     /// Live versus challenge image.
     pub live_challenge: f64,
+    /// Original bounded worker diagnostics.
+    pub debug_report: DebugReport,
 }
 
 /// Separates image rejections from unavailable infrastructure.
@@ -43,22 +47,40 @@ pub enum BiometricError {
     Busy,
     /// Structured input or biological rejection.
     Rejected(FailureReason),
+    /// Worker rejection with its bounded report.
+    AnalysisRejected {
+        /// Semantic rejection.
+        reason: FailureReason,
+        /// Diagnostics produced before rejection.
+        debug_report: DebugReport,
+    },
     /// Infrastructure could not complete the operation.
     Internal,
 }
 
 impl BiometricError {
-    pub(crate) const fn into_result(
-        self,
-    ) -> Result<flamingo_verifier_sealed_types::MatchResult, flamingo_verifier_enclave_types::Error>
-    {
+    pub(crate) fn into_result(self) -> Result<MatchResult, flamingo_verifier_enclave_types::Error> {
         use flamingo_verifier_enclave_types::Error;
-        use flamingo_verifier_sealed_types::MatchResult;
 
         match self {
             Self::Busy => Err(Error::NotReady),
-            Self::Internal | Self::Rejected(FailureReason::Internal) => Err(Error::Internal),
-            Self::Rejected(reason) => Ok(MatchResult::Failed(reason)),
+            Self::Internal
+            | Self::Rejected(FailureReason::Internal)
+            | Self::AnalysisRejected {
+                reason: FailureReason::Internal,
+                ..
+            } => Err(Error::Internal),
+            Self::AnalysisRejected {
+                reason,
+                debug_report,
+            } => Ok(MatchResult::Failed {
+                reason,
+                debug_report,
+            }),
+            Self::Rejected(reason) => Ok(MatchResult::Failed {
+                reason,
+                debug_report: DebugReport::NotProduced,
+            }),
         }
     }
 }
@@ -142,7 +164,7 @@ mod sandboxed {
         response::Outcome,
     };
     use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
-    use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
+    use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
 
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
@@ -164,7 +186,7 @@ mod sandboxed {
                 .await?
                 .map_err(|error| match error {
                     WorkerError::Rpc(SandboxClientError::AnalysisFailed(failure)) => {
-                        BiometricError::from(&failure)
+                        BiometricError::from(failure)
                     }
                     WorkerError::Rpc(SandboxClientError::InvalidImages) => {
                         BiometricError::Rejected(FailureReason::MalformedInputs)
@@ -239,6 +261,7 @@ mod sandboxed {
                         .similarity_live_challenge
                         .expect("client validates required scores"),
                 ),
+                debug_report: scores.debug_report.into(),
             })
         }
 
@@ -262,6 +285,7 @@ mod sandboxed {
                         .similarity_live_challenge
                         .expect("client validates required score"),
                 ),
+                debug_report: scores.debug_report.into(),
             })
         }
 
@@ -315,7 +339,6 @@ mod tests {
     #[test]
     fn infrastructure_errors_stay_distinct_from_encrypted_rejections() {
         use flamingo_verifier_enclave_types::Error;
-        use flamingo_verifier_sealed_types::MatchResult;
 
         assert_eq!(BiometricError::Busy.into_result(), Err(Error::NotReady));
         for error in [
@@ -326,7 +349,10 @@ mod tests {
         }
         assert_eq!(
             BiometricError::Rejected(FailureReason::MalformedInputs).into_result(),
-            Ok(MatchResult::Failed(FailureReason::MalformedInputs))
+            Ok(MatchResult::Failed {
+                reason: FailureReason::MalformedInputs,
+                debug_report: DebugReport::NotProduced
+            })
         );
     }
 

@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use flamingo_verifier_api_types::{EnclaveAssignmentResponse, ErrorEnvelope};
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
-use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use flamingo_verifier_sealed_types::{DebugReport, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -49,36 +49,43 @@ pub fn open_verified_match(
     let plaintext = opener
         .open_from_enclave(ciphertext)
         .map_err(Error::Channel)?;
-    let result = MatchResult::from_padded_cbor(&plaintext).map_err(|_| Error::MalformedResult)?;
+    let response = MatchResult::from_padded_cbor(&plaintext).map_err(|_| Error::MalformedResult)?;
 
-    // Only a statement needs the key, so a rejection skips the attestation entirely.
-    if let MatchResult::Success(statement) = result {
-        // Response encryption alone does not authenticate the signing key.
-        let attested = verifier.verify_attestation_document(&statement.signing_key_attestation)?;
-        let signing_key = <[u8; 32]>::try_from(
-            attested
-                .document()
-                .public_key
-                .as_ref()
-                .ok_or(Error::InvalidSigningKey)?
-                .as_slice(),
-        )
-        .map_err(|_| Error::InvalidSigningKey)
-        .and_then(|bytes| {
-            EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
-        })?;
-
-        let claims = match_token::verify(&statement.token, &signing_key)
-            .map_err(|_| Error::StatementInvalid)?;
-        return Ok(VerifiedMatchResult::Success(Box::new(VerifiedMatch {
+    match response {
+        MatchResult::Success {
             statement,
-            claims,
-        })));
-    }
+            debug_report,
+        } => {
+            // Response encryption alone does not authenticate the signing key.
+            let attested =
+                verifier.verify_attestation_document(&statement.signing_key_attestation)?;
+            let signing_key = <[u8; 32]>::try_from(
+                attested
+                    .document()
+                    .public_key
+                    .as_ref()
+                    .ok_or(Error::InvalidSigningKey)?
+                    .as_slice(),
+            )
+            .map_err(|_| Error::InvalidSigningKey)
+            .and_then(|bytes| {
+                EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
+            })?;
 
-    match result {
-        MatchResult::Failed(reason) => Ok(VerifiedMatchResult::Failed(reason)),
-        MatchResult::Success(_) => unreachable!("success was verified above"),
+            let claims = match_token::verify(&statement.token, &signing_key)
+                .map_err(|_| Error::StatementInvalid)?;
+            Ok(VerifiedMatchResult::Success {
+                verified: Box::new(VerifiedMatch { statement, claims }),
+                debug_report,
+            })
+        }
+        MatchResult::Failed {
+            reason,
+            debug_report,
+        } => Ok(VerifiedMatchResult::Failed {
+            reason,
+            debug_report,
+        }),
     }
 }
 
@@ -87,12 +94,11 @@ pub fn ensure_claims_match(
     inputs: &MatchInputs,
     result: &VerifiedMatchResult,
 ) -> Result<(), Error> {
-    if let VerifiedMatchResult::Success(verified) = result
+    if let VerifiedMatchResult::Success { verified, .. } = result
         && !inputs.matches_claims(&verified.claims)
     {
         return Err(Error::StatementInvalid);
     }
-
     Ok(())
 }
 
@@ -204,11 +210,21 @@ pub struct VerifiedMatch {
     pub claims: MatchClaims,
 }
 
-/// Verified success or an encrypted unsigned rejection.
+/// Verified success or an encrypted unsigned rejection, with bounded worker diagnostics.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VerifiedMatchResult {
     /// Attested signed result and parsed claims.
-    Success(Box<VerifiedMatch>),
+    Success {
+        /// Signature-verified statement and claims.
+        verified: Box<VerifiedMatch>,
+        /// Original worker diagnostics, not signed proof claims.
+        debug_report: DebugReport,
+    },
     /// No statement issued.
-    Failed(flamingo_verifier_sealed_types::FailureReason),
+    Failed {
+        /// Input or biometric rejection.
+        reason: flamingo_verifier_sealed_types::FailureReason,
+        /// Original worker diagnostics, if produced.
+        debug_report: DebugReport,
+    },
 }

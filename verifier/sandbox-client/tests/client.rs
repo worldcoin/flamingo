@@ -127,7 +127,7 @@ fn deepface_graybadge_and_typed_biological_failure_share_one_connection() {
 }
 
 #[test]
-fn large_lightguard_rejection_is_stripped_and_connection_remains_usable() {
+fn large_lightguard_report_survives_and_connection_remains_usable() {
     let (client, mut server) = UnixStream::pair().unwrap();
     let (done, wait) = std::sync::mpsc::channel();
     let failure = FaceFailure::validation(
@@ -135,7 +135,8 @@ fn large_lightguard_rejection_is_stripped_and_connection_remains_usable() {
         ValidationTarget::LightGuardPair,
     )
     .at_image(ImageRole::Live);
-    let expected = failure.clone();
+    let mut expected = failure.clone();
+    expected.debug_report = Some("x".repeat(41_739));
     let peer = thread::spawn(move || {
         ready(&mut server);
         let r =
@@ -336,7 +337,7 @@ fn partial_progress_does_not_extend_the_request_deadline() {
 }
 
 #[test]
-fn worker_diagnostics_never_escape_the_client() {
+fn reports_survive_recoverable_outcomes_but_never_error_formatting() {
     for internal in [false, true] {
         let (client, mut server) = UnixStream::pair().unwrap();
         let (done, wait) = std::sync::mpsc::channel();
@@ -378,11 +379,18 @@ fn worker_diagnostics_never_escape_the_client() {
             wait.recv().unwrap();
         });
         let mut client = SandboxClient::new(client, config()).unwrap();
-        assert_eq!(client.evaluate(request()).unwrap(), scores());
+        let mut expected = scores();
+        if let Outcome::DeepFace(result) = &mut expected {
+            result.debug_report = Some("sensitive model diagnostic".to_owned());
+        }
+        assert_eq!(client.evaluate(request()).unwrap(), expected);
         let error = client.evaluate(request()).unwrap_err();
         assert!(!format!("{error} {error:?}").contains("sensitive"));
         match error {
-            SandboxClientError::AnalysisFailed(failure) => assert!(failure.debug_report.is_none()),
+            SandboxClientError::AnalysisFailed(failure) => assert_eq!(
+                failure.debug_report.as_deref(),
+                Some("sensitive image diagnostic")
+            ),
             SandboxClientError::Protocol(failure) => {
                 let Some(biometric_engines_protocol::failure::Kind::Face(failure)) = failure.kind
                 else {

@@ -37,6 +37,38 @@ pub enum ComparisonRole {
     SelfieChallenge,
 }
 
+/// Which part of a capture failed validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationTarget {
+    /// A single image.
+    Image,
+    /// The illuminated frame.
+    IlluminatedFrame,
+    /// The unilluminated frame.
+    UnilluminatedFrame,
+    /// The challenge-response pair.
+    LightGuardPair,
+}
+
+/// Exact malformed-input constraints reported by the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputFailureReason {
+    /// Required image is missing.
+    MissingImage,
+    /// Capture source is missing.
+    MissingSource,
+    /// Matching-frame selection is invalid.
+    InvalidMatchingFrame,
+    /// Image buffer is empty.
+    EmptyImage,
+    /// One image exceeds its budget.
+    ImageTooLarge,
+    /// Combined images exceed their budget.
+    TotalImagesTooLarge,
+}
+
 /// All request-derived failures remain encrypted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,10 +81,15 @@ pub enum FailureReason {
     ThumbnailHashMismatch,
     /// Nonfinite or out-of-range threshold.
     InvalidThreshold,
-    /// Empty image buffer.
-    EmptyImage,
-    /// Image or aggregate budget exceeded.
-    InputTooLarge,
+    /// Structured malformed-input feedback.
+    InputRejected {
+        /// Exact failed constraint.
+        reason: InputFailureReason,
+        /// Semantic input location, if supplied.
+        image: Option<ImageRole>,
+        /// Byte limit, when the constraint is a size limit.
+        limit_bytes: Option<u64>,
+    },
     /// A named comparison did not meet policy.
     MatchBelowThreshold(ComparisonRole),
     /// Image analysis rejection with semantic location.
@@ -61,6 +98,8 @@ pub enum FailureReason {
         image: ImageRole,
         /// Approved reason.
         reason: ImageFailureReason,
+        /// Frame or pair examined by validation; absent for decode/template failure.
+        target: Option<ValidationTarget>,
     },
     /// Matching failed on a named comparison.
     MatchingFailed(ComparisonRole),
