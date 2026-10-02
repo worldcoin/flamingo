@@ -4,7 +4,7 @@ use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, Match
 use flamingo_verifier_protocol::match_token::{MatchClaims, MatchOperation};
 use flamingo_verifier_sealed_types::{
     AttestedStatement, ComparisonRole, DeepFaceInputs, FailureReason, GrayBadgeInputs, MatchInputs,
-    MatchResult, valid_similarity,
+    MatchObservations, MatchResponse as SealedResponse, MatchResult, valid_similarity,
 };
 use sha2::{Digest, Sha256};
 
@@ -32,7 +32,7 @@ pub async fn handler(
     let result = match inputs {
         Ok(MatchInputs::DeepFace(inputs)) => deepface(state, inputs).await?,
         Ok(MatchInputs::GrayBadge(inputs)) => graybadge(state, inputs).await?,
-        Err(reason) => MatchResult::Failed(reason),
+        Err(reason) => MatchResult::Failed(reason).into(),
     };
 
     blocking(move || {
@@ -51,7 +51,7 @@ pub async fn handler(
 async fn deepface(
     state: Arc<EnclaveState>,
     inputs: DeepFaceInputs,
-) -> Result<MatchResult, enclave_types::Error> {
+) -> Result<SealedResponse, enclave_types::Error> {
     let prepared = blocking(move || {
         let input = MatchInputs::DeepFace(inputs);
         input.validate()?;
@@ -72,7 +72,7 @@ async fn deepface(
     .await?;
     let (inputs, mut claims) = match prepared {
         Ok(prepared) => prepared,
-        Err(reason) => return Ok(MatchResult::Failed(reason)),
+        Err(reason) => return Ok(MatchResult::Failed(reason).into()),
     };
 
     let scores = match state
@@ -88,24 +88,37 @@ async fn deepface(
         Err(error) => return error.into_result(),
     };
 
+    let observations = MatchObservations::DeepFace {
+        credential_live: scores.credential_live,
+        credential_challenge: scores.credential_challenge,
+        live_challenge: scores.live_challenge,
+    };
     for (score, role) in [
         (scores.credential_live, ComparisonRole::OrbSelfie),
         (scores.credential_challenge, ComparisonRole::OrbChallenge),
         (scores.live_challenge, ComparisonRole::SelfieChallenge),
     ] {
         if let Err(reason) = check_score(score, inputs.match_threshold, role) {
-            return crate::biometric_engine::BiometricError::Rejected(reason).into_result();
+            let mut response =
+                crate::biometric_engine::BiometricError::Rejected(reason).into_result()?;
+            response.observations = Some(observations);
+            response.debug_report = scores.debug_report;
+            return Ok(response);
         }
     }
 
     claims.match_coefficient = token_score(scores.credential_live);
-    sign(state, claims).await
+    Ok(SealedResponse {
+        outcome: sign(state, claims).await?,
+        observations: Some(observations),
+        debug_report: scores.debug_report,
+    })
 }
 
 async fn graybadge(
     state: Arc<EnclaveState>,
     inputs: GrayBadgeInputs,
-) -> Result<MatchResult, enclave_types::Error> {
+) -> Result<SealedResponse, enclave_types::Error> {
     let prepared = blocking(move || {
         let input = MatchInputs::GrayBadge(inputs);
         input.validate()?;
@@ -124,7 +137,7 @@ async fn graybadge(
     .await?;
     let (inputs, mut claims) = match prepared {
         Ok(prepared) => prepared,
-        Err(reason) => return Ok(MatchResult::Failed(reason)),
+        Err(reason) => return Ok(MatchResult::Failed(reason).into()),
     };
 
     let scores = match state
@@ -135,16 +148,27 @@ async fn graybadge(
         Ok(scores) => scores,
         Err(error) => return error.into_result(),
     };
+    let observations = MatchObservations::GrayBadge {
+        live_challenge: scores.live_challenge,
+    };
     if let Err(reason) = check_score(
         scores.live_challenge,
         inputs.match_threshold,
         ComparisonRole::SelfieChallenge,
     ) {
-        return crate::biometric_engine::BiometricError::Rejected(reason).into_result();
+        let mut response =
+            crate::biometric_engine::BiometricError::Rejected(reason).into_result()?;
+        response.observations = Some(observations);
+        response.debug_report = scores.debug_report;
+        return Ok(response);
     }
 
     claims.match_coefficient = token_score(scores.live_challenge);
-    sign(state, claims).await
+    Ok(SealedResponse {
+        outcome: sign(state, claims).await?,
+        observations: Some(observations),
+        debug_report: scores.debug_report,
+    })
 }
 
 fn check_score(
@@ -205,7 +229,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     struct Engine {
-        third: f64,
+        third: f32,
     }
 
     #[async_trait::async_trait]
@@ -230,9 +254,10 @@ mod tests {
             }
             assert_eq!(&challenge[..], b"challenge");
             Ok(DeepFaceScores {
-                credential_live: 0.95,
-                credential_challenge: 0.9,
-                live_challenge: self.third,
+                credential_live: f64::from(0.95f32),
+                credential_challenge: f64::from(0.9f32),
+                live_challenge: f64::from(self.third),
+                debug_report: Some("{\"engine\":\"test\"}".to_owned()).into(),
             })
         }
 
@@ -242,7 +267,8 @@ mod tests {
             _: Vec<u8>,
         ) -> Result<GrayBadgeScores, BiometricError> {
             Ok(GrayBadgeScores {
-                live_challenge: self.third,
+                live_challenge: f64::from(self.third),
+                debug_report: Some("{\"engine\":\"test\"}".to_owned()).into(),
             })
         }
     }
@@ -272,7 +298,7 @@ mod tests {
         Arc::new(EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine)).unwrap())
     }
 
-    async fn exchange(state: Arc<EnclaveState>, inputs: &MatchInputs) -> (MatchResult, usize) {
+    async fn exchange(state: Arc<EnclaveState>, inputs: &MatchInputs) -> (SealedResponse, usize) {
         let consumer = ChannelConsumer::from_unverified_public_key(
             ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
             &state.channel().public_key(),
@@ -291,8 +317,10 @@ mod tests {
         .unwrap();
         let size = response.ciphertext.len();
         (
-            MatchResult::from_padded_cbor(&opener.open_from_enclave(&response.ciphertext).unwrap())
-                .unwrap(),
+            SealedResponse::from_padded_cbor(
+                &opener.open_from_enclave(&response.ciphertext).unwrap(),
+            )
+            .unwrap(),
             size,
         )
     }
@@ -302,7 +330,19 @@ mod tests {
         let state = state(Engine { third: 0.85 });
         let inputs = inputs();
         let (result, _) = exchange(Arc::clone(&state), &inputs).await;
-        let MatchResult::Success(statement) = result else {
+        assert_eq!(
+            result.observations,
+            Some(MatchObservations::DeepFace {
+                credential_live: f64::from(0.95f32),
+                credential_challenge: f64::from(0.9f32),
+                live_challenge: f64::from(0.85f32),
+            })
+        );
+        assert!(matches!(
+            result.debug_report,
+            flamingo_verifier_sealed_types::DebugReport::Available { .. }
+        ));
+        let MatchResult::Success(statement) = result.outcome else {
             panic!("expected signed result")
         };
         let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
@@ -330,10 +370,12 @@ mod tests {
     #[tokio::test]
     async fn third_comparison_is_a_required_gate_and_failure_is_padded() {
         let (success, success_len) = exchange(state(Engine { third: 0.9 }), &inputs()).await;
-        assert!(matches!(success, MatchResult::Success(_)));
+        assert!(matches!(success.outcome, MatchResult::Success(_)));
         let (failure, failure_len) = exchange(state(Engine { third: 0.1 }), &inputs()).await;
+        assert_eq!(failure.debug_report, success.debug_report);
+        assert!(failure.observations.is_some());
         assert_eq!(
-            failure,
+            failure.outcome,
             MatchResult::Failed(FailureReason::MatchBelowThreshold(
                 ComparisonRole::SelfieChallenge
             ))
@@ -346,7 +388,12 @@ mod tests {
         let state = state(Engine { third: 0.9 });
         let inputs = gray(0.8);
         let (result, length) = exchange(Arc::clone(&state), &inputs).await;
-        let MatchResult::Success(statement) = result else {
+        assert!(result.observations.is_some());
+        assert!(matches!(
+            result.debug_report,
+            flamingo_verifier_sealed_types::DebugReport::Available { .. }
+        ));
+        let MatchResult::Success(statement) = result.outcome else {
             panic!("expected signed GrayBadge result")
         };
         let claims = match_token::verify(&statement.token, state.signing_public_key()).unwrap();
@@ -354,8 +401,10 @@ mod tests {
         assert!(inputs.matches_claims(&claims));
 
         let (failure, failure_length) = exchange(state, &gray(0.95)).await;
+        assert_eq!(failure.debug_report, result.debug_report);
+        assert!(failure.observations.is_some());
         assert_eq!(
-            failure,
+            failure.outcome,
             MatchResult::Failed(FailureReason::MatchBelowThreshold(
                 ComparisonRole::SelfieChallenge
             ))
@@ -381,7 +430,12 @@ mod tests {
                 };
                 let state = state(Engine { third: 0.9 });
                 let (result, _) = exchange(Arc::clone(&state), &inputs).await;
-                let MatchResult::Success(statement) = result else {
+                assert!(result.observations.is_some());
+                assert!(matches!(
+                    result.debug_report,
+                    flamingo_verifier_sealed_types::DebugReport::Available { .. }
+                ));
+                let MatchResult::Success(statement) = result.outcome else {
                     panic!("expected LightGuard result")
                 };
                 let claims =
@@ -418,7 +472,8 @@ mod tests {
         assert_eq!(
             exchange(state(UnusedBiometricEngine), &MatchInputs::DeepFace(inputs))
                 .await
-                .0,
+                .0
+                .outcome,
             MatchResult::Failed(FailureReason::ThumbnailHashMismatch)
         );
     }

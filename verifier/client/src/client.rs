@@ -4,7 +4,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use flamingo_verifier_api_types::{EnclaveAssignmentResponse, ErrorEnvelope};
 use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
-use flamingo_verifier_sealed_types::{MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use flamingo_verifier_sealed_types::{
+    DebugReport, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchObservations, MatchResponse, MatchResult,
+};
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -45,12 +47,18 @@ pub fn open_verified_match(
     verifier: &Verifier,
     ciphertext: &[u8],
     opener: pontifex::ResponseOpener,
-) -> Result<VerifiedMatchResult, Error> {
+) -> Result<VerifiedMatchResponse, Error> {
     let plaintext = opener
         .open_from_enclave(ciphertext)
         .map_err(Error::Channel)?;
-    let result = MatchResult::from_padded_cbor(&plaintext).map_err(|_| Error::MalformedResult)?;
+    let response =
+        MatchResponse::from_padded_cbor(&plaintext).map_err(|_| Error::MalformedResult)?;
 
+    let MatchResponse {
+        outcome: result,
+        observations,
+        debug_report,
+    } = response;
     // Only a statement needs the key, so a rejection skips the attestation entirely.
     if let MatchResult::Success(statement) = result {
         // Response encryption alone does not authenticate the signing key.
@@ -70,14 +78,19 @@ pub fn open_verified_match(
 
         let claims = match_token::verify(&statement.token, &signing_key)
             .map_err(|_| Error::StatementInvalid)?;
-        return Ok(VerifiedMatchResult::Success(Box::new(VerifiedMatch {
-            statement,
-            claims,
-        })));
+        return Ok(VerifiedMatchResponse {
+            outcome: VerifiedMatchResult::Success(Box::new(VerifiedMatch { statement, claims })),
+            observations,
+            debug_report,
+        });
     }
 
     match result {
-        MatchResult::Failed(reason) => Ok(VerifiedMatchResult::Failed(reason)),
+        MatchResult::Failed(reason) => Ok(VerifiedMatchResponse {
+            outcome: VerifiedMatchResult::Failed(reason),
+            observations,
+            debug_report,
+        }),
         MatchResult::Success(_) => unreachable!("success was verified above"),
     }
 }
@@ -85,12 +98,29 @@ pub fn open_verified_match(
 /// Rejects a verified result whose claims do not match the requested inputs.
 pub fn ensure_claims_match(
     inputs: &MatchInputs,
-    result: &VerifiedMatchResult,
+    result: &VerifiedMatchResponse,
 ) -> Result<(), Error> {
-    if let VerifiedMatchResult::Success(verified) = result
-        && !inputs.matches_claims(&verified.claims)
+    if result
+        .observations
+        .is_some_and(|scores| !scores.matches_inputs(inputs))
     {
-        return Err(Error::StatementInvalid);
+        return Err(Error::MalformedResult);
+    }
+    if let VerifiedMatchResult::Success(verified) = &result.outcome {
+        if !inputs.matches_claims(&verified.claims) {
+            return Err(Error::StatementInvalid);
+        }
+        let scores = result.observations.ok_or(Error::MalformedResult)?;
+        let threshold = match inputs {
+            MatchInputs::DeepFace(i) => i.match_threshold,
+            MatchInputs::GrayBadge(i) => i.match_threshold,
+        };
+        if !scores.meets_threshold(threshold)
+            || scores.token_score().to_bits()
+                != f64::from(verified.claims.match_coefficient).to_bits()
+        {
+            return Err(Error::MalformedResult);
+        }
     }
 
     Ok(())
@@ -211,4 +241,84 @@ pub enum VerifiedMatchResult {
     Success(Box<VerifiedMatch>),
     /// No statement issued.
     Failed(flamingo_verifier_sealed_types::FailureReason),
+}
+
+/// Client response with separately verified outcome and auxiliary observations/diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedMatchResponse {
+    /// Signature-verified success or encrypted unsigned rejection.
+    pub outcome: VerifiedMatchResult,
+    /// Complete comparisons; not additional signed proof claims.
+    pub observations: Option<MatchObservations>,
+    /// Original bounded diagnostics, not signed proof claims.
+    pub debug_report: DebugReport,
+}
+
+impl From<VerifiedMatchResult> for VerifiedMatchResponse {
+    fn from(outcome: VerifiedMatchResult) -> Self {
+        Self {
+            outcome,
+            observations: None,
+            debug_report: DebugReport::NotProduced,
+        }
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    use flamingo_verifier_protocol::match_token::{MatchOperation, MatchToken};
+    use flamingo_verifier_sealed_types::{AttestedStatement, GrayBadgeInputs, LiveCapture};
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn observations_cannot_change_operation_or_disagree_with_signed_score() {
+        let inputs = MatchInputs::GrayBadge(GrayBadgeInputs {
+            live: LiveCapture::Vanilla(b"live".to_vec().into()),
+            rtms_challenge: b"challenge".to_vec().into(),
+            match_threshold: 0.5,
+        });
+        let MatchInputs::GrayBadge(ref gray) = inputs else {
+            unreachable!()
+        };
+        let mut response = VerifiedMatchResponse {
+            outcome: VerifiedMatchResult::Success(Box::new(VerifiedMatch {
+                statement: AttestedStatement {
+                    token: MatchToken::from_bytes(vec![]),
+                    signing_key_attestation: vec![],
+                },
+                claims: MatchClaims {
+                    operation: MatchOperation::GrayBadge,
+                    live_capture_hash: gray.live.commitment(),
+                    challenger_image_hash: Sha256::digest(b"challenge").into(),
+                    match_coefficient: 0.75,
+                },
+            })),
+            observations: Some(MatchObservations::GrayBadge {
+                live_challenge: 0.75,
+            }),
+            debug_report: DebugReport::NotProduced,
+        };
+        assert!(ensure_claims_match(&inputs, &response).is_ok());
+        for observations in [
+            None,
+            Some(MatchObservations::GrayBadge {
+                live_challenge: 0.9,
+            }),
+            Some(MatchObservations::GrayBadge {
+                live_challenge: f64::NAN,
+            }),
+            Some(MatchObservations::DeepFace {
+                credential_live: 0.75,
+                credential_challenge: 0.9,
+                live_challenge: 0.9,
+            }),
+        ] {
+            response.observations = observations;
+            assert!(matches!(
+                ensure_claims_match(&inputs, &response),
+                Err(Error::MalformedResult)
+            ));
+        }
+    }
 }

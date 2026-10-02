@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         .request_match(&inputs)
         .await
         .context("match exchange did not verify")?;
-    match result {
+    match result.outcome {
         VerifiedMatchResult::Success(_) => {
             println!("attested match succeeded; operation, capture commitments and score verified");
         }

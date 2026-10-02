@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** return complete comparison observations, bounded worker reports and structured rejection details in the version 3 match response. Increase fixed response padding to 256 KiB with a four-byte length prefix; update clients and enclave measurements together. Signed token claims remain unchanged.
+
 ## [0.6.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.5.0...flamingo-verifier-client-v0.6.0) - 2026-09-28
 
 ### Other

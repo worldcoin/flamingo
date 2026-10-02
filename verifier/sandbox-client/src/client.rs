@@ -201,7 +201,6 @@ impl SandboxClient {
         let mut result = response.outcome.ok_or(SandboxClientError::WrongResponse)?;
         let scores = match (&mut result, kind) {
             (Outcome::DeepFace(r), 0) => {
-                r.debug_report = None;
                 vec![
                     r.similarity_credential_live,
                     r.similarity_credential_challenge,
@@ -209,15 +208,13 @@ impl SandboxClient {
                 ]
             }
             (Outcome::GrayBadge(r), 1) => {
-                r.debug_report = None;
                 vec![r.similarity_live_challenge]
             }
             (Outcome::Failure(failure), _) => {
-                if let Some(Kind::Face(error)) = &mut failure.kind {
-                    error.debug_report = None;
-                    if error.code != face::FailureCode::Internal as i32 {
-                        return Err(SandboxClientError::AnalysisFailed(error.clone()));
-                    }
+                if let Some(Kind::Face(error)) = &mut failure.kind
+                    && error.code != face::FailureCode::Internal as i32
+                {
+                    return Err(SandboxClientError::AnalysisFailed(error.clone()));
                 }
                 return Err(SandboxClientError::protocol(failure.clone()));
             }
@@ -235,7 +232,7 @@ impl SandboxClient {
 }
 
 /// Payload-free errors; only input/biological failures leave the connection reusable.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Clone, thiserror::Error)]
 pub enum SandboxClientError {
     #[error("worker protocol failure")]
     Protocol(Failure),
@@ -261,6 +258,13 @@ pub enum SandboxClientError {
     UnsupportedOperation,
     #[error("worker request IDs exhausted")]
     RequestIdExhausted,
+}
+
+impl std::fmt::Debug for SandboxClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Error diagnostics must not expose worker reports in logs.
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 impl SandboxClientError {

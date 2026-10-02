@@ -25,7 +25,7 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::client::{
-    VerifiedAssignment, VerifiedMatchResult, classify_envelope, ensure_claims_match,
+    VerifiedAssignment, VerifiedMatchResponse, classify_envelope, ensure_claims_match,
     open_verified_match, verify_assignment,
 };
 use crate::config::Config;
@@ -65,7 +65,7 @@ impl FlamingoVerifierSession {
     pub async fn request_match(
         mut self,
         inputs: &MatchInputs,
-    ) -> Result<VerifiedMatchResult, Error> {
+    ) -> Result<VerifiedMatchResponse, Error> {
         let result = exchange_match(
             &mut self.socket,
             self.assignment.consumer(),
@@ -200,7 +200,7 @@ async fn exchange_match(
     inputs: &MatchInputs,
     verifier: &Verifier,
     request_timeout: Duration,
-) -> Result<VerifiedMatchResult, Error> {
+) -> Result<VerifiedMatchResponse, Error> {
     let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
     let (sealed, opener) = consumer
         .seal_to_enclave(&plaintext)
@@ -279,7 +279,8 @@ mod tests {
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
     use flamingo_verifier_protocol::match_token::MatchToken;
     use flamingo_verifier_sealed_types::{
-        AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult,
+        AttestedStatement, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResponse,
+        MatchResult,
     };
     use futures_util::{SinkExt, StreamExt};
     use pontifex::attestation::PcrConfig;
@@ -289,8 +290,8 @@ mod tests {
     use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
 
     use super::{Socket, exchange_match, websocket_url};
-    use crate::VerifiedMatchResult;
     use crate::error::Error;
+    use crate::{VerifiedMatchResponse, VerifiedMatchResult};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -362,9 +363,10 @@ mod tests {
         )
     }
 
-    async fn rejection_round_trip(foreign_reply: bool) -> Result<VerifiedMatchResult, Error> {
+    async fn rejection_round_trip(foreign_reply: bool) -> Result<VerifiedMatchResponse, Error> {
         let responder = responder();
-        let answer = MatchResult::Failed(FailureReason::MalformedInputs);
+        let mut answer = MatchResponse::from(MatchResult::Failed(FailureReason::MalformedInputs));
+        answer.debug_report = Some("{\"diagnostic\":1}".to_owned()).into();
         let server = Arc::clone(&responder);
 
         let mut socket = connect_to_stub(move |mut socket| async move {
@@ -408,8 +410,12 @@ mod tests {
             .await
             .expect("a rejection is a normal return");
 
+        assert_eq!(
+            result.debug_report,
+            Some("{\"diagnostic\":1}".to_owned()).into()
+        );
         assert!(matches!(
-            result,
+            result.outcome,
             VerifiedMatchResult::Failed(FailureReason::MalformedInputs)
         ));
     }
@@ -575,7 +581,9 @@ mod tests {
                 panic!("expected a binary match frame");
             };
             let (_, sealer) = server.open(&ciphertext).expect("opens its own request");
-            let encoded = answer.to_padded_cbor().expect("fits the envelope");
+            let encoded = MatchResponse::from(answer)
+                .to_padded_cbor()
+                .expect("fits the envelope");
             socket
                 .send(Message::Binary(sealer.seal(&encoded).unwrap().into()))
                 .await
