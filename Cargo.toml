@@ -23,7 +23,7 @@ repository = "https://github.com/worldcoin/flamingo"
 publish = false
 
 [workspace.dependencies]
-biometric-engines-protocol = "=0.1.0"
+biometric-engines-protocol = "0.1.0"
 anyhow = "1.0"
 ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5" }
 ark-ff = "0.5"
