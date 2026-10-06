@@ -170,7 +170,13 @@ const fn validation_reason(reason: face::ValidationReason) -> Option<ImageFailur
         face::ValidationReason::HairOcclusionDetected => ImageFailureReason::HairOcclusionDetected,
         face::ValidationReason::FasOcclusionDetected => ImageFailureReason::FasOcclusionDetected,
         face::ValidationReason::SpoofDetected => ImageFailureReason::SpoofDetected,
-        face::ValidationReason::DepthSpoofDetected => ImageFailureReason::DepthSpoofDetected,
+        // Preserve the existing sealed vocabulary understood by deployed mobile clients.
+        // The worker's more specific diagnostics remain in debug_report.
+        face::ValidationReason::DepthSpoofDetected
+        | face::ValidationReason::DepthGuardScoreTooHigh => ImageFailureReason::DepthSpoofDetected,
+        face::ValidationReason::PerspectiveDistortionScoreTooLow => {
+            ImageFailureReason::SpoofDetected
+        }
         face::ValidationReason::ThermalSpoofDetected => ImageFailureReason::ThermalSpoofDetected,
         face::ValidationReason::AgeBelowThreshold => ImageFailureReason::AgeBelowThreshold,
         face::ValidationReason::NoFaceDetected => ImageFailureReason::NoFaceDetected,
@@ -222,6 +228,37 @@ mod tests {
             worker_failure(&face::Failure::new(FailureCode::InvalidImage)),
             FailureReason::Internal
         );
+    }
+
+    #[test]
+    fn published_worker_liveness_failures_remain_compatible_rejections() {
+        for (worker_reason, expected_reason) in [
+            (
+                face::ValidationReason::DepthGuardScoreTooHigh,
+                ImageFailureReason::DepthSpoofDetected,
+            ),
+            (
+                face::ValidationReason::PerspectiveDistortionScoreTooLow,
+                ImageFailureReason::SpoofDetected,
+            ),
+        ] {
+            let mut failure =
+                face::Failure::validation(worker_reason, face::ValidationTarget::LightGuardPair)
+                    .at_image(face::ImageRole::Live);
+            failure.debug_report = Some("{\"validation\":\"rejected\"}".to_owned());
+            let response = BiometricError::from(failure).into_result().unwrap();
+            assert_eq!(
+                response,
+                flamingo_verifier_sealed_types::MatchResult::Failed {
+                    reason: FailureReason::ImageRejected {
+                        image: ImageRole::LiveSelfie,
+                        reason: expected_reason,
+                        target: Some(ValidationTarget::LightGuardPair),
+                    },
+                    debug_report: Some("{\"validation\":\"rejected\"}".to_owned()).into(),
+                }
+            );
+        }
     }
 
     #[test]
