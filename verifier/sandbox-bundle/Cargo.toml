@@ -20,5 +20,3 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = "0.7.2"
-flamingo-verifier-enclave-types.workspace = true
-pontifex = { workspace = true, features = ["client"] }

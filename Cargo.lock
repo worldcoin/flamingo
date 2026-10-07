@@ -1176,9 +1176,7 @@ dependencies = [
 name = "flamingo-verifier-sandbox-bundle"
 version = "0.8.0"
 dependencies = [
- "flamingo-verifier-enclave-types",
  "hex",
- "pontifex",
  "serde",
  "serde_json",
  "sha2 0.10.9",

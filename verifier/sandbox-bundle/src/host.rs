@@ -45,9 +45,6 @@ pub enum Error {
     /// The receiver returned a nonzero or malformed acknowledgement.
     #[error("sandbox bundle initialization acknowledgement is invalid")]
     Acknowledgement,
-    /// The broker's health request failed.
-    #[error("enclave health check failed")]
-    Health,
     /// No alternate transport is permitted on unsupported platforms.
     #[error("enclave provisioning requires Linux vsock")]
     Unsupported,
@@ -293,30 +290,4 @@ where
 #[cfg(not(target_os = "linux"))]
 async fn connect(_: u32, _: Duration) -> Result<tokio::io::DuplexStream, Error> {
     Err(Error::Unsupported)
-}
-
-/// Checks the initialized broker over its normal serving port, never bootstrap.
-pub async fn health(cid: u32) -> Result<(), Error> {
-    #[cfg(target_os = "linux")]
-    {
-        timeout(
-            Duration::from_secs(2),
-            pontifex::client::send(
-                pontifex::client::ConnectionDetails::new(cid, 1000),
-                &flamingo_verifier_enclave_types::HealthRequest,
-            ),
-        )
-        .await
-        .map_err(|_| Error::Timeout("health"))?
-        .map_err(|_| Error::Health)?
-        .map_err(|_| Error::Health)?;
-
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = cid;
-        Err(Error::Unsupported)
-    }
 }
