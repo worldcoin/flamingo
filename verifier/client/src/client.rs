@@ -8,10 +8,10 @@ use flamingo_verifier_protocol::{
     flamingo_token::{self, FlamingoClaims, canonical_field},
 };
 use flamingo_verifier_sealed_types::{
-    AatInputs, DebugReport, MATCH_CHANNEL_DOMAIN, MatchResult, Payload,
+    AatInputs, CHANNEL_DOMAIN, DebugReport, MatchResult, Payload,
 };
+use pontifex::ChannelConsumer;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
-use pontifex::{ChannelConsumer, ChannelDomain};
 
 use crate::config::Config;
 use crate::error::Error;
@@ -31,13 +31,9 @@ pub fn verify_assignment(
     let public_key = STANDARD
         .decode(&response.public_key)
         .map_err(|_| Error::MalformedAssignment)?;
-    let (consumer, attestation) = ChannelConsumer::from_attestation(
-        ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
-        verifier,
-        &document,
-        &public_key,
-    )
-    .map_err(Error::Channel)?;
+    let (consumer, attestation) =
+        ChannelConsumer::from_attestation(CHANNEL_DOMAIN, verifier, &document, &public_key)
+            .map_err(Error::Channel)?;
 
     Ok(VerifiedAssignment {
         attestation,

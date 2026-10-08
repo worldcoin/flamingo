@@ -78,8 +78,9 @@ license-files = [{ path = "../../LICENSE", hash = 0x51549d2b }]
 unknown-registry = "deny"
 unknown-git = "deny"
 unused-allowed-source = "allow"
-# Minijail, and `world-id-primitives` until its AAT verification is released.
+# Minijail, `world-id-primitives` and `pontifex` until the features used here are released.
 allow-git = [
     "https://github.com/google/minijail",
+    "https://github.com/worldcoin/pontifex",
     "https://github.com/worldcoin/world-id-protocol",
 ]
