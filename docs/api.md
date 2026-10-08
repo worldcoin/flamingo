@@ -30,7 +30,7 @@ Only `host_url` and `allowed_pcr_configs` are required. The other fields default
 
 The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. Identity and certificate expiry come from the verified document.
 
-The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/pull/979) request: `version`, `aud`, `nonce` and the nested `payload` (`pipeline`, `match_strictness`, `meta`, `entries`, `compare`, `engine_hash`). The enclave rejects any other shape, an `engine_hash` it did not load, and, until AAT verification lands, any `aat_inputs`. The interim pipelines are:
+The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/pull/979) request: `version`, `aud`, `nonce` and the nested `payload` (`pipeline`, `match_strictness`, `meta`, `entries`, `compare`, `engine_hash`). The enclave rejects any other shape and an `engine_hash` it did not load. Optional `aat_inputs` carry a WIP-106 Authenticator Assertion; the enclave verifies it with `cdh = R(SHA-256(payload))` before the Engine runs and signs its public values (`has_aat`, `now`, `authenticator_provider_key_hash`, `aat_flags`) into the token. The interim pipelines are:
 
 | `pipeline` | `compare` positions | Engine operation |
 | --- | --- | --- |

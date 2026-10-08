@@ -38,3 +38,4 @@ flamingo-verifier-sandbox-client.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+world-id-primitives.workspace = true

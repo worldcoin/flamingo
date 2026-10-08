@@ -7,7 +7,9 @@ use flamingo_verifier_protocol::{
     EdDSAPublicKey,
     flamingo_token::{self, FlamingoClaims, canonical_field},
 };
-use flamingo_verifier_sealed_types::{DebugReport, MATCH_CHANNEL_DOMAIN, MatchResult, Payload};
+use flamingo_verifier_sealed_types::{
+    AatInputs, DebugReport, MATCH_CHANNEL_DOMAIN, MatchResult, Payload,
+};
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -116,7 +118,12 @@ pub fn ensure_claims_match(
 ) -> Result<(), Error> {
     if let VerifiedMatchResult::Success { verified, .. } = result {
         let field = |bytes| canonical_field(bytes).map_err(|_| Error::StatementInvalid);
-        let expected = payload.claims(field(&context.aud)?, field(&context.nonce)?, None);
+        let aat = context
+            .aat_inputs
+            .map(|inputs| inputs.claims())
+            .transpose()
+            .map_err(|_| Error::StatementInvalid)?;
+        let expected = payload.claims(field(&context.aud)?, field(&context.nonce)?, aat);
         if verified.claims != expected {
             return Err(Error::StatementInvalid);
         }
@@ -131,6 +138,8 @@ pub struct RequestContext {
     pub aud: [u8; 32],
     /// The RP's single-use nonce, a nonzero canonical big-endian field element.
     pub nonce: [u8; 32],
+    /// The AAT, if the Authenticator Provider issued one for this request.
+    pub aat_inputs: Option<AatInputs>,
 }
 
 /// Classifies an error envelope received over the WebSocket.
@@ -310,6 +319,7 @@ mod tests {
         let context = RequestContext {
             aud: [1; 32],
             nonce: [2; 32],
+            aat_inputs: None,
         };
         let expected = payload().claims(
             canonical_field(&context.aud).unwrap(),

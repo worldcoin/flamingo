@@ -8,6 +8,7 @@
     dead_code
 )]
 
+mod aat;
 mod errors;
 mod messages;
 mod response;
@@ -15,6 +16,7 @@ mod response;
 /// Pontifex channel domain shared by the consumer and enclave.
 pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v3";
 
+pub use aat::{AatInputs, provider_key_hash};
 pub use errors::{
     ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole, InputFailureReason,
     ValidationTarget,
