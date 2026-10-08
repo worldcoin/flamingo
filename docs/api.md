@@ -30,18 +30,18 @@ Only `host_url` and `allowed_pcr_configs` are required. The other fields default
 
 The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. Identity and certificate expiry come from the verified document.
 
-The sealed match payload contains CBOR with one operation:
+The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/pull/979) request: `version`, `aud`, `nonce` and the nested `payload` (`pipeline`, `match_strictness`, `meta`, `entries`, `compare`, `engine_hash`). The enclave rejects any other shape, an `engine_hash` it did not load, and, until AAT verification lands, any `aat_inputs`. The interim pipelines are:
 
-| Operation | Inputs | Current support |
+| `pipeline` | `compare` positions | Engine operation |
 | --- | --- | --- |
-| `deep_face` | Orb photo, live capture, challenge image, raw `hashes.json`, and threshold. | Three comparisons with vanilla or LightGuard capture, PCP binding and signing. |
-| `gray_badge` | Live capture, challenge image, and threshold. | Verifies live/challenge similarity and signs a credential-free GrayBadge statement. |
+| `1` | Credential image, live capture, challenge | DeepFace |
+| `2` | Live capture, challenge | GrayBadge |
 
-Both operations support `vanilla` and `light_guard` captures. LightGuard sends both illuminated and unilluminated frames and an explicit matching-frame selection to the sandboxed engine. Version-2 signed statements bind the operation, the complete live capture (including both LightGuard frames and the selection), the challenge and the operation-specific score; DeepFace also binds the PCP commitment. Clients reject statements that do not match their request.
+A LightGuard live capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the one uncompared entry. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
 
-A binary result frame contains a padded, encrypted success or rejection. A success includes the [signed match statement](architecture.md#match-statements) and signing-key attestation. The client verifies both and checks that the claims match the inputs. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 192 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix and channel domain `flamingo-verifier/matches/v3`, requiring matching enclave/client versions.
+A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 192 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix and channel domain `flamingo-verifier/matches/v3`, requiring matching enclave/client versions.
 
-Image limits are 4 MiB per image and 7 MiB across all frames. `hashes.json` is limited to 64 KiB. The [API constants](../verifier/api-types/src/matches.rs) define the complete request and response limits, including encoding overhead.
+Entry `data` is limited to 4 MiB per entry and 7 MiB across all entries. The [API constants](../verifier/api-types/src/matches.rs) define the complete request and response limits, including encoding overhead.
 
 ### WebSocket session
 

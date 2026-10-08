@@ -12,7 +12,7 @@ use flamingo_verifier_api_types::{
     ClientMessage, EnclaveAssignmentResponse, ErrorEnvelope, HostMessage, MAX_MATCH_BODY_BYTES,
     MAX_MATCH_RESPONSE_BYTES,
 };
-use flamingo_verifier_sealed_types::MatchInputs;
+use flamingo_verifier_sealed_types::{Payload, Request};
 use futures_util::{SinkExt, StreamExt};
 use pontifex::attestation::Verifier;
 use tokio::net::TcpStream;
@@ -25,8 +25,8 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::client::{
-    VerifiedAssignment, VerifiedMatchResult, classify_envelope, ensure_claims_match,
-    open_verified_match, verify_assignment,
+    RequestContext, VerifiedAssignment, VerifiedMatchResult, classify_envelope,
+    ensure_claims_match, open_verified_match, verify_assignment,
 };
 use crate::config::Config;
 use crate::error::Error;
@@ -52,8 +52,8 @@ impl FlamingoVerifierSession {
         &self.assignment
     }
 
-    /// Seals `inputs` to this session's verified enclave key, sends them as the one binary match
-    /// frame, and returns the verified result or the sealed rejection.
+    /// Seals `payload`, bound to `context`, to this session's verified enclave key, sends it as the
+    /// one binary match frame, and returns the verified result or the sealed rejection.
     ///
     /// Consumes the session: one socket carries exactly one match, and it is closed after the
     /// exchange, including on failure.
@@ -64,12 +64,14 @@ impl FlamingoVerifierSession {
     /// the response is oversized, or the result or its claims do not verify.
     pub async fn request_match(
         mut self,
-        inputs: &MatchInputs,
+        payload: &Payload,
+        context: &RequestContext,
     ) -> Result<VerifiedMatchResult, Error> {
         let result = exchange_match(
             &mut self.socket,
             self.assignment.consumer(),
-            inputs,
+            payload,
+            context,
             &self.verifier,
             self.request_timeout,
         )
@@ -193,15 +195,18 @@ async fn request_assignment(
     }
 }
 
-/// Seals the inputs, sends the one binary frame, and verifies the one binary response.
+/// Seals the request, sends the one binary frame, and verifies the one binary response.
 async fn exchange_match(
     socket: &mut Socket,
     consumer: &pontifex::ChannelConsumer,
-    inputs: &MatchInputs,
+    payload: &Payload,
+    context: &RequestContext,
     verifier: &Verifier,
     request_timeout: Duration,
 ) -> Result<VerifiedMatchResult, Error> {
-    let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
+    let plaintext = Request::new(payload, context.aud, context.nonce)
+        .and_then(|request| request.to_cbor())
+        .map_err(|_| Error::MalformedRequest)?;
     let (sealed, opener) = consumer
         .seal_to_enclave(&plaintext)
         .map_err(Error::Channel)?;
@@ -220,7 +225,7 @@ async fn exchange_match(
                     return Err(Error::MalformedResult);
                 }
                 let result = open_verified_match(verifier, &ciphertext, opener)?;
-                ensure_claims_match(inputs, &result)?;
+                ensure_claims_match(payload, context, &result)?;
                 return Ok(result);
             }
             Message::Text(text) => return Err(error_from_text(text.as_str())),
@@ -277,10 +282,10 @@ mod tests {
     use std::time::Duration;
 
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
-    use flamingo_verifier_protocol::match_token::MatchToken;
+    use flamingo_verifier_protocol::flamingo_token::FlamingoToken;
     use flamingo_verifier_sealed_types::{
-        AttestedStatement, DebugReport, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs,
-        MatchResult,
+        AttestedStatement, ByteBuf, DebugReport, Entry, FailureReason, MATCH_CHANNEL_DOMAIN,
+        MatchResult, Payload,
     };
     use futures_util::{SinkExt, StreamExt};
     use pontifex::attestation::PcrConfig;
@@ -290,8 +295,8 @@ mod tests {
     use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
 
     use super::{Socket, exchange_match, websocket_url};
-    use crate::VerifiedMatchResult;
     use crate::error::Error;
+    use crate::{RequestContext, VerifiedMatchResult};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -299,12 +304,28 @@ mod tests {
         super::Verifier::new(vec![PcrConfig::new([0xab; 48])], Duration::from_mins(1))
     }
 
-    fn inputs() -> MatchInputs {
-        MatchInputs::GrayBadge(flamingo_verifier_sealed_types::GrayBadgeInputs {
-            live: flamingo_verifier_sealed_types::LiveCapture::Vanilla(b"live".to_vec().into()),
-            rtms_challenge: b"challenge".to_vec().into(),
-            match_threshold: 0.5,
-        })
+    fn payload() -> Payload {
+        let entry = |data: &[u8]| Entry {
+            data: data.to_vec().into(),
+            meta: ByteBuf::new(),
+        };
+        Payload {
+            meta: ByteBuf::new(),
+            compare: vec![0, 1],
+            entries: vec![entry(b"live"), entry(b"challenge")],
+            pipeline: 2,
+            engine_hash: [0x2a; 32].into(),
+            match_strictness: 2,
+        }
+    }
+
+    fn context() -> RequestContext {
+        let mut nonce = [0; 32];
+        nonce[31] = 42;
+        RequestContext {
+            aud: [0; 32],
+            nonce,
+        }
     }
 
     fn consumer_for(enclave: &ChannelEnclave) -> ChannelConsumer {
@@ -399,7 +420,8 @@ mod tests {
         exchange_match(
             &mut socket,
             &consumer_for(&responder),
-            &inputs(),
+            &payload(),
+            &context(),
             &verifier(),
             TIMEOUT,
         )
@@ -452,7 +474,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &payload(),
+            &context(),
             &verifier(),
             Duration::from_millis(100),
         )
@@ -481,7 +504,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &payload(),
+            &context(),
             &verifier(),
             TIMEOUT,
         )
@@ -505,7 +529,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &payload(),
+            &context(),
             &verifier(),
             TIMEOUT,
         )
@@ -531,7 +556,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &payload(),
+            &context(),
             &verifier(),
             TIMEOUT,
         )
@@ -555,7 +581,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &payload(),
+            &context(),
             &verifier(),
             TIMEOUT,
         )
@@ -570,7 +597,7 @@ mod tests {
         let responder = responder();
         let answer = MatchResult::Success {
             statement: AttestedStatement {
-                token: MatchToken::from_bytes(b"cose-sign1".to_vec()),
+                token: FlamingoToken::from_bytes(b"cose-sign1".to_vec()),
                 signing_key_attestation: b"not a COSE attestation document".to_vec(),
             },
             debug_report: DebugReport::NotProduced,
@@ -598,7 +625,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder),
-            &inputs(),
+            &payload(),
+            &context(),
             &verifier(),
             TIMEOUT,
         )

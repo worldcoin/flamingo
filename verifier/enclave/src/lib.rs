@@ -17,8 +17,8 @@ pub mod biometric_engine;
 pub mod bootstrap;
 /// Boot-scoped key material.
 pub mod keys;
-/// PCP binding verification (transport-free).
-pub mod pcp;
+/// Interim mapping of WIP-201 requests onto the engine operations.
+pub mod pipeline;
 /// Nitro hardware RNG verification.
 pub mod rng;
 /// Pontifex operations exposed to the host.

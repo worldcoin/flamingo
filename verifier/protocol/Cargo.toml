@@ -1,6 +1,6 @@
 [package]
 name = "flamingo-verifier-protocol"
-description = "Match-token protocol for the Flamingo verifier"
+description = "Flamingo Token protocol for the Flamingo verifier"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,5 +19,4 @@ serde_bytes.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
-rand.workspace = true
 sha2.workspace = true

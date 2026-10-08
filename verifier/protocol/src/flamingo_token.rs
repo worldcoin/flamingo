@@ -12,7 +12,10 @@ use coset::{
 use eddsa_babyjubjub::{EdDSAPublicKey, EdDSASignature};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::Error, match_token::COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2};
+use crate::error::Error;
+
+/// COSE `alg` of a Flamingo Token (Private Use, `BabyJubJub-EdDSA-Poseidon2`).
+pub const COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2: i64 = -65537;
 
 /// Domain separator of the signed digest.
 pub const DS_SIGN: &[u8] = b"WORLD-ID/WIP-201/SIGN";
@@ -297,24 +300,37 @@ pub fn verify(
 }
 
 fn field_bytes(value: Fq) -> Value {
-    let bytes = value.into_bigint().to_bytes_be();
-    let mut padded = vec![0u8; 32 - bytes.len()];
-    padded.extend(bytes);
-    Value::Bytes(padded)
+    Value::Bytes(field_to_bytes(value).to_vec())
+}
+
+fn parse_field(value: &Value) -> Result<Fq, Error> {
+    value
+        .as_bytes()
+        .and_then(|bytes| <&[u8; 32]>::try_from(bytes.as_slice()).ok())
+        .ok_or(Error::Malformed)
+        .and_then(canonical_field)
 }
 
 /// Accepts only the canonical 32-byte big-endian encoding of a field element.
-fn parse_field(value: &Value) -> Result<Fq, Error> {
-    let bytes: &[u8; 32] = value
-        .as_bytes()
-        .and_then(|bytes| bytes.as_slice().try_into().ok())
-        .ok_or(Error::Malformed)?;
+///
+/// # Errors
+/// Returns [`Error::Malformed`] for a value of at least the field modulus.
+pub fn canonical_field(bytes: &[u8; 32]) -> Result<Fq, Error> {
     let element = Fq::from_be_bytes_mod_order(bytes);
     if field_bytes(element).as_bytes().map(Vec::as_slice) == Some(bytes.as_slice()) {
         Ok(element)
     } else {
         Err(Error::Malformed)
     }
+}
+
+/// The canonical 32-byte big-endian encoding of a field element.
+#[must_use]
+pub fn field_to_bytes(value: Fq) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    let encoded = value.into_bigint().to_bytes_be();
+    bytes[32 - encoded.len()..].copy_from_slice(&encoded);
+    bytes
 }
 
 #[cfg(test)]

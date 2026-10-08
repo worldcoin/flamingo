@@ -3,8 +3,11 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use flamingo_verifier_api_types::{EnclaveAssignmentResponse, ErrorEnvelope};
-use flamingo_verifier_protocol::match_token::{self, EdDSAPublicKey, MatchClaims};
-use flamingo_verifier_sealed_types::{DebugReport, MATCH_CHANNEL_DOMAIN, MatchInputs, MatchResult};
+use flamingo_verifier_protocol::{
+    EdDSAPublicKey,
+    flamingo_token::{self, FlamingoClaims, canonical_field},
+};
+use flamingo_verifier_sealed_types::{DebugReport, MATCH_CHANNEL_DOMAIN, MatchResult, Payload};
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 use pontifex::{ChannelConsumer, ChannelDomain};
 
@@ -88,7 +91,7 @@ pub fn open_verified_match(
                 EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
             })?;
 
-            let claims = match_token::verify(&statement.token, &signing_key)
+            let claims = flamingo_token::verify(&statement.token, &signing_key)
                 .map_err(|_| Error::StatementInvalid)?;
             Ok(VerifiedMatchResult::Success {
                 verified: Box::new(VerifiedMatch { statement, claims }),
@@ -105,17 +108,29 @@ pub fn open_verified_match(
     }
 }
 
-/// Rejects a verified result whose claims do not match the requested inputs.
+/// Rejects a verified result whose claims do not match the request it answers.
 pub fn ensure_claims_match(
-    inputs: &MatchInputs,
+    payload: &Payload,
+    context: &RequestContext,
     result: &VerifiedMatchResult,
 ) -> Result<(), Error> {
-    if let VerifiedMatchResult::Success { verified, .. } = result
-        && !inputs.matches_claims(&verified.claims)
-    {
-        return Err(Error::StatementInvalid);
+    if let VerifiedMatchResult::Success { verified, .. } = result {
+        let field = |bytes| canonical_field(bytes).map_err(|_| Error::StatementInvalid);
+        let expected = payload.claims(field(&context.aud)?, field(&context.nonce)?, None);
+        if verified.claims != expected {
+            return Err(Error::StatementInvalid);
+        }
     }
     Ok(())
+}
+
+/// The RP's binding for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestContext {
+    /// The RP's `rpId`, a canonical big-endian field element.
+    pub aud: [u8; 32],
+    /// The RP's single-use nonce, a nonzero canonical big-endian field element.
+    pub nonce: [u8; 32],
 }
 
 /// Classifies an error envelope received over the WebSocket.
@@ -225,17 +240,17 @@ impl FlamingoVerifierClient {
     }
 }
 
-/// A statement whose attestation and signature have been verified by the client.
-#[derive(Debug, Clone, PartialEq)]
+/// A Flamingo Token whose attestation, signature and claims the client verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedMatch {
-    /// Encoded statement and attestation for proof consumers.
+    /// Encoded token and attestation for proof consumers.
     pub statement: flamingo_verifier_sealed_types::AttestedStatement,
-    /// Already-verified operation-specific claims.
-    pub claims: MatchClaims,
+    /// The token's claims, equal to those the request implies.
+    pub claims: FlamingoClaims,
 }
 
 /// Verified success or an encrypted unsigned rejection, with bounded worker diagnostics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifiedMatchResult {
     /// Attested signed result and parsed claims.
     Success {
@@ -255,7 +270,73 @@ pub enum VerifiedMatchResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, parse_engine_hashes};
+    use super::{
+        Error, FlamingoClaims, RequestContext, VerifiedMatch, VerifiedMatchResult, canonical_field,
+        ensure_claims_match, parse_engine_hashes,
+    };
+    use flamingo_verifier_protocol::{Fq, flamingo_token::FlamingoToken};
+    use flamingo_verifier_sealed_types::{AttestedStatement, ByteBuf, DebugReport, Entry, Payload};
+
+    fn payload() -> Payload {
+        let entry = |data: &[u8]| Entry {
+            data: data.to_vec().into(),
+            meta: ByteBuf::new(),
+        };
+        Payload {
+            meta: ByteBuf::new(),
+            compare: vec![0, 1],
+            entries: vec![entry(b"live"), entry(b"challenge")],
+            pipeline: 2,
+            engine_hash: [0x2a; 32].into(),
+            match_strictness: 2,
+        }
+    }
+
+    fn success(claims: &FlamingoClaims) -> VerifiedMatchResult {
+        VerifiedMatchResult::Success {
+            verified: Box::new(VerifiedMatch {
+                statement: AttestedStatement {
+                    token: FlamingoToken::from_bytes(vec![]),
+                    signing_key_attestation: vec![],
+                },
+                claims: *claims,
+            }),
+            debug_report: DebugReport::NotProduced,
+        }
+    }
+
+    #[test]
+    fn claims_must_be_the_ones_the_request_implies() {
+        let context = RequestContext {
+            aud: [1; 32],
+            nonce: [2; 32],
+        };
+        let expected = payload().claims(
+            canonical_field(&context.aud).unwrap(),
+            canonical_field(&context.nonce).unwrap(),
+            None,
+        );
+        assert!(ensure_claims_match(&payload(), &context, &success(&expected)).is_ok());
+        for changed in [
+            FlamingoClaims {
+                nonce: Fq::from(3u64),
+                ..expected
+            },
+            FlamingoClaims {
+                engine_config_hash: Fq::from(3u64),
+                ..expected
+            },
+            FlamingoClaims {
+                compared_entry_hashes: [Fq::from(3u64); 4],
+                ..expected
+            },
+        ] {
+            assert!(matches!(
+                ensure_claims_match(&payload(), &context, &success(&changed)),
+                Err(Error::StatementInvalid)
+            ));
+        }
+    }
 
     #[test]
     fn engine_hashes_are_32_byte_lowercase_hex() {
