@@ -15,6 +15,7 @@
 )]
 
 pub mod error;
+pub mod flamingo_token;
 pub mod match_token;
 
 pub use error::Error;
