@@ -51,11 +51,13 @@ mod tests {
         let message = HostMessage::Assignment(EnclaveAssignmentResponse {
             attestation: "Y29zZQ==".to_owned(),
             public_key: "a2V5".to_owned(),
+            engine_hashes: vec!["2a".repeat(32)],
         });
         let json = serde_json::json!({
             "type": "assignment",
             "attestation": "Y29zZQ==",
             "public_key": "a2V5",
+            "engine_hashes": ["2a".repeat(32)],
         });
 
         assert_eq!(

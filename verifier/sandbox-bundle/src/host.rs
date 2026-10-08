@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use sha2::{Digest, Sha384};
+use sha2::{Digest, Sha256};
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -92,7 +92,7 @@ impl Bundle {
             return Err(Error::InvalidBundle);
         }
 
-        let mut digest = Sha384::new();
+        let mut digest = Sha256::new();
         let mut remaining = size;
         let mut buffer = [0; 64 * 1024];
 
@@ -115,9 +115,9 @@ impl Bundle {
         }
 
         let manifest = Manifest {
-            manifest_version: 3,
+            manifest_version: 4,
             release_id: release_id.to_owned(),
-            sha384: hex::encode(digest.finalize()),
+            sha256: hex::encode(digest.finalize()),
             size,
         };
         manifest
@@ -167,7 +167,7 @@ impl Bundle {
         .await?;
         checked("transfer", deadline, stream.write_all(&manifest)).await?;
 
-        let mut digest = Sha384::new();
+        let mut digest = Sha256::new();
         let mut remaining = self.manifest.size;
         let mut buffer = [0; 64 * 1024];
 
@@ -186,7 +186,7 @@ impl Bundle {
             .await
             .map_err(|error| io_error("read", error))?
             != 0
-            || hex::encode(digest.finalize()) != self.manifest.sha384
+            || hex::encode(digest.finalize()) != self.manifest.sha256
         {
             return Err(Error::Changed);
         }

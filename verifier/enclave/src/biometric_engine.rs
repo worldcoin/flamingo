@@ -105,6 +105,8 @@ pub trait BiometricEngine: Send + Sync {
         live: LiveCapture,
         challenge: Vec<u8>,
     ) -> Result<GrayBadgeScores, BiometricError>;
+    /// SHA-256 of the loaded Engine bundle, the WIP-201 `engine_hash`.
+    fn engine_hash(&self) -> [u8; 32];
     /// Checks liveness without waiting for an active inference operation.
     fn check_health(&self) {}
 }
@@ -169,14 +171,16 @@ mod sandboxed {
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
         executor: Executor<Worker>,
+        engine_hash: [u8; 32],
     }
 
     impl SandboxBiometricEngine {
-        /// Takes a worker initialized before enclave key generation.
+        /// Takes a worker initialized before enclave key generation and its bundle's hash.
         #[must_use]
-        pub fn new(worker: Worker) -> Self {
+        pub fn new(worker: Worker, engine_hash: [u8; 32]) -> Self {
             Self {
                 executor: Executor::new(worker),
+                engine_hash,
             }
         }
 
@@ -229,6 +233,10 @@ mod sandboxed {
 
     #[async_trait]
     impl BiometricEngine for SandboxBiometricEngine {
+        fn engine_hash(&self) -> [u8; 32] {
+            self.engine_hash
+        }
+
         async fn deepface(
             &self,
             credential: Vec<u8>,

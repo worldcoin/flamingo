@@ -32,6 +32,7 @@ fn assignment(attestation: &str, public_key: &str) -> String {
         "type": "assignment",
         "attestation": attestation,
         "public_key": public_key,
+        "engine_hashes": [],
     })
     .to_string()
 }

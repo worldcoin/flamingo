@@ -1146,6 +1146,7 @@ dependencies = [
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",
  "futures-util",
+ "hex",
  "http-body-util",
  "pontifex",
  "serde",

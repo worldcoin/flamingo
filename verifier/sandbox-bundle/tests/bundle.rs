@@ -10,7 +10,7 @@ use std::{
 use flamingo_verifier_sandbox_bundle::{
     Error, MAX_BUNDLE_BYTES, Manifest, WORKER_PATH, package, receive,
 };
-use sha2::{Digest, Sha384};
+use sha2::{Digest, Sha256};
 
 /// Small executable for verification tests, never executed.
 struct Fixture {
@@ -29,9 +29,9 @@ impl Fixture {
         elf[18] = 62;
         Self {
             manifest: Manifest {
-                manifest_version: 3,
+                manifest_version: 4,
                 release_id: "test-release".into(),
-                sha384: hex::encode(Sha384::digest(&elf)),
+                sha256: hex::encode(Sha256::digest(&elf)),
                 size: elf.len() as u64,
             },
             binary: elf,
@@ -178,7 +178,7 @@ fn blocked_socket_upload_is_abandoned() {
     let mut fixture = Fixture::new();
     fixture.binary.resize(8 * 1024 * 1024, 1);
     fixture.manifest.size = fixture.binary.len() as u64;
-    fixture.manifest.sha384 = hex::encode(Sha384::digest(&fixture.binary));
+    fixture.manifest.sha256 = hex::encode(Sha256::digest(&fixture.binary));
     let root = tempfile::tempdir().unwrap();
     let executable = root.path().join("worker");
     fs::write(&executable, &fixture.binary).unwrap();
@@ -201,7 +201,7 @@ fn blocked_socket_upload_is_abandoned() {
 fn wrong_architecture_and_unknown_fields_are_rejected() {
     let mut fixture = Fixture::new();
     fixture.binary[18] = 183; // AArch64, not the reviewed x86_64 seccomp target.
-    fixture.manifest.sha384 = hex::encode(Sha384::digest(&fixture.binary));
+    fixture.manifest.sha256 = hex::encode(Sha256::digest(&fixture.binary));
     let parent = tempfile::tempdir().unwrap();
     assert!(matches!(
         receive(&mut Cursor::new(fixture.bundle()), 1024, parent.path()),

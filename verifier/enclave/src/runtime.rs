@@ -67,7 +67,10 @@ fn worker_failed(error: SandboxClientError) -> ! {
 /// Attests boot keys after isolation and model initialization, then accepts requests.
 async fn serve(boot: &mut BootWorker, worker: Worker) -> anyhow::Result<()> {
     worker.check_alive();
-    let engine = Box::new(SandboxBiometricEngine::new(worker));
+    let engine = Box::new(SandboxBiometricEngine::new(
+        worker,
+        boot.runtime.engine_hash,
+    ));
     // Attests both boot keys, so a broken NSM stops the boot and both caches start populated.
     attestation::connect()
         .await

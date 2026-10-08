@@ -100,6 +100,12 @@ impl EnclaveState {
         self.signing_key.public_key()
     }
 
+    /// SHA-256 of each loaded Engine bundle, served next to the channel attestation.
+    #[must_use]
+    pub fn engine_hashes(&self) -> Vec<[u8; 32]> {
+        vec![self.engine.engine_hash()]
+    }
+
     /// Checks an idle worker without waiting for an in-flight comparison.
     pub fn check_worker_health(&self) {
         self.engine.check_health();

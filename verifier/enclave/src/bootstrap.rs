@@ -97,7 +97,7 @@ pub fn receive() -> anyhow::Result<BootWorker> {
         runtime_parent,
     )
     .context("worker runtime integrity check failed")?;
-    tracing::info!(release_id = %runtime.release_id, worker_sha384 = %runtime.sha384, "worker executable provisioned");
+    tracing::info!(release_id = %runtime.release_id, engine_hash = %hex::encode(runtime.engine_hash), "worker executable provisioned");
     Ok(BootWorker {
         runtime,
         address_space_bytes: config.address_space_bytes,

@@ -89,11 +89,18 @@ impl Attestor for FailsAfterSuccessesAttestor {
     }
 }
 
+/// The bundle hash every test engine reports.
+pub const TEST_ENGINE_HASH: [u8; 32] = [0x2a; 32];
+
 /// Panics if a test reaches it, for paths that must reject before comparing faces.
 pub struct UnusedBiometricEngine;
 
 #[async_trait::async_trait]
 impl BiometricEngine for UnusedBiometricEngine {
+    fn engine_hash(&self) -> [u8; 32] {
+        TEST_ENGINE_HASH
+    }
+
     async fn deepface(
         &self,
         _: Vec<u8>,
