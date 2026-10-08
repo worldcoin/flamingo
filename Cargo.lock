@@ -1165,9 +1165,11 @@ version = "0.8.0"
 dependencies = [
  "ark-ff",
  "coset",
+ "hex",
  "rand 0.8.8",
  "serde",
  "serde_bytes",
+ "sha2 0.10.9",
  "taceo-ark-babyjubjub",
  "taceo-eddsa-babyjubjub",
  "taceo-poseidon2",
