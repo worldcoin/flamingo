@@ -88,6 +88,7 @@ fn full_stub() -> StubEnclaveClient {
         encryption_key: Some(Ok(KeyAttestation {
             document: vec![1, 2, 3],
             public_key: vec![0xab; 1216],
+            engine_hashes: vec![[0x2a; 32]],
         })),
         match_result: Some(Ok(MatchResponse {
             ciphertext: vec![9u8; 48],
@@ -118,6 +119,7 @@ async fn assignment_then_binary_relay() {
         serde_json::from_str(text.as_str()).expect("an assignment message");
     assert_eq!(assignment.attestation, "AQID");
     assert_eq!(assignment.public_key, STANDARD.encode(vec![0xab; 1216]));
+    assert_eq!(assignment.engine_hashes, vec!["2a".repeat(32)]);
 
     send_binary(&mut socket, b"sealed".to_vec()).await;
     match recv(&mut socket).await {
@@ -319,6 +321,7 @@ async fn stalled_peer_releases_its_slot() {
             encryption_key: Some(Ok(KeyAttestation {
                 document: vec![0u8; 8 * 1024 * 1024],
                 public_key: vec![0xab; 1216],
+                engine_hashes: vec![[0x2a; 32]],
             })),
             ..StubEnclaveClient::default()
         },

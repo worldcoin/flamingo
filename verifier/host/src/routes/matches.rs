@@ -82,6 +82,7 @@ async fn serve(socket: &mut WebSocket, state: &AppState) -> Result<(), ApiError>
     let assignment = HostMessage::Assignment(EnclaveAssignmentResponse {
         attestation: STANDARD.encode(attestation.document),
         public_key: STANDARD.encode(attestation.public_key),
+        engine_hashes: attestation.engine_hashes.iter().map(hex::encode).collect(),
     });
     let body = serde_json::to_string(&assignment)
         .map_err(|_| ApiError::internal_error("assignment message failed to serialize"))?;

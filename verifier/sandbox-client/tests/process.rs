@@ -206,13 +206,13 @@ fn broker(case: &str, mut root: &Path) -> Result<(), Box<dyn std::error::Error>>
     }
     let verified_runtime = if case == "provisioned-runtime" {
         use flamingo_verifier_sandbox_bundle::{Manifest, WORKER_PATH};
-        use sha2::{Digest, Sha384};
+        use sha2::{Digest, Sha256};
 
         let bytes = std::fs::read(root.join(WORKER_PATH))?;
         let manifest = serde_json::to_vec(&Manifest {
-            manifest_version: 3,
+            manifest_version: 4,
             release_id: "public-test-fixture".to_owned(),
-            sha384: hex::encode(Sha384::digest(&bytes)),
+            sha256: hex::encode(Sha256::digest(&bytes)),
             size: bytes.len() as u64,
         })?;
         let mut bundle = Vec::new();

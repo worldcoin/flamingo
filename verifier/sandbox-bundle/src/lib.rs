@@ -10,7 +10,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha384};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 mod config;
@@ -30,12 +30,12 @@ pub const MAX_BUNDLE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Version 3 contains one unsigned executable; older signed formats are not accepted.
+    /// Version 4 contains one unsigned executable; older formats are not accepted.
     pub manifest_version: u32,
     /// Deployment-assigned diagnostic identifier, not an anti-rollback counter.
     pub release_id: String,
-    /// Lowercase hex SHA-384 of the entire executable.
-    pub sha384: String,
+    /// Lowercase hex SHA-256 of the entire executable, its WIP-201 `engine_hash`.
+    pub sha256: String,
     /// Exact nonzero executable bytes following the declared metadata.
     pub size: u64,
 }
@@ -48,8 +48,8 @@ pub struct VerifiedRuntime {
     pub root: TempDir,
     /// Deployment-supplied diagnostic release identifier.
     pub release_id: String,
-    /// SHA-384 checked against the transferred executable (not a publisher identity).
-    pub sha384: String,
+    /// SHA-256 checked against the transferred executable: the Engine's `engine_hash`.
+    pub engine_hash: [u8; 32],
 }
 
 /// Redacted failures; no untrusted paths, manifest text or model bytes are included.
@@ -82,7 +82,7 @@ impl Manifest {
             return Err(Error::InvalidConfig);
         }
 
-        if self.manifest_version != 3
+        if self.manifest_version != 4
             || self.release_id.is_empty()
             || self.release_id.len() > 128
             || !self
@@ -91,9 +91,9 @@ impl Manifest {
                 .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
             || self.size == 0
             || self.size > max_bundle_bytes
-            || self.sha384.len() != 96
+            || self.sha256.len() != 64
             || !self
-                .sha384
+                .sha256
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
@@ -138,7 +138,7 @@ pub fn receive(
         .create_new(true)
         .mode(0o600)
         .open(&worker_path)?;
-    let mut digest = Sha384::new();
+    let mut digest = Sha256::new();
     let mut remaining = manifest.size;
     let mut buffer = [0_u8; 64 * 1024];
     while remaining != 0 {
@@ -149,7 +149,8 @@ pub fn receive(
         remaining -= length as u64;
     }
 
-    if hex::encode(digest.finalize()) != manifest.sha384 {
+    let engine_hash: [u8; 32] = digest.finalize().into();
+    if hex::encode(engine_hash) != manifest.sha256 {
         return Err(Error::DigestMismatch);
     }
     file.set_permissions(fs::Permissions::from_mode(0o555))?;
@@ -173,7 +174,7 @@ pub fn receive(
         binary,
         root,
         release_id: manifest.release_id,
-        sha384: manifest.sha384,
+        engine_hash,
     })
 }
 
@@ -199,7 +200,7 @@ pub fn package(
     }
 
     let mut file = File::open(executable)?;
-    let mut digest = Sha384::new();
+    let mut digest = Sha256::new();
     let mut remaining = manifest.size;
     let mut buffer = [0_u8; 64 * 1024];
     while remaining != 0 {
@@ -210,7 +211,7 @@ pub fn package(
         remaining -= length as u64;
     }
 
-    if file.read(&mut [0])? != 0 || hex::encode(digest.finalize()) != manifest.sha384 {
+    if file.read(&mut [0])? != 0 || hex::encode(digest.finalize()) != manifest.sha256 {
         return Err(Error::DigestMismatch);
     }
 

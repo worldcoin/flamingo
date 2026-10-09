@@ -12,6 +12,8 @@ pub struct KeyAttestation {
     /// Full X-Wing public key. The document's `public_key` field contains its Pontifex commitment.
     #[serde(with = "serde_bytes")]
     pub public_key: Vec<u8>,
+    /// SHA-256 of each loaded Engine bundle. Unauthenticated: a wrong list only fails requests.
+    pub engine_hashes: Vec<[u8; 32]>,
 }
 
 /// Requests the attestation for this boot's encryption key.

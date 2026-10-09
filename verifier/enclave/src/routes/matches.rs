@@ -235,6 +235,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BiometricEngine for Engine {
+        fn engine_hash(&self) -> [u8; 32] {
+            crate::test_support::TEST_ENGINE_HASH
+        }
+
         async fn deepface(
             &self,
             credential: Vec<u8>,

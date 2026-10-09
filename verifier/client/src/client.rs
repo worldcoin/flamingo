@@ -37,7 +37,23 @@ pub fn verify_assignment(
     Ok(VerifiedAssignment {
         attestation,
         consumer,
+        engine_hashes: parse_engine_hashes(&response.engine_hashes)?,
     })
+}
+
+/// Decodes the host's lowercase hex Engine hashes.
+fn parse_engine_hashes(hashes: &[String]) -> Result<Vec<[u8; 32]>, Error> {
+    hashes
+        .iter()
+        .map(|hash| {
+            let mut bytes = [0; 32];
+            // Lowercase only, so one Engine has one spelling.
+            (!hash.bytes().any(|b| b.is_ascii_uppercase())
+                && hex::decode_to_slice(hash, &mut bytes).is_ok())
+            .then_some(bytes)
+            .ok_or(Error::MalformedAssignment)
+        })
+        .collect()
 }
 
 /// Opens a sealed match response and verifies the statement it carries, if any.
@@ -120,6 +136,7 @@ pub struct VerifiedAssignment {
     /// Metadata read from the signed attestation document.
     attestation: VerifiedAttestation,
     consumer: ChannelConsumer,
+    engine_hashes: Vec<[u8; 32]>,
 }
 
 impl VerifiedAssignment {
@@ -127,6 +144,13 @@ impl VerifiedAssignment {
     #[must_use]
     pub const fn attestation(&self) -> &VerifiedAttestation {
         &self.attestation
+    }
+
+    /// The host's list of loaded Engine bundles. Not attested: pick an `engine_hash` from it,
+    /// and the enclave rejects a request for a bundle it did not load.
+    #[must_use]
+    pub fn engine_hashes(&self) -> &[[u8; 32]] {
+        &self.engine_hashes
     }
 
     /// The channel consumer bound to this assignment's verified key.
@@ -227,4 +251,28 @@ pub enum VerifiedMatchResult {
         /// Original worker diagnostics, if produced.
         debug_report: DebugReport,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Error, parse_engine_hashes};
+
+    #[test]
+    fn engine_hashes_are_32_byte_lowercase_hex() {
+        assert_eq!(
+            parse_engine_hashes(&["2a".repeat(32)]).unwrap(),
+            vec![[0x2a; 32]]
+        );
+        for invalid in [
+            "2A".repeat(32),
+            "2a".repeat(31),
+            "2a".repeat(33),
+            "zz".repeat(32),
+        ] {
+            assert!(matches!(
+                parse_engine_hashes(&[invalid]),
+                Err(Error::MalformedAssignment)
+            ));
+        }
+    }
 }
