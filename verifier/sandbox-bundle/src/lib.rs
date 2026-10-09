@@ -16,7 +16,7 @@ use tempfile::TempDir;
 mod config;
 pub use config::BootstrapConfig;
 
-/// Host-side bundle preparation, provisioning and health checks.
+/// Host-side bundle preparation and provisioning.
 pub mod host;
 
 /// The only executable entry point accepted by the public broker.
