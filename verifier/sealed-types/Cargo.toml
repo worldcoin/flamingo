@@ -17,6 +17,7 @@ ciborium.workspace = true
 flamingo-verifier-protocol.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+world-id-primitives.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
