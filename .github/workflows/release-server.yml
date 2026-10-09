@@ -1,0 +1,137 @@
+name: Release server
+run-name: Server v${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Server version, independent of crates (e.g. 1.0.0-rc.1)
+        required: true
+        type: string
+
+concurrency:
+  group: release-server
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: release
+
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE_TAG: server-v${{ inputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+      API_IMAGE: ghcr.io/${{ github.repository_owner }}/flamingo-verifier
+      ENCLAVE_IMAGE: ghcr.io/${{ github.repository_owner }}/flamingo-verifier-verifier-enclave
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ${#VERSION} -gt 64 || ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo '::error::Use a version such as 1.0.0 or 1.0.0-rc.1 (maximum 64 characters).'
+            exit 1
+          fi
+
+          if gh release view "server/v$VERSION" > /dev/null 2>&1; then
+            echo "::error::Release server/v$VERSION already exists."
+            exit 1
+          fi
+
+          git ls-remote --tags origin "refs/tags/server/v$VERSION" > "$RUNNER_TEMP/release-tag"
+          if [[ -s "$RUNNER_TEMP/release-tag" ]]; then
+            echo "::error::Tag server/v$VERSION already exists; choose a new version."
+            exit 1
+          fi
+
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build enclave and EIF
+        id: enclave
+        run: |
+          scripts/build-enclaves.sh --workload verifier target/release
+          oci=$(nix build --no-link --no-update-lock-file --print-out-paths .#verifier-oci)
+          echo "oci=$oci" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build API image
+        id: api
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: verifier/host/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.API_IMAGE }}:${{ env.IMAGE_TAG }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Publish enclave image and write manifest
+        env:
+          OCI: ${{ steps.enclave.outputs.oci }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y skopeo
+          digest=$(skopeo inspect --raw "oci:$OCI" | sha256sum | cut -d ' ' -f1)
+
+          export REGISTRY_AUTH_FILE="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          skopeo copy --all --preserve-digests "oci:$OCI" "docker://$ENCLAVE_IMAGE:$IMAGE_TAG"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg source_commit "$GITHUB_SHA" \
+            --arg api_image "$API_IMAGE@$API_DIGEST" \
+            --arg enclave_image "$ENCLAVE_IMAGE@sha256:$digest" \
+            --arg eif_sha256 "$(sha256sum target/release/verifier-enclave.eif | cut -d ' ' -f1)" \
+            --slurpfile pcrs target/release/verifier-pcr.json \
+            '{
+              version: $version,
+              source_commit: $source_commit,
+              api_image: $api_image,
+              enclave_image: $enclave_image,
+              eif_sha256: $eif_sha256,
+              pcrs: $pcrs[0]
+            }' > target/release/release.json
+
+      - name: Attest release bundle
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: target/release/*
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=false
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease=true
+          fi
+
+          gh release create "server/v$VERSION" target/release/* \
+            --target "$GITHUB_SHA" \
+            --title "Server v$VERSION" \
+            --notes "API and enclave artifacts from $GITHUB_SHA. See release.json for digests and PCRs." \
+            --prerelease="$prerelease" \
+            --latest=false
