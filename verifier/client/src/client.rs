@@ -283,7 +283,7 @@ mod tests {
             meta: ByteBuf::new(),
         };
         Payload {
-            meta: ByteBuf::new(),
+            hints: ByteBuf::new(),
             compare: vec![0, 1],
             entries: vec![entry(b"live"), entry(b"challenge")],
             pipeline: 2,

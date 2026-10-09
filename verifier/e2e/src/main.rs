@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         .context("the host serves no loaded Engine")?;
 
     let payload = Payload {
-        meta: ByteBuf::new(),
+        hints: ByteBuf::new(),
         compare,
         entries,
         pipeline: if gray_badge {
