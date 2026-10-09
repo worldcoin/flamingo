@@ -56,3 +56,16 @@ gh attestation verify manifest.json --repo worldcoin/flamingo \
 ```
 
 Check the downloaded artifacts' hashes against `manifest.json`. Rebuild the source commit named in the manifest and compare PCR measurements.
+
+## Server releases
+
+[Release server](../.github/workflows/release-server.yml) publishes the API and enclave
+images to GHCR, plus the EIF, PCRs, and `release.json` under `server/v<version>`.
+
+```sh
+gh workflow run release-server.yml --repo worldcoin/flamingo --ref main \
+  -f version=1.0.0-rc.1
+```
+
+Client crate versions are independent. The provisioner stays in the deploy repo;
+`release.json` contains the image digests, EIF checksum, and PCRs.
