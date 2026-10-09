@@ -8,13 +8,20 @@
     dead_code
 )]
 
+use pontifex::ChannelDomain;
+
 mod aat;
 mod errors;
 mod messages;
 mod response;
 
-/// Pontifex channel domain shared by the consumer and enclave.
-pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v3";
+/// The WIP-201 request channel: `info` is `CHANNEL_DOMAIN || direction`, and the channel
+/// attestation commits to `SHA-256(CHANNEL_KEY_DOMAIN || channel_key)`.
+pub const CHANNEL_DOMAIN: ChannelDomain = ChannelDomain::new("WORLD-ID/WIP-201/CHANNEL")
+    .with_key_commitment_domain(b"WORLD-ID/WIP-201/CHANNEL-KEY\0");
+
+/// WIP-201 `MAX_ATTESTATION_AGE`: the oldest channel or signing-key attestation to accept.
+pub const MAX_ATTESTATION_AGE: std::time::Duration = std::time::Duration::from_hours(24);
 
 pub use aat::{AatInputs, provider_key_hash};
 pub use errors::{

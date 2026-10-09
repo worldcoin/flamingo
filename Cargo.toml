@@ -49,7 +49,8 @@ http-body-util = "0.1"
 libc = "0.2"
 minijail = { git = "https://github.com/google/minijail", rev = "b0b5dc6997956cdc027295ade5e425c416f30d33" }
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
-pontifex = { version = "3.0.0", default-features = false }
+# Key commitment domains are unreleased (pontifex #63); move to crates.io with the next release.
+pontifex = { git = "https://github.com/worldcoin/pontifex", rev = "b9f11212018263a4460c04f815e5417de61485d2", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.3" }
 rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

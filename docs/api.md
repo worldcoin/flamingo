@@ -28,7 +28,7 @@ Only `host_url` and `allowed_pcr_configs` are required. The other fields default
 
 ## Matches
 
-The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. Identity and certificate expiry come from the verified document.
+The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. `max_attestation_age_millis` may not exceed the WIP-201 `MAX_ATTESTATION_AGE` of 24 hours. Identity and certificate expiry come from the verified document.
 
 The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/pull/979) request: `version`, `aud`, `nonce` and the nested `payload` (`pipeline`, `match_strictness`, `meta`, `entries`, `compare`, `engine_hash`). The enclave rejects any other shape and an `engine_hash` it did not load. Optional `aat_inputs` carry a WIP-106 Authenticator Assertion; the enclave verifies it with `cdh = R(SHA-256(payload))` before the Engine runs and signs its public values (`has_aat`, `now`, `authenticator_provider_key_hash`, `aat_flags`) into the token. The interim pipelines are:
 
@@ -39,7 +39,7 @@ The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-prot
 
 A LightGuard live capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the one uncompared entry. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
 
-A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 192 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix and channel domain `flamingo-verifier/matches/v3`, requiring matching enclave/client versions.
+A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 192 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix on the WIP-201 channel: `info` is `WORLD-ID/WIP-201/CHANNEL` plus a direction byte, and the attestation commits to `SHA-256("WORLD-ID/WIP-201/CHANNEL-KEY\0" || channel_key)`.
 
 Entry `data` is limited to 4 MiB per entry and 7 MiB across all entries. The [API constants](../verifier/api-types/src/matches.rs) define the complete request and response limits, including encoding overhead.
 

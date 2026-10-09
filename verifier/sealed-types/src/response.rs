@@ -221,7 +221,15 @@ mod tests {
         assert_eq!(&bytes[..4], &[0, 0, 0, 59]);
         assert_eq!(&bytes[4..63], payload);
         assert!(bytes[63..].iter().all(|byte| *byte == 0));
-        assert_eq!(crate::MATCH_CHANNEL_DOMAIN, "flamingo-verifier/matches/v3");
+    }
+
+    #[test]
+    fn the_channel_key_commitment_uses_the_wip_201_domain() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            crate::CHANNEL_DOMAIN.public_key_commitment(b"key"),
+            <[u8; 32]>::from(Sha256::digest(b"WORLD-ID/WIP-201/CHANNEL-KEY\0key"))
+        );
     }
 
     #[test]
