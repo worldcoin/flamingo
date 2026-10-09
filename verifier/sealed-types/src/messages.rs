@@ -26,8 +26,8 @@ pub const REQUEST_VERSION: u64 = 1;
 pub const MAX_ENTRIES: usize = 8;
 /// Compared entries per request, fixed by the Flamingo Token layout.
 pub const MAX_COMPARED: usize = flamingo_token::MAX_COMPARED;
-/// Maximum bytes in the request-level `meta`.
-pub const MAX_META_BYTES: usize = 1024;
+/// Maximum bytes in the request-level `hints`.
+pub const MAX_HINTS_BYTES: usize = 1024;
 /// Maximum bytes in one entry's `meta`.
 pub const MAX_ENTRY_META_BYTES: usize = 256;
 
@@ -53,7 +53,7 @@ pub struct Request {
 #[serde(deny_unknown_fields)]
 pub struct Payload {
     /// Request-level Engine hints that never weaken `match_strictness`.
-    pub meta: ByteBuf,
+    pub hints: ByteBuf,
     /// Distinct indices into `entries`; the Engine compares every pair.
     pub compare: Vec<u8>,
     /// Inputs to the Engine.
@@ -166,7 +166,7 @@ impl Payload {
             .enumerate()
             .all(|(i, index)| !self.compare[..i].contains(index));
         if self.pipeline == 0
-            || self.meta.len() > MAX_META_BYTES
+            || self.hints.len() > MAX_HINTS_BYTES
             || !(1..=MAX_ENTRIES).contains(&self.entries.len())
             || self
                 .entries
@@ -304,7 +304,7 @@ mod tests {
             meta: ByteBuf::new(),
         };
         Payload {
-            meta: ByteBuf::new(),
+            hints: ByteBuf::new(),
             compare: vec![0, 1, 2],
             entries: vec![
                 entry(b"credential image"),
@@ -329,7 +329,7 @@ mod tests {
         let encoded = encode(&payload, 0).unwrap();
         assert_eq!(
             hex::encode(&*encoded),
-            "a6646d6574614067636f6d706172658300010267656e747269657383a264646174615063726564656e7469616c20696d616765646d65746140a264646174614a6c69766520696d616765646d65746140a264646174614f6368616c6c656e676520696d616765646d6574614068706970656c696e65016b656e67696e655f6861736858202a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a706d617463685f7374726963746e65737302"
+            "a66568696e74734067636f6d706172658300010267656e747269657383a264646174615063726564656e7469616c20696d616765646d65746140a264646174614a6c69766520696d616765646d65746140a264646174614f6368616c6c656e676520696d616765646d6574614068706970656c696e65016b656e67696e655f6861736858202a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a706d617463685f7374726963746e65737302"
         );
         let claims = payload.claims(Fq::from(1_928_118u64), Fq::from(42u64), None);
         assert_eq!(
@@ -383,7 +383,7 @@ mod tests {
         };
         let changes: [fn(&mut Payload); 9] = [
             |p| p.pipeline = 0,
-            |p| p.meta = vec![0; MAX_META_BYTES + 1].into(),
+            |p| p.hints = vec![0; MAX_HINTS_BYTES + 1].into(),
             |p| p.entries.clear(),
             |p| p.entries[0].meta = vec![0; MAX_ENTRY_META_BYTES + 1].into(),
             |p| p.compare = vec![0],
