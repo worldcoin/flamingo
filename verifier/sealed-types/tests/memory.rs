@@ -42,7 +42,7 @@ fn maximum_request_has_bounded_codec_allocations() {
         meta: ByteBuf::new(),
     };
     let payload = Payload {
-        meta: ByteBuf::new(),
+        hints: ByteBuf::new(),
         compare: vec![0, 1, 2],
         entries: vec![entry(1, 3 * mib), entry(2, 2 * mib), entry(3, 2 * mib)],
         pipeline: 1,
