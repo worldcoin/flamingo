@@ -1,12 +1,11 @@
 //! Bounds for the opaque binary match exchange.
-/// Maximum encoded bytes in one image.
-pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-/// Maximum encoded image bytes across all frames (unchanged intended image budget).
-pub const MAX_TOTAL_IMAGE_BYTES: usize = 7 * 1024 * 1024;
-/// Maximum raw PCP hashes.json bytes.
-pub const MAX_HASHES_JSON_BYTES: usize = 64 * 1024;
-/// Image/PCP budget plus bounded CBOR structural overhead.
-pub const MAX_MATCH_PLAINTEXT_BYTES: usize = MAX_TOTAL_IMAGE_BYTES + MAX_HASHES_JSON_BYTES + 4096;
+
+/// Maximum bytes in one entry's `data`.
+pub const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum `data` bytes across all entries (unchanged intended image budget).
+pub const MAX_TOTAL_ENTRY_BYTES: usize = 7 * 1024 * 1024;
+/// Entry data plus every `meta`, the request fields and bounded CBOR structural overhead.
+pub const MAX_MATCH_PLAINTEXT_BYTES: usize = MAX_TOTAL_ENTRY_BYTES + 8 * 1024;
 /// Plaintext budget plus room for the Pontifex channel envelope.
 pub const MAX_MATCH_BODY_BYTES: usize = MAX_MATCH_PLAINTEXT_BYTES + 4096;
 /// Fixed plaintext budget for the version 3 response.

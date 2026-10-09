@@ -6,17 +6,17 @@
 //! signature and freshness.
 //!
 //! ```no_run
-//! use flamingo_verifier_client::{Config, FlamingoVerifierClient, PcrMeasurement};
-//! use flamingo_verifier_sealed_types::MatchInputs;
+//! use flamingo_verifier_client::{Config, FlamingoVerifierClient, PcrMeasurement, RequestContext};
+//! use flamingo_verifier_sealed_types::Payload;
 //!
-//! # async fn example(inputs: &MatchInputs, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(payload: &Payload, context: &RequestContext, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Config::new(
 //!     "https://verifier.example.com",
 //!     vec![vec![PcrMeasurement::new(0, pcr0)]],
 //! )?;
 //! let client = FlamingoVerifierClient::new(config)?;
 //! let session = client.connect().await?;
-//! let result = session.request_match(inputs).await?;
+//! let result = session.request_match(payload, context).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -34,7 +34,9 @@ mod config;
 mod error;
 mod session;
 
-pub use client::{FlamingoVerifierClient, VerifiedAssignment, VerifiedMatch, VerifiedMatchResult};
+pub use client::{
+    FlamingoVerifierClient, RequestContext, VerifiedAssignment, VerifiedMatch, VerifiedMatchResult,
+};
 pub use config::Config;
 pub use error::Error;
 pub use pontifex::{ChannelConsumer, PcrMeasurement};

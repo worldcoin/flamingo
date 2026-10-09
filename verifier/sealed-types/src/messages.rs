@@ -1,297 +1,274 @@
-//! Typed CBOR payloads. Image ownership moves across inference adapters without cloning.
-use crate::{DebugReport, Error, FailureReason};
+//! The WIP-201 request and the attested statement a passing request produces.
+//!
+//! The Verifier interprets none of the payload: roles come from the pipeline's `compare`
+//! positions. Field order follows deterministic CBOR (RFC 8949 §4.2.1), so serde writes the
+//! canonical encoding.
+
+use crate::{DebugReport, Error, FailureReason, InputFailureReason};
 use flamingo_verifier_api_types::{
-    MAX_HASHES_JSON_BYTES, MAX_IMAGE_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_IMAGE_BYTES,
+    MAX_ENTRY_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_ENTRY_BYTES,
 };
-use flamingo_verifier_protocol::match_token::{MatchClaims, MatchOperation, MatchToken};
-use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
+use flamingo_verifier_protocol::{
+    Fq,
+    flamingo_token::{
+        self, AatClaims, FlamingoClaims, FlamingoToken, canonical_field, digest_to_field,
+        engine_config_hash,
+    },
+};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_bytes::{ByteArray, ByteBuf};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-/// One supported face operation.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MatchInputs {
-    /// Orb/live/challenge comparisons with PCP binding.
-    DeepFace(DeepFaceInputs),
-    /// Live/challenge comparison without PCP.
-    GrayBadge(GrayBadgeInputs),
-}
+/// The only request version.
+pub const REQUEST_VERSION: u64 = 1;
+/// Entries per request.
+pub const MAX_ENTRIES: usize = 8;
+/// Compared entries per request, fixed by the Flamingo Token layout.
+pub const MAX_COMPARED: usize = flamingo_token::MAX_COMPARED;
+/// Maximum bytes in the request-level `hints`.
+pub const MAX_HINTS_BYTES: usize = 1024;
+/// Maximum bytes in one entry's `meta`.
+pub const MAX_ENTRY_META_BYTES: usize = 256;
 
-/// `DeepFace` fields mirror the engine operation plus broker-owned PCP and policy.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeepFaceInputs {
-    /// Encoded Orb thumbnail.
-    pub orb_credential: ByteBuf,
-    /// Explicit capture variant.
-    pub live: LiveCapture,
-    /// Encoded relying-party challenge.
-    pub rtms_challenge: ByteBuf,
-    /// Exact original PCP hashes.json bytes.
-    pub hashes_json: ByteBuf,
-    /// Minimum normalized cosine score for all three comparisons.
-    pub match_threshold: f64,
-}
-
-/// `GrayBadge` has no credential or PCP fields.
+/// The sealed request. `payload` is nested as bytes so its exact encoding can be committed to.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GrayBadgeInputs {
-    /// Explicit capture variant.
-    pub live: LiveCapture,
-    /// Encoded relying-party challenge.
-    pub rtms_challenge: ByteBuf,
-    /// Minimum normalized cosine score.
-    pub match_threshold: f64,
+pub struct Request {
+    /// The RP's `rpId`, a canonical field element.
+    pub aud: ByteArray<32>,
+    /// The RP's single-use nonce, a nonzero canonical field element.
+    pub nonce: ByteArray<32>,
+    /// The encoded [`Payload`].
+    pub payload: ByteBuf,
+    /// [`REQUEST_VERSION`].
+    pub version: u64,
 }
 
-/// Which `LightGuard` frame supplies the matching embedding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LightGuardMatchingFrame {
-    /// Illuminated frame.
-    Illuminated,
-    /// Unilluminated frame.
-    Unilluminated,
-}
-
-/// Whether a normalized cosine value is finite and within [0, 1].
-#[must_use]
-pub fn valid_similarity(value: f64) -> bool {
-    value.is_finite() && (0.0..=1.0).contains(&value)
-}
-
-/// Capture bytes are deliberately not Debug or Clone.
+/// What the Engine receives, unchanged.
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum LiveCapture {
-    /// Single vanilla image.
-    Vanilla(ByteBuf),
-    /// Explicit challenge-response pair.
-    LightGuard {
-        /// Illuminated frame.
-        illuminated: ByteBuf,
-        /// Unilluminated frame.
-        unilluminated: ByteBuf,
-        /// Frame selected for matching.
-        matching_frame: LightGuardMatchingFrame,
-    },
+#[serde(deny_unknown_fields)]
+pub struct Payload {
+    /// Request-level Engine hints that never weaken `match_strictness`.
+    pub hints: ByteBuf,
+    /// Distinct indices into `entries`; the Engine compares every pair.
+    pub compare: Vec<u8>,
+    /// Inputs to the Engine.
+    pub entries: Vec<Entry>,
+    /// Engine-defined pipeline, nonzero.
+    pub pipeline: u16,
+    /// SHA-256 of the Engine bundle that must run the request.
+    pub engine_hash: ByteArray<32>,
+    /// Matching strictness level defined by the Engine Provider.
+    pub match_strictness: u8,
 }
 
-impl LiveCapture {
-    /// Commits to the capture kind, both `LightGuard` frames and the matching-frame selection.
-    /// Frame hashes have fixed width, so their boundaries cannot be reinterpreted.
-    #[must_use]
-    pub fn commitment(&self) -> [u8; 32] {
-        let mut hash = Sha256::new();
-        hash.update(b"flamingo/live-capture/v1");
-
-        match self {
-            Self::Vanilla(image) => {
-                hash.update([0]);
-                hash.update(Sha256::digest(image));
-            }
-            Self::LightGuard {
-                illuminated,
-                unilluminated,
-                matching_frame,
-            } => {
-                hash.update([1]);
-                hash.update(Sha256::digest(illuminated));
-                hash.update(Sha256::digest(unilluminated));
-                hash.update([match matching_frame {
-                    LightGuardMatchingFrame::Illuminated => 1,
-                    LightGuardMatchingFrame::Unilluminated => 2,
-                }]);
-            }
-        }
-
-        hash.finalize().into()
-    }
-
-    fn images(&self) -> impl Iterator<Item = &ByteBuf> {
-        let (first, second) = match self {
-            Self::Vanilla(image) => (image, None),
-            Self::LightGuard {
-                illuminated,
-                unilluminated,
-                ..
-            } => (illuminated, Some(unilluminated)),
-        };
-        std::iter::once(first).chain(second)
-    }
+/// One Engine input.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entry {
+    /// An encoded image or an embedding.
+    pub data: ByteBuf,
+    /// How the Engine reads `data`.
+    pub meta: ByteBuf,
 }
 
-impl MatchInputs {
-    /// Encode a validated request, borrowing image bytes directly.
+impl Request {
+    /// Encodes `payload` and binds it to the RP's request.
+    ///
     /// # Errors
-    /// Rejects invalid fields or encoding failures.
+    /// Fails when the payload or request is out of bounds or cannot be encoded.
+    pub fn new(payload: &Payload, aud: [u8; 32], nonce: [u8; 32]) -> Result<Self, Error> {
+        payload.validate().map_err(|_| Error::Malformed)?;
+        let request = Self {
+            aud: aud.into(),
+            nonce: nonce.into(),
+            // Moved, not copied: the payload is the request's largest buffer.
+            payload: ByteBuf::from(std::mem::take(&mut *encode(payload, payload.data_len())?)),
+            version: REQUEST_VERSION,
+        };
+        request.validate().map_err(|_| Error::Malformed)?;
+        Ok(request)
+    }
+
+    /// Encodes the request as sealed plaintext.
+    ///
+    /// # Errors
+    /// Fails when the encoding exceeds the plaintext budget.
     pub fn to_cbor(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
-        self.validate().map_err(|_| Error::Malformed)?;
-        let payload_len = match self {
-            Self::DeepFace(i) => {
-                i.live.images().map(|b| b.len()).sum::<usize>()
-                    + i.orb_credential.len()
-                    + i.rtms_challenge.len()
-                    + i.hashes_json.len()
-            }
-            Self::GrayBadge(i) => {
-                i.live.images().map(|b| b.len()).sum::<usize>() + i.rtms_challenge.len()
-            }
-        };
-        let mut encoded = Zeroizing::new(Vec::with_capacity(payload_len + 1024));
-        ciborium::into_writer(self, &mut *encoded).map_err(|_| Error::Encoding)?;
-        if encoded.len() > MAX_MATCH_PLAINTEXT_BYTES {
-            return Err(Error::Malformed);
-        }
-
-        Ok(encoded)
+        encode(self, self.payload.len())
     }
 
-    /// Decode one complete bounded CBOR request. Semantic validation is broker-owned.
+    /// Decodes exactly one request.
+    ///
     /// # Errors
-    /// Returns [`FailureReason::MalformedInputs`] for oversized, malformed or trailing data.
+    /// Returns [`FailureReason::MalformedInputs`] for any other shape or trailing bytes.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, FailureReason> {
-        if bytes.len() > MAX_MATCH_PLAINTEXT_BYTES {
-            return Err(FailureReason::MalformedInputs);
-        }
-
-        let mut reader = bytes;
-        let result =
-            ciborium::from_reader(&mut reader).map_err(|_| FailureReason::MalformedInputs)?;
-        if !reader.is_empty() {
-            return Err(FailureReason::MalformedInputs);
-        }
-
-        Ok(result)
+        decode(bytes)
     }
 
-    /// Validate fields and shared byte budgets before hashing or inference.
+    /// Checks the version and the RP's field elements.
+    ///
     /// # Errors
-    /// Returns a sealed input failure.
+    /// Returns [`FailureReason::MalformedInputs`] on any violation.
     pub fn validate(&self) -> Result<(), FailureReason> {
-        let (live, challenge, credential, hashes, threshold) = match self {
-            Self::DeepFace(i) => (
-                &i.live,
-                &i.rtms_challenge,
-                Some(&i.orb_credential),
-                Some(&i.hashes_json),
-                i.match_threshold,
-            ),
-            Self::GrayBadge(i) => (&i.live, &i.rtms_challenge, None, None, i.match_threshold),
-        };
-        if !valid_similarity(threshold) {
-            return Err(FailureReason::InvalidThreshold);
-        }
-
-        if hashes.is_some_and(|b| b.is_empty() || b.len() > MAX_HASHES_JSON_BYTES) {
-            return Err(FailureReason::InvalidHashesJson);
-        }
-
-        let mut total = 0usize;
-        for (image, role) in live
-            .images()
-            .map(|image| (image, crate::ImageRole::LiveSelfie))
-            .chain(std::iter::once((
-                challenge,
-                crate::ImageRole::RtmsChallenge,
-            )))
-            .chain(credential.map(|image| (image, crate::ImageRole::OrbCredential)))
+        let nonce = canonical_field(&self.nonce).map_err(|_| FailureReason::MalformedInputs)?;
+        if self.version != REQUEST_VERSION
+            || canonical_field(&self.aud).is_err()
+            || nonce == Fq::from(0u64)
         {
-            if image.is_empty() {
-                return Err(FailureReason::InputRejected {
-                    reason: crate::InputFailureReason::EmptyImage,
-                    image: Some(role),
-                    limit_bytes: None,
-                });
-            }
-
-            if image.len() > MAX_IMAGE_BYTES {
-                return Err(FailureReason::InputRejected {
-                    reason: crate::InputFailureReason::ImageTooLarge,
-                    image: Some(role),
-                    limit_bytes: Some(MAX_IMAGE_BYTES as u64),
-                });
-            }
-            total += image.len();
+            return Err(FailureReason::MalformedInputs);
         }
-
-        if total > MAX_TOTAL_IMAGE_BYTES {
-            return Err(FailureReason::InputRejected {
-                reason: crate::InputFailureReason::TotalImagesTooLarge,
-                image: None,
-                limit_bytes: Some(MAX_TOTAL_IMAGE_BYTES as u64),
-            });
-        }
-
         Ok(())
     }
 
-    /// Checks the signed operation, input commitments and score against this request.
-    #[must_use]
-    pub fn matches_claims(&self, claims: &MatchClaims) -> bool {
-        let (live, challenge, threshold, operation) = match self {
-            Self::DeepFace(inputs) => (
-                &inputs.live,
-                &inputs.rtms_challenge,
-                inputs.match_threshold,
-                MatchOperation::DeepFace {
-                    credential_claim: Sha256::digest(&inputs.hashes_json).into(),
-                },
-            ),
-            Self::GrayBadge(inputs) => (
-                &inputs.live,
-                &inputs.rtms_challenge,
-                inputs.match_threshold,
-                MatchOperation::GrayBadge,
-            ),
-        };
-        let score = f64::from(claims.match_coefficient);
-
-        self.validate().is_ok()
-            && claims.operation == operation
-            && claims.live_capture_hash == live.commitment()
-            && claims.challenger_image_hash == <[u8; 32]>::from(Sha256::digest(challenge))
-            && valid_similarity(score)
-            && score >= threshold
+    /// Decodes and validates the nested payload.
+    ///
+    /// # Errors
+    /// Returns the first violated payload bound.
+    pub fn payload(&self) -> Result<Payload, FailureReason> {
+        let payload: Payload = decode(&self.payload)?;
+        payload.validate()?;
+        Ok(payload)
     }
 }
 
-/// A held match: the signed statement, and the document attesting the key that signed it.
-///
-/// The two travel together because nothing else binds them. The token's `kid` names a key; only
-/// this document says an enclave running a measured image generated it.
-///
-/// Separate from the encryption key's attestation on purpose. This one outlives the exchange and
-/// is carried into the `Verifier` proof; that one is transport setup, discarded with the channel.
+impl Payload {
+    /// Checks every WIP-201 bound and the entry budgets.
+    ///
+    /// # Errors
+    /// Returns [`FailureReason::MalformedInputs`] for a shape violation, or
+    /// [`FailureReason::InputRejected`] for an entry budget.
+    pub fn validate(&self) -> Result<(), FailureReason> {
+        let distinct = self
+            .compare
+            .iter()
+            .enumerate()
+            .all(|(i, index)| !self.compare[..i].contains(index));
+        if self.pipeline == 0
+            || self.hints.len() > MAX_HINTS_BYTES
+            || !(1..=MAX_ENTRIES).contains(&self.entries.len())
+            || self
+                .entries
+                .iter()
+                .any(|entry| entry.meta.len() > MAX_ENTRY_META_BYTES)
+            || !(2..=MAX_COMPARED).contains(&self.compare.len())
+            || !distinct
+            || self
+                .compare
+                .iter()
+                .any(|&index| usize::from(index) >= self.entries.len())
+        {
+            return Err(FailureReason::MalformedInputs);
+        }
+
+        let mut total = 0;
+        for entry in &self.entries {
+            if entry.data.len() > MAX_ENTRY_BYTES {
+                return Err(rejected(InputFailureReason::ImageTooLarge, MAX_ENTRY_BYTES));
+            }
+            total += entry.data.len();
+        }
+        if total > MAX_TOTAL_ENTRY_BYTES {
+            return Err(rejected(
+                InputFailureReason::TotalImagesTooLarge,
+                MAX_TOTAL_ENTRY_BYTES,
+            ));
+        }
+        Ok(())
+    }
+
+    fn data_len(&self) -> usize {
+        self.entries.iter().map(|entry| entry.data.len()).sum()
+    }
+
+    /// The entries `compare` names, in order.
+    pub fn compared(&self) -> impl Iterator<Item = &Entry> {
+        self.compare
+            .iter()
+            .map(|&index| &self.entries[usize::from(index)])
+    }
+
+    /// The claims a Flamingo Token for this payload carries.
+    ///
+    /// # Panics
+    /// Panics if `compare` names an entry out of range; call [`Self::validate`] first.
+    #[must_use]
+    pub fn claims(&self, aud: Fq, nonce: Fq, aat: Option<AatClaims>) -> FlamingoClaims {
+        let mut compared_entry_hashes = [Fq::from(0u64); MAX_COMPARED];
+        for (hash, entry) in compared_entry_hashes.iter_mut().zip(self.compared()) {
+            *hash = digest_to_field(&Sha256::digest(&entry.data).into());
+        }
+        FlamingoClaims {
+            compared_entry_hashes,
+            aud,
+            nonce,
+            aat,
+            engine_config_hash: engine_config_hash(
+                &self.engine_hash,
+                u32::from(self.pipeline),
+                self.match_strictness,
+            ),
+        }
+    }
+}
+
+const fn rejected(reason: InputFailureReason, limit: usize) -> FailureReason {
+    FailureReason::InputRejected {
+        reason,
+        image: None,
+        limit_bytes: Some(limit as u64),
+    }
+}
+
+/// `capacity` covers the byte strings, so the buffer never reallocates around a copy of them.
+fn encode(value: &impl Serialize, capacity: usize) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let mut encoded = Zeroizing::new(Vec::with_capacity(capacity + 16 * 1024));
+    ciborium::into_writer(value, &mut *encoded).map_err(|_| Error::Encoding)?;
+    if encoded.len() > MAX_MATCH_PLAINTEXT_BYTES {
+        return Err(Error::Malformed);
+    }
+    Ok(encoded)
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, FailureReason> {
+    if bytes.len() > MAX_MATCH_PLAINTEXT_BYTES {
+        return Err(FailureReason::MalformedInputs);
+    }
+    let mut reader = bytes;
+    let value = ciborium::from_reader(&mut reader).map_err(|_| FailureReason::MalformedInputs)?;
+    if !reader.is_empty() {
+        return Err(FailureReason::MalformedInputs);
+    }
+    Ok(value)
+}
+
+/// A Flamingo Token with the attestation of the key that signed it, carried together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedStatement {
-    /// The signed statement.
-    pub token: MatchToken,
-    /// Raw COSE attestation document for the key that signed [`Self::token`].
+    /// The signed Flamingo Token.
+    pub token: FlamingoToken,
+    /// NSM document attesting the token's signing key.
     #[serde(with = "serde_bytes")]
     pub signing_key_attestation: Vec<u8>,
 }
 
-/// Signed success or encrypted request/biometric rejection.
-/// Infrastructure failures remain host errors or terminate the broker; they are not rejections.
+/// The sealed response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum MatchResult {
-    /// The match held; carries the signed statement and the attestation for its key.
+    /// The Engine passed and the Verifier signed a Flamingo Token.
     Success {
-        /// Signed statement and signing-key attestation.
+        /// Token and signing-key attestation.
         statement: AttestedStatement,
-        /// Original bounded worker diagnostics.
+        /// Engine diagnostics outside the token.
         debug_report: DebugReport,
     },
-    /// No statement was issued; carries why. No attestation: nothing to verify.
+    /// No token was issued.
     Failed {
-        /// Semantic rejection.
+        /// Why the request failed.
         reason: FailureReason,
-        /// Original bounded worker diagnostics, if produced.
+        /// Engine diagnostics, if produced.
         debug_report: DebugReport,
     },
 }
@@ -300,203 +277,147 @@ pub enum MatchResult {
 mod tests {
     use super::*;
 
-    #[test]
-    fn claims_bind_operation_input_hashes_and_enforce_the_threshold() {
-        let inputs = MatchInputs::DeepFace(DeepFaceInputs {
-            orb_credential: b"orb".to_vec().into(),
-            live: LiveCapture::Vanilla(b"live".to_vec().into()),
-            rtms_challenge: b"challenge".to_vec().into(),
-            hashes_json: b"hashes".to_vec().into(),
-            match_threshold: 0.5,
-        });
-        let claims = MatchClaims {
-            live_capture_hash: LiveCapture::Vanilla(b"live".to_vec().into()).commitment(),
-            operation: MatchOperation::DeepFace {
-                credential_claim: Sha256::digest(b"hashes").into(),
-            },
-            challenger_image_hash: Sha256::digest(b"challenge").into(),
-            match_coefficient: 0.75,
+    /// The WIP-201 Appendix A1 payload.
+    fn payload() -> Payload {
+        let entry = |data: &[u8]| Entry {
+            data: data.to_vec().into(),
+            meta: ByteBuf::new(),
         };
-        assert!(inputs.matches_claims(&claims));
-        for changed in [
-            MatchClaims {
-                live_capture_hash: [0; 32],
-                ..claims
-            },
-            MatchClaims {
-                operation: MatchOperation::DeepFace {
-                    credential_claim: [0; 32],
-                },
-                ..claims
-            },
-            MatchClaims {
-                challenger_image_hash: [0; 32],
-                ..claims
-            },
-        ] {
-            assert!(!inputs.matches_claims(&changed));
-        }
-        for score in [0.25, -0.1, 1.1, f32::NAN, f32::INFINITY] {
-            assert!(!inputs.matches_claims(&MatchClaims {
-                match_coefficient: score,
-                ..claims
-            }));
-        }
-        // Another operation or capture cannot accept this token as its result.
-        assert!(!request().matches_claims(&claims));
-        let MatchInputs::DeepFace(mut inputs) = inputs else {
-            unreachable!()
-        };
-        inputs.live = LiveCapture::LightGuard {
-            illuminated: b"live".to_vec().into(),
-            unilluminated: b"other".to_vec().into(),
-            matching_frame: LightGuardMatchingFrame::Illuminated,
-        };
-        assert!(!MatchInputs::DeepFace(inputs).matches_claims(&claims));
-    }
-
-    #[test]
-    fn light_guard_commitment_binds_every_frame_selection_and_capture_kind() {
-        let capture =
-            |illuminated: &[u8], unilluminated: &[u8], matching_frame| LiveCapture::LightGuard {
-                illuminated: illuminated.to_vec().into(),
-                unilluminated: unilluminated.to_vec().into(),
-                matching_frame,
-            };
-        let live = capture(b"lit", b"dark", LightGuardMatchingFrame::Illuminated);
-        let claims = MatchClaims {
-            live_capture_hash: live.commitment(),
-            operation: MatchOperation::GrayBadge,
-            challenger_image_hash: Sha256::digest(b"challenge").into(),
-            match_coefficient: 0.75,
-        };
-        let inputs = |live| {
-            MatchInputs::GrayBadge(GrayBadgeInputs {
-                live,
-                rtms_challenge: b"challenge".to_vec().into(),
-                match_threshold: 0.5,
-            })
-        };
-        assert!(inputs(live).matches_claims(&claims));
-
-        for changed in [
-            capture(b"changed", b"dark", LightGuardMatchingFrame::Illuminated),
-            capture(b"lit", b"changed", LightGuardMatchingFrame::Illuminated),
-            capture(b"lit", b"dark", LightGuardMatchingFrame::Unilluminated),
-            capture(b"dark", b"lit", LightGuardMatchingFrame::Illuminated),
-            LiveCapture::Vanilla(b"lit".to_vec().into()),
-        ] {
-            assert!(!inputs(changed).matches_claims(&claims));
+        Payload {
+            hints: ByteBuf::new(),
+            compare: vec![0, 1, 2],
+            entries: vec![
+                entry(b"credential image"),
+                entry(b"live image"),
+                entry(b"challenge image"),
+            ],
+            pipeline: 1,
+            engine_hash: [0x2a; 32].into(),
+            match_strictness: 2,
         }
     }
 
-    fn request() -> MatchInputs {
-        MatchInputs::GrayBadge(GrayBadgeInputs {
-            live: LiveCapture::Vanilla(vec![1, 2, 3].into()),
-            rtms_challenge: vec![4, 5].into(),
-            match_threshold: 0.5,
-        })
+    fn request(payload: &Payload) -> Request {
+        let mut nonce = [0; 32];
+        nonce[31] = 42;
+        Request::new(payload, [0; 32], nonce).unwrap()
     }
 
     #[test]
-    fn wire_uses_byte_strings_and_explicit_operations() {
-        let encoded = request().to_cbor().unwrap();
-        let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
-        let map = value.as_map().unwrap();
-        assert_eq!(map[0].0.as_text(), Some("gray_badge"));
-        let fields = map[0].1.as_map().unwrap();
-        assert!(fields.iter().any(
-            |(k, v)| k.as_text() == Some("rtms_challenge") && v.as_bytes() == Some(&vec![4, 5])
-        ));
-        assert!(matches!(
-            MatchInputs::from_cbor(&encoded),
-            Ok(MatchInputs::GrayBadge(_))
-        ));
+    fn payload_and_claims_match_the_wip_201_vectors() {
+        let payload = payload();
+        let encoded = encode(&payload, 0).unwrap();
+        assert_eq!(
+            hex::encode(&*encoded),
+            "a66568696e74734067636f6d706172658300010267656e747269657383a264646174615063726564656e7469616c20696d616765646d65746140a264646174614a6c69766520696d616765646d65746140a264646174614f6368616c6c656e676520696d616765646d6574614068706970656c696e65016b656e67696e655f6861736858202a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a706d617463685f7374726963746e65737302"
+        );
+        let claims = payload.claims(Fq::from(1_928_118u64), Fq::from(42u64), None);
+        assert_eq!(
+            hex::encode(flamingo_token::field_to_bytes(claims.digest())),
+            "046b836383d9d9fd350fbed1197e1c1c17f2b187fb6ef1571e5f9b42ec6fc8fc"
+        );
     }
 
     #[test]
-    fn trailing_data_and_old_requests_are_rejected() {
-        let mut encoded = request().to_cbor().unwrap();
+    fn requests_round_trip() {
+        let request = request(&payload());
+        let decoded = Request::from_cbor(&request.to_cbor().unwrap()).unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(*decoded.payload, *request.payload);
+        assert_eq!(decoded.payload().unwrap().compare, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn rejects_requests_of_any_other_shape() {
+        let mut encoded = request(&payload()).to_cbor().unwrap();
         encoded.push(0);
-        assert!(MatchInputs::from_cbor(&encoded).is_err());
-        assert!(MatchInputs::from_cbor(b"invalid").is_err());
-    }
+        assert!(Request::from_cbor(&encoded).is_err());
 
-    #[test]
-    fn nonfinite_threshold_and_oversized_images_fail_before_encoding() {
-        for value in [f64::NAN, f64::INFINITY, 1.01, -0.01] {
-            let MatchInputs::GrayBadge(mut inputs) = request() else {
-                unreachable!()
-            };
-            inputs.match_threshold = value;
-            assert!(MatchInputs::GrayBadge(inputs).to_cbor().is_err());
-        }
-
-        let MatchInputs::GrayBadge(mut inputs) = request() else {
-            unreachable!()
-        };
-        inputs.rtms_challenge = vec![0; MAX_IMAGE_BYTES + 1].into();
-        let inputs = MatchInputs::GrayBadge(inputs);
-        assert_eq!(
-            inputs.validate(),
-            Err(FailureReason::InputRejected {
-                reason: crate::InputFailureReason::ImageTooLarge,
-                image: Some(crate::ImageRole::RtmsChallenge),
-                limit_bytes: Some(MAX_IMAGE_BYTES as u64)
-            })
-        );
-        // A caller can bypass our encoder; the enclave must validate decoded fields too.
+        let mut with_aat = ciborium::Value::serialized(&request(&payload())).unwrap();
+        with_aat
+            .as_map_mut()
+            .unwrap()
+            .push(("aat_inputs".into(), ciborium::Value::Map(vec![])));
         let mut encoded = Vec::new();
-        ciborium::into_writer(&inputs, &mut encoded).unwrap();
-        let decoded = MatchInputs::from_cbor(&encoded).unwrap();
-        assert_eq!(
-            decoded.validate(),
-            Err(FailureReason::InputRejected {
-                reason: crate::InputFailureReason::ImageTooLarge,
-                image: Some(crate::ImageRole::RtmsChallenge),
-                limit_bytes: Some(MAX_IMAGE_BYTES as u64)
-            })
-        );
-    }
+        ciborium::into_writer(&with_aat, &mut encoded).unwrap();
+        assert!(Request::from_cbor(&encoded).is_err());
 
-    #[test]
-    fn every_outcome_has_identical_envelope_size() {
-        use crate::MATCH_RESPONSE_ENVELOPE_LEN;
-        let success = MatchResult::Success {
-            statement: AttestedStatement {
-                token: MatchToken::from_bytes(vec![1; 512]),
-                signing_key_attestation: vec![2; 5000],
-            },
-            debug_report: DebugReport::NotProduced,
-        };
-        let failure = MatchResult::Failed {
-            reason: FailureReason::MalformedInputs,
-            debug_report: DebugReport::NotProduced,
-        };
-        let image_failure = MatchResult::Failed {
-            reason: FailureReason::ImageRejected {
-                image: crate::ImageRole::LiveSelfie,
-                reason: crate::ImageFailureReason::EyesClosed,
-                target: Some(crate::ValidationTarget::Image),
-            },
-            debug_report: DebugReport::NotProduced,
-        };
-        for result in [success, failure, image_failure] {
-            let encoded = result.to_padded_cbor().unwrap();
-            assert_eq!(encoded.len(), MATCH_RESPONSE_ENVELOPE_LEN);
-            assert_eq!(MatchResult::from_padded_cbor(&encoded), Ok(result));
+        let changes: [fn(&mut Request); 4] = [
+            |r| r.version = 2,
+            |r| r.nonce = [0; 32].into(),
+            |r| r.aud = [0xff; 32].into(),
+            |r| r.nonce = [0xff; 32].into(),
+        ];
+        for change in changes {
+            let mut request = request(&payload());
+            change(&mut request);
+            assert_eq!(request.validate(), Err(FailureReason::MalformedInputs));
         }
     }
 
     #[test]
-    fn ownership_conversion_keeps_the_image_allocation() {
-        let image = vec![1u8; 1024];
-        let pointer = image.as_ptr();
-        let capture = LiveCapture::Vanilla(image.into());
-        let LiveCapture::Vanilla(image) = capture else {
-            unreachable!()
+    fn rejects_payloads_out_of_bounds() {
+        let entry = || Entry {
+            data: vec![1].into(),
+            meta: ByteBuf::new(),
         };
-        let image = image.into_vec();
-        assert_eq!(image.as_ptr(), pointer);
+        let changes: [fn(&mut Payload); 9] = [
+            |p| p.pipeline = 0,
+            |p| p.hints = vec![0; MAX_HINTS_BYTES + 1].into(),
+            |p| p.entries.clear(),
+            |p| p.entries[0].meta = vec![0; MAX_ENTRY_META_BYTES + 1].into(),
+            |p| p.compare = vec![0],
+            |p| p.compare = vec![0, 1, 2, 0, 1],
+            |p| p.compare = vec![0, 0],
+            |p| p.compare = vec![0, 3],
+            |p| {
+                p.entries.resize_with(MAX_ENTRIES + 1, || Entry {
+                    data: ByteBuf::new(),
+                    meta: ByteBuf::new(),
+                });
+            },
+        ];
+        for change in changes {
+            let mut payload = payload();
+            change(&mut payload);
+            assert_eq!(payload.validate(), Err(FailureReason::MalformedInputs));
+        }
+
+        let mut payload = payload();
+        payload.entries.push(entry());
+        payload.entries[0].data = vec![0; MAX_ENTRY_BYTES + 1].into();
+        assert!(matches!(
+            payload.validate(),
+            Err(FailureReason::InputRejected {
+                reason: InputFailureReason::ImageTooLarge,
+                ..
+            })
+        ));
+        payload.entries[0].data = vec![0; MAX_ENTRY_BYTES].into();
+        payload.entries[1].data = vec![0; MAX_TOTAL_ENTRY_BYTES - MAX_ENTRY_BYTES + 1].into();
+        assert!(matches!(
+            payload.validate(),
+            Err(FailureReason::InputRejected {
+                reason: InputFailureReason::TotalImagesTooLarge,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn claims_hash_each_compared_entry_in_compare_order() {
+        let mut payload = payload();
+        payload.compare = vec![2, 0];
+        let claims = payload.claims(Fq::from(1u64), Fq::from(2u64), None);
+        let hash = |data: &[u8]| digest_to_field(&Sha256::digest(data).into());
+        assert_eq!(
+            claims.compared_entry_hashes,
+            [
+                hash(b"challenge image"),
+                hash(b"credential image"),
+                Fq::from(0u64),
+                Fq::from(0u64)
+            ]
+        );
     }
 }

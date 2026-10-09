@@ -73,14 +73,14 @@ pub enum InputFailureReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureReason {
-    /// Invalid CBOR shape.
+    /// Invalid CBOR shape or a WIP-201 bound violated.
     MalformedInputs,
-    /// Invalid or oversized PCP hashes.
-    InvalidHashesJson,
-    /// PCP image binding failed.
-    ThumbnailHashMismatch,
-    /// Nonfinite or out-of-range threshold.
-    InvalidThreshold,
+    /// No loaded Engine bundle hashes to the request's `engine_hash`.
+    UnsupportedEngine,
+    /// The Engine does not define the request's `pipeline`, or the entries do not fit its layout.
+    UnsupportedPipeline,
+    /// The Engine does not define the request's `match_strictness`.
+    UnsupportedMatchStrictness,
     /// Structured malformed-input feedback.
     InputRejected {
         /// Exact failed constraint.
