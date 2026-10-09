@@ -228,7 +228,7 @@ mod tests {
 
     fn deep_face() -> Payload {
         Payload {
-            meta: ByteBuf::new(),
+            hints: ByteBuf::new(),
             compare: vec![0, 1, 2],
             entries: vec![
                 entry(b"orb", b""),
@@ -243,7 +243,7 @@ mod tests {
 
     fn gray_badge() -> Payload {
         Payload {
-            meta: ByteBuf::new(),
+            hints: ByteBuf::new(),
             compare: vec![0, 1],
             entries: vec![
                 entry(b"lit", b"illuminated"),

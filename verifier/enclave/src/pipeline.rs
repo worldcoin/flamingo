@@ -74,7 +74,7 @@ pub fn check_score(
 ///
 /// Every entry is compared, except the second frame of a `LightGuard` capture: the compared live
 /// entry's `meta` is `illuminated` or `unilluminated`, and the one other entry carries the other.
-/// All other `meta` is empty.
+/// All other entry `meta` and the request-level `hints` are empty.
 ///
 /// # Errors
 /// Returns [`FailureReason::UnsupportedPipeline`] for an unknown pipeline or another layout.
@@ -84,7 +84,7 @@ pub fn operation(payload: Payload) -> Result<Operation, FailureReason> {
         PIPELINE_GRAYBADGE => 0,
         _ => return Err(FailureReason::UnsupportedPipeline),
     };
-    if payload.compare.len() != live_position + 2 || !payload.meta.is_empty() {
+    if payload.compare.len() != live_position + 2 || !payload.hints.is_empty() {
         return Err(FailureReason::UnsupportedPipeline);
     }
 
@@ -162,7 +162,7 @@ mod tests {
 
     fn payload(pipeline: u16, entries: Vec<Entry>, compare: Vec<u8>) -> Payload {
         Payload {
-            meta: ByteBuf::new(),
+            hints: ByteBuf::new(),
             compare,
             entries,
             pipeline,
@@ -274,13 +274,13 @@ mod tests {
                 Err(FailureReason::UnsupportedPipeline)
             ));
         }
-        let mut with_meta = payload(
+        let mut with_hints = payload(
             PIPELINE_GRAYBADGE,
             vec![entry(b"a", b""), entry(b"b", b"")],
             vec![0, 1],
         );
-        with_meta.meta = vec![1].into();
-        assert!(operation(with_meta).is_err());
+        with_hints.hints = vec![1].into();
+        assert!(operation(with_hints).is_err());
     }
 
     #[test]
