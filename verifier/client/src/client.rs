@@ -161,7 +161,8 @@ impl VerifiedAssignment {
         &self.attestation
     }
 
-    /// The host's list of loaded Engine bundles. Not attested.
+    /// The host's list of loaded Engine bundles. Not attested: pick an `engine_hash` from it,
+    /// and the enclave rejects a request for a bundle it did not load.
     #[must_use]
     pub fn engine_hashes(&self) -> &[[u8; 32]] {
         &self.engine_hashes
