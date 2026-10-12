@@ -8,9 +8,10 @@ pub const MAX_TOTAL_ENTRY_BYTES: usize = 7 * 1024 * 1024;
 pub const MAX_MATCH_PLAINTEXT_BYTES: usize = MAX_TOTAL_ENTRY_BYTES + 8 * 1024;
 /// Plaintext budget plus room for the Pontifex channel envelope.
 pub const MAX_MATCH_BODY_BYTES: usize = MAX_MATCH_PLAINTEXT_BYTES + 4096;
-/// Fixed plaintext budget for the version 3 response.
-pub const MATCH_RESPONSE_ENVELOPE_LEN: usize = 256 * 1024;
-/// Maximum UTF-8 bytes in a worker report delivered to clients.
-pub const MAX_DEBUG_REPORT_BYTES: usize = 192 * 1024;
+/// Fixed plaintext length of every response: the report cap plus the token, the signing-key
+/// attestation and framing.
+pub const MATCH_RESPONSE_ENVELOPE_LEN: usize = 96 * 1024;
+/// WIP-201 `MAX_DEBUG_REPORT`: maximum UTF-8 bytes in a worker report delivered to clients.
+pub const MAX_DEBUG_REPORT_BYTES: usize = 64 * 1024;
 /// Bounded encrypted response including channel overhead.
 pub const MAX_MATCH_RESPONSE_BYTES: usize = MATCH_RESPONSE_ENVELOPE_LEN + 4096;
