@@ -51,7 +51,7 @@ fn maximum_request_has_bounded_codec_allocations() {
     };
     let mut nonce = [0; 32];
     nonce[31] = 1;
-    let request = Request::new(&payload, [0; 32], nonce).unwrap();
+    let request = Request::new(&payload, [0; 32], nonce, None).unwrap();
     // The sending and receiving processes do not share their input buffers.
     drop(payload);
     let encoded = request.to_cbor().unwrap();

@@ -4,7 +4,7 @@
 //! positions. Field order follows deterministic CBOR (RFC 8949 §4.2.1), so serde writes the
 //! canonical encoding.
 
-use crate::{DebugReport, Error, FailureReason, InputFailureReason};
+use crate::{AatInputs, DebugReport, Error, FailureReason, InputFailureReason};
 use flamingo_verifier_api_types::{
     MAX_ENTRY_BYTES, MAX_MATCH_PLAINTEXT_BYTES, MAX_TOTAL_ENTRY_BYTES,
 };
@@ -43,6 +43,9 @@ pub struct Request {
     pub payload: ByteBuf,
     /// [`REQUEST_VERSION`].
     pub version: u64,
+    /// The Authenticator Assertion, if the Authenticator Provider issues AATs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aat_inputs: Option<AatInputs>,
 }
 
 /// What the Engine receives, unchanged.
@@ -74,11 +77,16 @@ pub struct Entry {
 }
 
 impl Request {
-    /// Encodes `payload` and binds it to the RP's request.
+    /// Encodes `payload` and binds it to the RP's request and an optional AAT.
     ///
     /// # Errors
     /// Fails when the payload or request is out of bounds or cannot be encoded.
-    pub fn new(payload: &Payload, aud: [u8; 32], nonce: [u8; 32]) -> Result<Self, Error> {
+    pub fn new(
+        payload: &Payload,
+        aud: [u8; 32],
+        nonce: [u8; 32],
+        aat_inputs: Option<AatInputs>,
+    ) -> Result<Self, Error> {
         payload.validate().map_err(|_| Error::Malformed)?;
         let request = Self {
             aud: aud.into(),
@@ -86,6 +94,7 @@ impl Request {
             // Moved, not copied: the payload is the request's largest buffer.
             payload: ByteBuf::from(std::mem::take(&mut *encode(payload, payload.data_len())?)),
             version: REQUEST_VERSION,
+            aat_inputs,
         };
         request.validate().map_err(|_| Error::Malformed)?;
         Ok(request)
@@ -120,6 +129,17 @@ impl Request {
             return Err(FailureReason::MalformedInputs);
         }
         Ok(())
+    }
+
+    /// Verifies the AAT, if any, against this request's exact payload bytes.
+    ///
+    /// # Errors
+    /// Returns [`FailureReason::AatRejected`] for an AAT that does not verify.
+    pub fn verify_aat(&self) -> Result<Option<AatClaims>, FailureReason> {
+        let field = |bytes| canonical_field(bytes).map_err(|_| FailureReason::MalformedInputs);
+        self.aat_inputs
+            .map(|inputs| inputs.verify(field(&self.aud)?, field(&self.nonce)?, &self.payload))
+            .transpose()
     }
 
     /// Decodes and validates the nested payload.
@@ -300,7 +320,7 @@ mod tests {
     fn request(payload: &Payload) -> Request {
         let mut nonce = [0; 32];
         nonce[31] = 42;
-        Request::new(payload, [0; 32], nonce).unwrap()
+        Request::new(payload, [0; 32], nonce, None).unwrap()
     }
 
     #[test]
@@ -333,13 +353,13 @@ mod tests {
         encoded.push(0);
         assert!(Request::from_cbor(&encoded).is_err());
 
-        let mut with_aat = ciborium::Value::serialized(&request(&payload())).unwrap();
-        with_aat
+        let mut unknown = ciborium::Value::serialized(&request(&payload())).unwrap();
+        unknown
             .as_map_mut()
             .unwrap()
-            .push(("aat_inputs".into(), ciborium::Value::Map(vec![])));
+            .push(("unknown".into(), ciborium::Value::Map(vec![])));
         let mut encoded = Vec::new();
-        ciborium::into_writer(&with_aat, &mut encoded).unwrap();
+        ciborium::into_writer(&unknown, &mut encoded).unwrap();
         assert!(Request::from_cbor(&encoded).is_err());
 
         let changes: [fn(&mut Request); 4] = [

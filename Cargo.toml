@@ -25,8 +25,8 @@ publish = false
 [workspace.dependencies]
 biometric-engines-protocol = "0.1.0"
 anyhow = "1.0"
-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5" }
-ark-ff = "0.5"
+ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.6" }
+ark-ff = "0.6"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
@@ -39,7 +39,7 @@ flamingo-verifier-client = { path = "verifier/client" }
 flamingo-verifier-enclave-types = { path = "verifier/enclave-types" }
 flamingo-verifier-protocol = { version = "0.8.0", path = "verifier/protocol" }
 flamingo-verifier-sealed-types = { version = "0.8.0", path = "verifier/sealed-types" }
-eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
+eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.6" }
 flamingo-verifier-sandbox-client = { path = "verifier/sandbox-client" }
 flamingo-verifier-sandbox-bundle = { path = "verifier/sandbox-bundle" }
 futures-util = "0.3"
@@ -50,7 +50,7 @@ libc = "0.2"
 minijail = { git = "https://github.com/google/minijail", rev = "b0b5dc6997956cdc027295ade5e425c416f30d33" }
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
 pontifex = { version = "3.0.0", default-features = false }
-poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
+poseidon2 = { package = "taceo-poseidon2", version = "0.3" }
 rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
@@ -70,4 +70,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 webpki-roots = "0.26"
+# `verify_aat` is unreleased (world-id-protocol #1028); move to crates.io with the next release.
+world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "6e64f6caed7c31bb1953af052dfd6bbf5d451670", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }

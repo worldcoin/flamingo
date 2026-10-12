@@ -66,13 +66,15 @@ struct Prepared {
 /// Checks the request and computes its claims; a failure here never reaches the engine.
 fn prepare(state: &EnclaveState, request: &Request) -> Result<Prepared, FailureReason> {
     request.validate()?;
+    // Every AAT check holds before the Engine sees the request.
+    let aat = request.verify_aat()?;
     let payload = request.payload()?;
     if !state.engine_hashes().contains(&*payload.engine_hash) {
         return Err(FailureReason::UnsupportedEngine);
     }
     let threshold = pipeline::threshold(payload.match_strictness)?;
     let field = |bytes| canonical_field(bytes).map_err(|_| FailureReason::MalformedInputs);
-    let claims = payload.claims(field(&request.aud)?, field(&request.nonce)?, None);
+    let claims = payload.claims(field(&request.aud)?, field(&request.nonce)?, aat);
     let operation = pipeline::operation(payload)?;
     Ok(Prepared {
         claims,
@@ -166,8 +168,11 @@ mod tests {
         test_support::{EchoAttestor, TEST_ENGINE_HASH, UnusedBiometricEngine},
     };
     use flamingo_verifier_protocol::{Fq, flamingo_token};
-    use flamingo_verifier_sealed_types::{ByteBuf, Entry, MATCH_CHANNEL_DOMAIN, Payload};
+    use flamingo_verifier_sealed_types::{
+        AatInputs, ByteBuf, Entry, MATCH_CHANNEL_DOMAIN, Payload,
+    };
     use pontifex::{ChannelConsumer, ChannelDomain};
+    use sha2::{Digest, Sha256};
 
     struct Engine {
         third: f32,
@@ -287,7 +292,7 @@ mod tests {
     }
 
     async fn exchange(state: Arc<EnclaveState>, payload: &Payload) -> (MatchResult, usize) {
-        let request = Request::new(payload, AUD, nonce()).unwrap();
+        let request = Request::new(payload, AUD, nonce(), None).unwrap();
         exchange_bytes(state, &request.to_cbor().unwrap()).await
     }
 
@@ -359,6 +364,62 @@ mod tests {
         ));
     }
 
+    /// A request carrying an AAT signed over its exact payload.
+    fn with_aat(payload: &Payload) -> Request {
+        use world_id_primitives::{
+            EdDSAPrivateKey, FieldElement,
+            authenticator_assertion::{message_hash, request_commitment},
+        };
+        let mut request = Request::new(payload, AUD, nonce(), None).unwrap();
+        let key = EdDSAPrivateKey::from_bytes([0x07; 32]);
+        let field = |bytes: &[u8; 32]| FieldElement::from(canonical_field(bytes).unwrap());
+        let mut blind = [0; 32];
+        blind[31] = 7;
+        let cdh = flamingo_token::digest_to_field(&Sha256::digest(&request.payload).into());
+        let (exp, sec_flags) = (1_783_446_925, 0x0013_0000_07d6_0102);
+        let commitment =
+            request_commitment(field(&AUD), field(&nonce()), cdh.into(), field(&blind));
+        let sig = key.sign(*message_hash(exp, commitment, sec_flags));
+        request.aat_inputs = Some(AatInputs {
+            exp,
+            now: 1_783_446_000,
+            sig: sig.to_compressed_bytes().unwrap().into(),
+            blind: blind.into(),
+            sec_flags,
+            min_build_version: 2006,
+            authenticator_provider_key: key.public().to_compressed_bytes().unwrap().into(),
+        });
+        request
+    }
+
+    #[tokio::test]
+    async fn signs_the_verified_aat_values() {
+        let state = state(Engine { third: 0.95 });
+        let request = with_aat(&deep_face());
+        let aat = request.aat_inputs.unwrap().claims().unwrap();
+        let (result, _) = exchange_bytes(Arc::clone(&state), &request.to_cbor().unwrap()).await;
+        let MatchResult::Success { statement, .. } = result else {
+            panic!("expected a signed result")
+        };
+        let claims = flamingo_token::verify(&statement.token, state.signing_public_key()).unwrap();
+        assert_eq!(claims.aat, Some(aat));
+        assert_eq!(aat.now, 1_783_446_000);
+    }
+
+    #[tokio::test]
+    async fn an_aat_for_another_payload_rejects_before_inference() {
+        let mut request = with_aat(&deep_face());
+        let mut other = deep_face();
+        other.match_strictness = 3;
+        request.payload = Request::new(&other, AUD, nonce(), None).unwrap().payload;
+        assert_eq!(
+            exchange_bytes(state(UnusedBiometricEngine), &request.to_cbor().unwrap())
+                .await
+                .0,
+            rejected(FailureReason::AatRejected)
+        );
+    }
+
     #[tokio::test]
     async fn rejects_before_inference() {
         type Change = (fn(&mut Payload), FailureReason);
@@ -382,7 +443,7 @@ mod tests {
             );
         }
 
-        let mut request = Request::new(&deep_face(), AUD, nonce()).unwrap();
+        let mut request = Request::new(&deep_face(), AUD, nonce(), None).unwrap();
         request.nonce = [0; 32].into();
         assert_eq!(
             exchange_bytes(state(UnusedBiometricEngine), &request.to_cbor().unwrap())

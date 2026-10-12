@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
     let context = RequestContext {
         aud: [0; 32],
         nonce,
+        aat_inputs: None,
     };
 
     let result = session

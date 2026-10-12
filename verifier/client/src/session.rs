@@ -204,7 +204,7 @@ async fn exchange_match(
     verifier: &Verifier,
     request_timeout: Duration,
 ) -> Result<VerifiedMatchResult, Error> {
-    let plaintext = Request::new(payload, context.aud, context.nonce)
+    let plaintext = Request::new(payload, context.aud, context.nonce, context.aat_inputs)
         .and_then(|request| request.to_cbor())
         .map_err(|_| Error::MalformedRequest)?;
     let (sealed, opener) = consumer
@@ -325,6 +325,7 @@ mod tests {
         RequestContext {
             aud: [0; 32],
             nonce,
+            aat_inputs: None,
         }
     }
 

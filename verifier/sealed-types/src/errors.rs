@@ -81,6 +81,8 @@ pub enum FailureReason {
     UnsupportedPipeline,
     /// The Engine does not define the request's `match_strictness`.
     UnsupportedMatchStrictness,
+    /// The request's AAT failed a WIP-106 §3.7 check.
+    AatRejected,
     /// Structured malformed-input feedback.
     InputRejected {
         /// Exact failed constraint.
