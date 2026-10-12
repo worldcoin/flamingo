@@ -284,12 +284,12 @@ mod tests {
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
     use flamingo_verifier_protocol::flamingo_token::FlamingoToken;
     use flamingo_verifier_sealed_types::{
-        AttestedStatement, ByteBuf, DebugReport, Entry, FailureReason, MATCH_CHANNEL_DOMAIN,
-        MatchResult, Payload,
+        AttestedStatement, ByteBuf, CHANNEL_DOMAIN, DebugReport, Entry, FailureReason, MatchResult,
+        Payload,
     };
     use futures_util::{SinkExt, StreamExt};
     use pontifex::attestation::PcrConfig;
-    use pontifex::{ChannelConsumer, ChannelDomain, ChannelEnclave};
+    use pontifex::{ChannelConsumer, ChannelEnclave};
     use tokio::net::{TcpListener, TcpStream};
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
@@ -330,11 +330,8 @@ mod tests {
     }
 
     fn consumer_for(enclave: &ChannelEnclave) -> ChannelConsumer {
-        ChannelConsumer::from_unverified_public_key(
-            ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
-            &enclave.public_key(),
-        )
-        .expect("valid key")
+        ChannelConsumer::from_unverified_public_key(CHANNEL_DOMAIN, &enclave.public_key())
+            .expect("valid key")
     }
 
     /// Answers the client's binary frame with whatever `handler` sends back.
@@ -372,17 +369,11 @@ mod tests {
         let Message::Binary(_) = request else {
             panic!("expected a binary match frame");
         };
-        Arc::new(
-            ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
-                .expect("channel key"),
-        )
+        Arc::new(ChannelEnclave::generate(CHANNEL_DOMAIN).expect("channel key"))
     }
 
     fn responder() -> Arc<ChannelEnclave> {
-        Arc::new(
-            ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN))
-                .expect("channel key"),
-        )
+        Arc::new(ChannelEnclave::generate(CHANNEL_DOMAIN).expect("channel key"))
     }
 
     async fn rejection_round_trip(foreign_reply: bool) -> Result<VerifiedMatchResult, Error> {

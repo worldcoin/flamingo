@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 use url::Url;
 
+use flamingo_verifier_sealed_types::MAX_ATTESTATION_AGE;
 use pontifex::attestation::{PcrConfig, PcrMeasurement, Verifier};
 
 /// Default freshness bound, matching the few-hour lifetime of a Nitro certificate.
@@ -142,6 +143,13 @@ impl Config {
     /// or zero PCR0, duplicate indices, or malformed measurements.
     pub fn verifier(&self) -> Result<Verifier, Error> {
         let max_age = Duration::from_millis(self.max_attestation_age_millis);
+        if max_age.is_zero() || max_age > MAX_ATTESTATION_AGE {
+            return Err(Error::InvalidConfig {
+                attribute: "max_attestation_age_millis".to_owned(),
+                reason: "must be nonzero and at most WIP-201 MAX_ATTESTATION_AGE (24 hours)"
+                    .to_owned(),
+            });
+        }
         if self.dangerously_skip_measurements {
             return Ok(Verifier::new(vec![], max_age).dangerously_skip_measurements());
         }
@@ -259,8 +267,8 @@ mod pcr_configs {
 mod tests {
     use std::time::Duration;
 
-    use super::Config;
     use super::PcrMeasurement;
+    use super::{Config, MAX_ATTESTATION_AGE};
     use crate::error::Error;
 
     fn pcrs() -> Vec<Vec<PcrMeasurement>> {
@@ -273,6 +281,27 @@ mod tests {
             .expect_err("an empty policy must fail closed");
 
         assert!(matches!(error, Error::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn attestation_age_is_bounded_by_wip_201() {
+        let config = Config::new("http://localhost:8000", pcrs()).unwrap();
+        assert!(
+            config
+                .clone()
+                .with_max_attestation_age(MAX_ATTESTATION_AGE)
+                .verifier()
+                .is_ok()
+        );
+        for age in [
+            Duration::ZERO,
+            MAX_ATTESTATION_AGE + Duration::from_millis(1),
+        ] {
+            assert!(matches!(
+                config.clone().with_max_attestation_age(age).verifier(),
+                Err(Error::InvalidConfig { .. })
+            ));
+        }
     }
 
     #[test]

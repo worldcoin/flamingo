@@ -168,10 +168,8 @@ mod tests {
         test_support::{EchoAttestor, TEST_ENGINE_HASH, UnusedBiometricEngine},
     };
     use flamingo_verifier_protocol::{Fq, flamingo_token};
-    use flamingo_verifier_sealed_types::{
-        AatInputs, ByteBuf, Entry, MATCH_CHANNEL_DOMAIN, Payload,
-    };
-    use pontifex::{ChannelConsumer, ChannelDomain};
+    use flamingo_verifier_sealed_types::{AatInputs, ByteBuf, CHANNEL_DOMAIN, Entry, Payload};
+    use pontifex::ChannelConsumer;
     use sha2::{Digest, Sha256};
 
     struct Engine {
@@ -270,7 +268,7 @@ mod tests {
 
     async fn exchange_bytes(state: Arc<EnclaveState>, plaintext: &[u8]) -> (MatchResult, usize) {
         let consumer = ChannelConsumer::from_unverified_public_key(
-            ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
+            CHANNEL_DOMAIN,
             &state.channel().public_key(),
         )
         .unwrap();

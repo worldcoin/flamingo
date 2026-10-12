@@ -41,7 +41,8 @@ mod tests {
         // EchoAttestor records the bytes submitted to the NSM public_key field.
         assert_eq!(
             response.document,
-            pontifex::channel::public_key_commitment(&response.public_key)
+            flamingo_verifier_sealed_types::CHANNEL_DOMAIN
+                .public_key_commitment(&response.public_key)
         );
     }
 }
