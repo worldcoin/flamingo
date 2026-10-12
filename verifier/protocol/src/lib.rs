@@ -1,10 +1,10 @@
-//! The `Verifier` match statement: the signed claim a held match produces.
+//! The Flamingo Token: the signed claim a passing comparison produces ([`flamingo_token`]).
 //!
-//! [`match_token`] holds the statement itself. What it travels in — the sealed request and
-//! response of one exchange — is `flamingo-verifier-enclave-types`.
+//! What it travels in — the sealed request and response of one exchange — is
+//! `flamingo-verifier-sealed-types`.
 //!
-//! Work in progress — no external security review yet, and the token format is provisional
-//! pending protocol sign-off. Not production ready.
+//! Work in progress — no external security review yet, and the token format follows the WIP-201
+//! draft. Not production ready.
 
 #![deny(
     clippy::all,
@@ -15,6 +15,8 @@
 )]
 
 pub mod error;
-pub mod match_token;
+pub mod flamingo_token;
 
+pub use ark_babyjubjub::Fq;
+pub use eddsa_babyjubjub::EdDSAPublicKey;
 pub use error::Error;

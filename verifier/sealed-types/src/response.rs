@@ -142,7 +142,7 @@ impl MatchResult {
 mod tests {
     use super::*;
     use crate::{AttestedStatement, FailureReason};
-    use flamingo_verifier_protocol::match_token::MatchToken;
+    use flamingo_verifier_protocol::flamingo_token::FlamingoToken;
 
     fn rejection(debug_report: DebugReport) -> MatchResult {
         MatchResult::Failed {
@@ -160,7 +160,7 @@ mod tests {
                 let response = if success {
                     MatchResult::Success {
                         statement: AttestedStatement {
-                            token: MatchToken::from_bytes(vec![1; 512]),
+                            token: FlamingoToken::from_bytes(vec![1; 512]),
                             signing_key_attestation: vec![2; 5000],
                         },
                         debug_report,
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn total_budget_omits_report_without_erasing_a_signed_outcome() {
         let statement = AttestedStatement {
-            token: MatchToken::from_bytes(vec![1; 170 * 1024]),
+            token: FlamingoToken::from_bytes(vec![1; 170 * 1024]),
             signing_key_attestation: vec![2; 5000],
         };
         let response = MatchResult::Success {
@@ -246,7 +246,7 @@ mod tests {
         );
         let response = MatchResult::Success {
             statement: AttestedStatement {
-                token: MatchToken::from_bytes(vec![1; MATCH_RESPONSE_ENVELOPE_LEN]),
+                token: FlamingoToken::from_bytes(vec![1; MATCH_RESPONSE_ENVELOPE_LEN]),
                 signing_key_attestation: vec![],
             },
             debug_report: DebugReport::NotProduced,

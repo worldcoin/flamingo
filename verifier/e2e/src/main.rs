@@ -1,13 +1,15 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use flamingo_verifier_client::{Config, FlamingoVerifierClient, VerifiedMatchResult};
-use flamingo_verifier_sealed_types::{
-    DeepFaceInputs, GrayBadgeInputs, LightGuardMatchingFrame, LiveCapture, MatchInputs,
+use flamingo_verifier_client::{
+    Config, FlamingoVerifierClient, RequestContext, VerifiedMatchResult,
 };
-use sha2::{Digest, Sha256};
+use flamingo_verifier_sealed_types::{ByteBuf, Entry, Payload};
 
-const DEFAULT_MATCH_THRESHOLD: f64 = 0.9;
+/// The enclave's interim pipelines; see `verifier/enclave/src/pipeline.rs`.
+const PIPELINE_DEEPFACE: u16 = 1;
+const PIPELINE_GRAYBADGE: u16 = 2;
+const DEFAULT_MATCH_STRICTNESS: u8 = 2;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,25 +19,30 @@ async fn main() -> Result<()> {
         _ => bail!("MATCH_OPERATION must be deep_face or gray_badge"),
     };
     let image_paths = image_paths(gray_badge)?;
-    let credential_image = image_paths
-        .credential
-        .as_ref()
-        .map(|path| read_image(path, "credential"))
-        .transpose()?;
-    let live = match env::var("LIGHT_GUARD_UNILLUMINATED_IMAGE") {
-        Ok(path) => {
-            let matching_frame = match env::var("LIGHT_GUARD_MATCHING_FRAME").as_deref() {
-                Err(env::VarError::NotPresent) | Ok("illuminated") => {
-                    LightGuardMatchingFrame::Illuminated
-                }
+    let entry = |data: Vec<u8>, meta: &[u8]| Entry {
+        data: data.into(),
+        meta: meta.to_vec().into(),
+    };
 
-                Ok("unilluminated") => LightGuardMatchingFrame::Unilluminated,
+    // Compared entries in role order, then the uncompared LightGuard partner frame, if any.
+    let mut entries = Vec::new();
+    if let Some(path) = &image_paths.credential {
+        entries.push(entry(read_image(path, "credential")?, b""));
+    }
+    let live = read_image(&image_paths.live, "live")?;
+    let partner = match env::var("LIGHT_GUARD_UNILLUMINATED_IMAGE") {
+        Ok(path) => {
+            let unilluminated = read_image(&PathBuf::from(path), "unilluminated")?;
+            match env::var("LIGHT_GUARD_MATCHING_FRAME").as_deref() {
+                Err(env::VarError::NotPresent) | Ok("illuminated") => {
+                    entries.push(entry(live, b"illuminated"));
+                    Some(entry(unilluminated, b"unilluminated"))
+                }
+                Ok("unilluminated") => {
+                    entries.push(entry(unilluminated, b"unilluminated"));
+                    Some(entry(live, b"illuminated"))
+                }
                 _ => bail!("LIGHT_GUARD_MATCHING_FRAME must be illuminated or unilluminated"),
-            };
-            LiveCapture::LightGuard {
-                illuminated: read_image(&image_paths.live, "illuminated")?.into(),
-                unilluminated: read_image(&PathBuf::from(path), "unilluminated")?.into(),
-                matching_frame,
             }
         }
         Err(env::VarError::NotPresent) => {
@@ -43,13 +50,19 @@ async fn main() -> Result<()> {
                 env::var_os("LIGHT_GUARD_MATCHING_FRAME").is_none(),
                 "LIGHT_GUARD_MATCHING_FRAME requires LIGHT_GUARD_UNILLUMINATED_IMAGE"
             );
-            LiveCapture::Vanilla(read_image(&image_paths.live, "live")?.into())
+            entries.push(entry(live, b""));
+            None
         }
         Err(error) => return Err(error.into()),
     };
-    let challenge_image = read_image(&image_paths.challenge, "challenge")?;
+    entries.push(entry(read_image(&image_paths.challenge, "challenge")?, b""));
+    let compare = (0..u8::try_from(entries.len())?).collect();
+    entries.extend(partner);
 
-    let match_threshold = optional_f64("MATCH_THRESHOLD", DEFAULT_MATCH_THRESHOLD)?;
+    let match_strictness = env::var("MATCH_STRICTNESS")
+        .map_or(Ok(DEFAULT_MATCH_STRICTNESS), |value| {
+            value.parse().context("MATCH_STRICTNESS must be a valid u8")
+        })?;
 
     let config = load_config()?;
     let client = FlamingoVerifierClient::new(config).context("failed to build the client")?;
@@ -57,31 +70,39 @@ async fn main() -> Result<()> {
         .connect()
         .await
         .context("enclave assignment did not verify")?;
+    let engine_hash = *session
+        .assignment()
+        .engine_hashes()
+        .first()
+        .context("the host serves no loaded Engine")?;
 
-    let inputs = if let Some(credential_image) = credential_image {
-        let hashes_json = hashes_json_for(&credential_image);
-        MatchInputs::DeepFace(DeepFaceInputs {
-            live,
-            orb_credential: credential_image.into(),
-            hashes_json: hashes_json.into(),
-            rtms_challenge: challenge_image.into(),
-            match_threshold,
-        })
-    } else {
-        MatchInputs::GrayBadge(GrayBadgeInputs {
-            live,
-            rtms_challenge: challenge_image.into(),
-            match_threshold,
-        })
+    let payload = Payload {
+        hints: ByteBuf::new(),
+        compare,
+        entries,
+        pipeline: if gray_badge {
+            PIPELINE_GRAYBADGE
+        } else {
+            PIPELINE_DEEPFACE
+        },
+        engine_hash: engine_hash.into(),
+        match_strictness,
+    };
+    // A fixed test binding; a real RP issues a fresh nonce per request.
+    let mut nonce = [0; 32];
+    nonce[31] = 1;
+    let context = RequestContext {
+        aud: [0; 32],
+        nonce,
     };
 
     let result = session
-        .request_match(&inputs)
+        .request_match(&payload, &context)
         .await
         .context("match exchange did not verify")?;
     match result {
         VerifiedMatchResult::Success { .. } => {
-            println!("attested match succeeded; operation, capture commitments and score verified");
+            println!("attested match succeeded; Flamingo Token and its claims verified");
         }
         VerifiedMatchResult::Failed { reason, .. } => bail!("no statement was issued: {reason:?}"),
     }
@@ -129,17 +150,4 @@ fn image_paths(gray_badge: bool) -> Result<ImagePaths> {
 
 fn read_image(path: &PathBuf, label: &str) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("failed to read {label} image at {}", path.display()))
-}
-
-fn hashes_json_for(image: &[u8]) -> Vec<u8> {
-    let hash = hex::encode(Sha256::digest(image));
-    format!(r#"{{"thumbnail.png":"{hash}"}}"#).into_bytes()
-}
-
-fn optional_f64(name: &str, default: f64) -> Result<f64> {
-    env::var(name).map_or(Ok(default), |value| {
-        value
-            .parse()
-            .with_context(|| format!("{name} must be a valid f64"))
-    })
 }

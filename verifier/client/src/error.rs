@@ -34,6 +34,9 @@ pub enum Error {
     #[error("sealed channel failure: {0:?}")]
     Channel(#[source] ChannelError),
 
+    /// The payload or request context violated a WIP-201 bound or did not encode.
+    #[error("match request was malformed")]
+    MalformedRequest,
     /// The sealed plaintext was not a match result.
     #[error("sealed response was not a match result")]
     MalformedResult,

@@ -39,10 +39,11 @@
 
 ⚠️ Active development. Not ready for production use. ⚠️
 
-Flamingo compares an Orb credential photo, a live selfie, and a challenge image
-inside an AWS Nitro Enclave. If all three face comparisons meet the requested
-threshold, it returns a signed match statement. Images and results stay encrypted
-between the client and enclave; the host relays them.
+Flamingo is the reference [WIP-201](https://github.com/worldcoin/world-id-protocol/pull/979) Verifier.
+It compares images, such as an Orb credential photo, a live selfie and a challenge,
+inside an AWS Nitro Enclave. If every comparison meets the requested match strictness,
+it returns a signed Flamingo Token. Images and results stay encrypted between the
+client and enclave; the host relays them.
 
 This repository includes:
 
@@ -50,4 +51,3 @@ This repository includes:
 - A Rust client that verifies enclave attestation, encrypts inputs, and checks signed results.
 - Reproducible OCI and Nitro EIF builds, with PCR measurements for clients to pin.
 
-GrayBadge and LightGuard requests are defined but not supported yet.

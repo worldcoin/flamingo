@@ -9,7 +9,5 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 flamingo-verifier-sealed-types.workspace = true
-hex.workspace = true
-sha2.workspace = true
 tokio.workspace = true
 flamingo-verifier-client.workspace = true

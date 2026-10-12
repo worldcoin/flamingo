@@ -93,6 +93,6 @@ VERIFIER_CONFIG=./client.json cargo run --locked --bin flamingo-verifier-e2e -- 
   credential.png live.png challenge.png
 ```
 
-The harness opens the WebSocket session — one assignment text frame, then one sealed match binary frame over the same socket — submits an encrypted DeepFace request, and verifies the statement and its claims. It defaults to a `0.9` threshold; `MATCH_THRESHOLD` overrides it. It creates `hashes.json` from the supplied credential image for this test. Real callers must supply the credential's original `hashes.json`.
+The harness opens the WebSocket session — one assignment text frame, then one sealed match binary frame over the same socket — submits an encrypted DeepFace request, and verifies the Flamingo Token and its claims. It uses the first Engine the host serves and match strictness `2`; `MATCH_STRICTNESS` overrides it.
 
 `MATCH_OPERATION=gray_badge` runs the credential-free operation instead and takes only `<live-image> <challenge-image>`. `LIGHT_GUARD_UNILLUMINATED_IMAGE` adds the second frame and `LIGHT_GUARD_MATCHING_FRAME` selects `illuminated` (default) or `unilluminated`.

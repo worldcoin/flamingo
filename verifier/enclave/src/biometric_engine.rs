@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
+use flamingo_verifier_sealed_types::{ByteBuf, DebugReport, FailureReason, MatchResult};
 #[cfg(any(target_os = "linux", test))]
 use tokio::{sync::Mutex, time::timeout};
 
@@ -12,11 +12,35 @@ use tokio::{sync::Mutex, time::timeout};
 use crate::blocking;
 
 /// Maximum encoded bytes per image, derived from the public API.
-pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_IMAGE_BYTES;
+pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_ENTRY_BYTES;
 /// API image budget plus protobuf envelope overhead.
-pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_IMAGE_BYTES + 1024;
+pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_ENTRY_BYTES + 1024;
 #[cfg(any(target_os = "linux", test))]
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Which `LightGuard` frame is compared with the other images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightGuardMatchingFrame {
+    /// The illuminated frame.
+    Illuminated,
+    /// The unilluminated frame.
+    Unilluminated,
+}
+
+/// The live capture as the Engine reads it.
+pub enum LiveCapture {
+    /// One selfie.
+    Vanilla(ByteBuf),
+    /// An illuminated and an unilluminated frame.
+    LightGuard {
+        /// The illuminated frame.
+        illuminated: ByteBuf,
+        /// The unilluminated frame.
+        unilluminated: ByteBuf,
+        /// The frame compared with the other images.
+        matching_frame: LightGuardMatchingFrame,
+    },
+}
 
 /// Normalized inference scores; policy and signed claims belong to the operation.
 #[derive(Clone, Debug)]
@@ -153,6 +177,7 @@ pub use sandboxed::SandboxBiometricEngine;
 
 #[cfg(target_os = "linux")]
 mod sandboxed {
+    use super::LiveCapture;
     use super::{
         BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores, normalized,
     };
@@ -166,7 +191,7 @@ mod sandboxed {
         response::Outcome,
     };
     use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
-    use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
+    use flamingo_verifier_sealed_types::{DebugReport, FailureReason, MatchResult};
 
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
@@ -214,10 +239,10 @@ mod sandboxed {
                 illuminated: illuminated.into_vec(),
                 unilluminated: unilluminated.into_vec(),
                 matching_frame: match matching_frame {
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated => {
+                    super::LightGuardMatchingFrame::Illuminated => {
                         LightGuardMatchingFrame::Illuminated as i32
                     }
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated => {
+                    super::LightGuardMatchingFrame::Unilluminated => {
                         LightGuardMatchingFrame::Unilluminated as i32
                     }
                 },
@@ -312,11 +337,11 @@ mod sandboxed {
         fn light_guard_preserves_both_frames_and_the_selected_matching_frame() {
             for (matching_frame, expected) in [
                 (
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated,
+                    super::super::LightGuardMatchingFrame::Illuminated,
                     LightGuardMatchingFrame::Illuminated,
                 ),
                 (
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated,
+                    super::super::LightGuardMatchingFrame::Unilluminated,
                     LightGuardMatchingFrame::Unilluminated,
                 ),
             ] {

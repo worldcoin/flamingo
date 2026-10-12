@@ -104,7 +104,7 @@ impl BiometricEngine for UnusedBiometricEngine {
     async fn deepface(
         &self,
         _: Vec<u8>,
-        _: flamingo_verifier_sealed_types::LiveCapture,
+        _: crate::biometric_engine::LiveCapture,
         _: Vec<u8>,
     ) -> Result<DeepFaceScores, BiometricError> {
         panic!("biometric engine was called unexpectedly")
@@ -112,7 +112,7 @@ impl BiometricEngine for UnusedBiometricEngine {
 
     async fn graybadge(
         &self,
-        _: flamingo_verifier_sealed_types::LiveCapture,
+        _: crate::biometric_engine::LiveCapture,
         _: Vec<u8>,
     ) -> Result<GrayBadgeScores, BiometricError> {
         panic!("biometric engine was called unexpectedly")
