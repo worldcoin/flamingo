@@ -12,6 +12,7 @@ use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
     biometric_engine::BiometricEngine,
     keys::SigningKey,
+    replay::ReplayGuard,
 };
 
 /// Immutable state generated once during enclave boot.
@@ -25,6 +26,7 @@ pub struct EnclaveState {
     /// Cached attestation of the statement key.
     attested_signing_key: AttestedKey,
     engine: Box<dyn BiometricEngine>,
+    replay: ReplayGuard,
 }
 
 impl EnclaveState {
@@ -71,6 +73,7 @@ impl EnclaveState {
             attested_encryption_key,
             attested_signing_key,
             engine,
+            replay: ReplayGuard::default(),
         })
     }
 
@@ -111,6 +114,14 @@ impl EnclaveState {
 
     pub(crate) fn engine(&self) -> &dyn BiometricEngine {
         self.engine.as_ref()
+    }
+
+    pub(crate) fn reserve_request(
+        &self,
+        aud: [u8; 32],
+        nonce: [u8; 32],
+    ) -> Result<(), flamingo_verifier_sealed_types::FailureReason> {
+        self.replay.reserve(aud, nonce)
     }
 
     /// Starts background attestation refresh for both boot keys.

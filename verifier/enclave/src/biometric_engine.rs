@@ -191,7 +191,7 @@ mod sandboxed {
         response::Outcome,
     };
     use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
-    use flamingo_verifier_sealed_types::{DebugReport, FailureReason, MatchResult};
+    use flamingo_verifier_sealed_types::FailureReason;
 
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
