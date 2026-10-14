@@ -140,13 +140,13 @@ impl Config {
     /// # Errors
     ///
     /// Without the explicit measurement bypass, rejects an empty policy, missing
-    /// or zero PCR0, duplicate indices, or malformed measurements.
+    /// or zero PCR0–2, duplicate indices, or malformed measurements.
     pub fn verifier(&self) -> Result<Verifier, Error> {
         let max_age = Duration::from_millis(self.max_attestation_age_millis);
         if max_age.is_zero() || max_age > MAX_ATTESTATION_AGE {
             return Err(Error::InvalidConfig {
                 attribute: "max_attestation_age_millis".to_owned(),
-                reason: "must be nonzero and at most WIP-201 MAX_ATTESTATION_AGE (24 hours)"
+                reason: "must be nonzero and at most WIP-201 MAX_ATTESTATION_AGE (3 hours)"
                     .to_owned(),
             });
         }
@@ -155,7 +155,7 @@ impl Config {
         }
         let invalid = || Error::InvalidConfig {
             attribute: "allowed_pcr_configs".to_owned(),
-            reason: "each configuration must pin a nonzero 48-byte PCR0; \
+            reason: "each configuration must pin nonzero 48-byte PCR0, PCR1 and PCR2; \
                      all measurements must be 48 bytes with unique indices"
                 .to_owned(),
         };
@@ -170,6 +170,14 @@ impl Config {
                 .any(|pcr| pcr.value.len() != 48 || !indices.insert(pcr.index))
             {
                 return Err(invalid());
+            }
+            for index in 0..=2 {
+                if !measurements
+                    .iter()
+                    .any(|pcr| pcr.index == index && pcr.value.iter().any(|&byte| byte != 0))
+                {
+                    return Err(invalid());
+                }
             }
             let pcr0 = measurements
                 .iter()
@@ -272,7 +280,11 @@ mod tests {
     use crate::error::Error;
 
     fn pcrs() -> Vec<Vec<PcrMeasurement>> {
-        vec![vec![PcrMeasurement::new(0, [0xabu8; 48])]]
+        vec![
+            (0..=2)
+                .map(|index| PcrMeasurement::new(index, [0xab; 48]))
+                .collect(),
+        ]
     }
 
     #[test]
@@ -295,12 +307,30 @@ mod tests {
         );
         for age in [
             Duration::ZERO,
-            MAX_ATTESTATION_AGE + Duration::from_millis(1),
+            Duration::from_secs(10_800) + Duration::from_millis(1),
+            Duration::from_hours(24),
         ] {
             assert!(matches!(
                 config.clone().with_max_attestation_age(age).verifier(),
                 Err(Error::InvalidConfig { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn requires_each_release_measurement_even_when_pcr0_is_pinned() {
+        for missing in 0..=2 {
+            let mut policy = pcrs().pop().unwrap();
+            policy.retain(|pcr| pcr.index != missing);
+            assert!(Config::new("http://localhost:8000", vec![policy]).is_err());
+            let mut policy = pcrs().pop().unwrap();
+            policy
+                .iter_mut()
+                .find(|pcr| pcr.index == missing)
+                .unwrap()
+                .value
+                .fill(0);
+            assert!(Config::new("http://localhost:8000", vec![policy]).is_err());
         }
     }
 
@@ -419,7 +449,8 @@ mod tests {
             "host_url": "http://localhost:8000",
             "allowed_pcr_configs": [[
                 { "index": 0, "value": "0xab01" },
-                { "index": 1, "value": "ab01" }
+                { "index": 1, "value": "ab01" },
+                { "index": 2, "value": "ab01" }
             ]]
         }"#;
 
@@ -448,8 +479,11 @@ mod tests {
                 vec![
                     pontifex::PcrMeasurement::new(0, [0xab; 48]),
                     pontifex::PcrMeasurement::new(1, [0xcd; 48]),
+                    pontifex::PcrMeasurement::new(2, [0xde; 48]),
                 ],
-                vec![pontifex::PcrMeasurement::new(0, [0xef; 48])],
+                (0..=2)
+                    .map(|index| PcrMeasurement::new(index, [0xef; 48]))
+                    .collect(),
             ],
         )
         .expect("Pontifex measurements should be accepted");
@@ -460,9 +494,14 @@ mod tests {
             serde_json::json!([
                 [
                     { "index": 0, "value": "ab".repeat(48) },
-                    { "index": 1, "value": "cd".repeat(48) }
+                    { "index": 1, "value": "cd".repeat(48) },
+                    { "index": 2, "value": "de".repeat(48) }
                 ],
-                [{ "index": 0, "value": "ef".repeat(48) }]
+                [
+                    { "index": 0, "value": "ef".repeat(48) },
+                    { "index": 1, "value": "ef".repeat(48) },
+                    { "index": 2, "value": "ef".repeat(48) }
+                ]
             ])
         );
 

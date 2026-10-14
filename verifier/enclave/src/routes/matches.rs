@@ -76,6 +76,8 @@ fn prepare(state: &EnclaveState, request: &Request) -> Result<Prepared, FailureR
     let field = |bytes| canonical_field(bytes).map_err(|_| FailureReason::MalformedInputs);
     let claims = payload.claims(field(&request.aud)?, field(&request.nonce)?, aat);
     let operation = pipeline::operation(payload)?;
+    // Reserve atomically before inference. Failures and cancelled exchanges keep the reservation.
+    state.reserve_request(*request.aud, *request.nonce)?;
     Ok(Prepared {
         claims,
         threshold,
@@ -299,6 +301,105 @@ mod tests {
             reason,
             debug_report: DebugReport::NotProduced,
         }
+    }
+
+    struct CountingEngine(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl BiometricEngine for CountingEngine {
+        fn engine_hash(&self) -> [u8; 32] {
+            TEST_ENGINE_HASH
+        }
+
+        async fn deepface(
+            &self,
+            credential: Vec<u8>,
+            live: LiveCapture,
+            challenge: Vec<u8>,
+        ) -> Result<DeepFaceScores, BiometricError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Engine { third: 0.95 }
+                .deepface(credential, live, challenge)
+                .await
+        }
+
+        async fn graybadge(
+            &self,
+            _: LiveCapture,
+            _: Vec<u8>,
+        ) -> Result<GrayBadgeScores, BiometricError> {
+            panic!("replay test only uses DeepFace")
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_replays_only_run_one_inference() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = state(CountingEngine(Arc::clone(&calls)));
+        let payload = deep_face();
+        let (first, second) = tokio::join!(
+            exchange(Arc::clone(&state), &payload),
+            exchange(Arc::clone(&state), &payload),
+        );
+        let successes = [&first.0, &second.0]
+            .into_iter()
+            .filter(|result| matches!(result, MatchResult::Success { .. }))
+            .count();
+        assert_eq!(successes, 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!([first.0, second.0].contains(&rejected(FailureReason::MalformedInputs)));
+        assert_eq!(first.1, second.1);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_comparison_still_consumes_the_nonce() {
+        let state = state(Engine { third: 0.5 });
+        assert!(matches!(
+            exchange(Arc::clone(&state), &deep_face()).await.0,
+            MatchResult::Failed {
+                reason: FailureReason::MatchBelowThreshold(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            exchange(state, &deep_face()).await.0,
+            rejected(FailureReason::MalformedInputs)
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_identity_includes_audience_and_nonce_and_resets_with_the_key() {
+        let first_boot = state(Engine { third: 0.95 });
+        let request = Request::new(&deep_face(), AUD, nonce(), None).unwrap();
+        let plaintext = request.to_cbor().unwrap();
+        assert!(matches!(
+            exchange_bytes(Arc::clone(&first_boot), &plaintext).await.0,
+            MatchResult::Success { .. }
+        ));
+        assert_eq!(
+            exchange_bytes(Arc::clone(&first_boot), &plaintext).await.0,
+            rejected(FailureReason::MalformedInputs)
+        );
+        for changed in [
+            Request::new(&deep_face(), [8; 32], nonce(), None).unwrap(),
+            Request::new(&deep_face(), AUD, [1; 32], None).unwrap(),
+        ] {
+            assert!(matches!(
+                exchange_bytes(Arc::clone(&first_boot), &changed.to_cbor().unwrap())
+                    .await
+                    .0,
+                MatchResult::Success { .. }
+            ));
+        }
+        let second_boot = state(Engine { third: 0.95 });
+        assert_ne!(
+            first_boot.encryption_public_key(),
+            second_boot.encryption_public_key()
+        );
+        assert!(matches!(
+            exchange_bytes(second_boot, &plaintext).await.0,
+            MatchResult::Success { .. }
+        ));
     }
 
     #[tokio::test]

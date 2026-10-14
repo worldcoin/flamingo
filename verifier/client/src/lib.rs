@@ -12,7 +12,11 @@
 //! # async fn example(payload: &Payload, context: &RequestContext, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Config::new(
 //!     "https://verifier.example.com",
-//!     vec![vec![PcrMeasurement::new(0, pcr0)]],
+//!     vec![vec![
+//!         PcrMeasurement::new(0, pcr0),
+//!         PcrMeasurement::new(1, [0xcd; 48]),
+//!         PcrMeasurement::new(2, [0xef; 48]),
+//!     ]],
 //! )?;
 //! let client = FlamingoVerifierClient::new(config)?;
 //! let session = client.connect().await?;

@@ -11,12 +11,14 @@ publish = true
 [dependencies]
 ark-babyjubjub.workspace = true
 ark-ff.workspace = true
-coset.workspace = true
 eddsa-babyjubjub.workspace = true
 poseidon2.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+world-id-flamingo.workspace = true
+world-id-primitives.workspace = true
 
 [dev-dependencies]
+coset.workspace = true
 hex.workspace = true
 sha2.workspace = true

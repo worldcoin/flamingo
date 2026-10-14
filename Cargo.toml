@@ -71,6 +71,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 webpki-roots = "0.26"
-# `verify_aat` is unreleased (world-id-protocol #1028); move to crates.io with the next release.
-world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "6e64f6caed7c31bb1953af052dfd6bbf5d451670", default-features = false }
+# Shared WIP-201 types are unreleased (world-id-protocol #1079); pin both crates together.
+world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", rev = "a47b68a254bd3e42a0cb49c85e9d36550122883f" }
+world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "a47b68a254bd3e42a0cb49c85e9d36550122883f", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }

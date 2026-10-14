@@ -10,13 +10,17 @@ The host exposes three routes:
 
 ## Client configuration
 
-Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encrypt requests, and check signed results. Save this configuration as `client.json`, replacing the PCR0 placeholder with the value from `target/eif/verifier-pcr.json` or a trusted release:
+Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encrypt requests, and check signed results. Save this configuration as `client.json`, replacing the PCR0–2 placeholders with the values from `target/eif/verifier-pcr.json` or a trusted release:
 
 ```json
 {
   "host_url": "http://localhost:8000",
   "allowed_pcr_configs": [
-    [{ "index": 0, "value": "<96-character PCR0 hex>" }]
+    [
+      { "index": 0, "value": "<96-character PCR0 hex>" },
+      { "index": 1, "value": "<96-character PCR1 hex>" },
+      { "index": 2, "value": "<96-character PCR2 hex>" }
+    ]
   ],
   "max_attestation_age_millis": 3600000,
   "connect_timeout_millis": 5000,
@@ -24,13 +28,13 @@ Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encr
 }
 ```
 
-Only `host_url` and `allowed_pcr_configs` are required. The other fields default to the values shown. Each PCR configuration must include a nonzero, 48-byte PCR0; every measurement must be 48 bytes and each index must be unique. An attestation must match one complete configuration. Debug enclaves report zero measurements and are rejected.
+Only `host_url` and `allowed_pcr_configs` are required. The other fields default to the values shown. Each PCR configuration must include nonzero, 48-byte PCR0, PCR1 and PCR2; every measurement must be 48 bytes and each index must be unique. An attestation must match one complete configuration. Debug enclaves report zero measurements and are rejected.
 
 ## Matches
 
-The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. `max_attestation_age_millis` may not exceed the WIP-201 `MAX_ATTESTATION_AGE` of 24 hours. Identity and certificate expiry come from the verified document.
+The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. `max_attestation_age_millis` may not exceed the WIP-201 `MAX_ATTESTATION_AGE` of 3 hours. Identity and certificate expiry come from the verified document.
 
-The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/pull/979) request: `version`, `aud`, `nonce` and the nested `payload` (`pipeline`, `match_strictness`, `meta`, `entries`, `compare`, `engine_hash`). The enclave rejects any other shape and an `engine_hash` it did not load. Optional `aat_inputs` carry a WIP-106 Authenticator Assertion; the enclave verifies it with `cdh = R(SHA-256(payload))` before the Engine runs and signs its public values (`has_aat`, `now`, `authenticator_provider_key_hash`, `aat_flags`) into the token. The interim pipelines are:
+The final WIP-201 release-manifest contract (`release_hash`, pipeline timing slots and an Engine pass/error interface) is not implemented yet. The current stack still uses the earlier [WIP-201](https://github.com/worldcoin/world-id-protocol/pull/979) request: `version`, `aud`, `nonce` and the nested `payload` (`pipeline`, `match_strictness`, `hints`, `entries`, `compare`, `engine_hash`). The enclave rejects any other shape and an `engine_hash` it did not load. Optional `aat_inputs` carry a WIP-106 Authenticator Assertion; the enclave verifies it with `cdh = R(SHA-256(payload))` before the Engine runs and signs its public values (`has_aat`, `now`, `authenticator_provider_key_hash`, `aat_flags`) into the token. The interim pipelines are:
 
 | `pipeline` | `compare` positions | Engine operation |
 | --- | --- | --- |
@@ -55,6 +59,8 @@ The client verifies the assignment, seals the match to that key, and verifies th
 The upgrade is refused with an HTTP `503 at_capacity` envelope while the host serves `WS_MAX_CONNECTIONS` sessions. Within a session, each phase has `WS_IDLE_TIMEOUT_SECS` to complete; the deadline restarts after a valid assignment exchange and ends when the match frame arrives.
 
 ## Errors and retries
+
+After request validation, the enclave reserves `(aud, nonce)` atomically before calling the Engine. A repeated pair returns an encrypted `malformed_inputs` failure, including after a rejected comparison or cancelled exchange. The boot-scoped set holds at most 65,536 pairs and never evicts them; when full, new requests fail closed with encrypted `internal` failures until the enclave restarts with a fresh channel key. Automated key rotation is not implemented.
 
 Host and transport failures use the JSON error envelope defined in [`api-types`](../verifier/api-types/src/error.rs). The Rust client returns `ReassignRequired` to the caller; it does not retry automatically. The host allows 2 seconds for assignment and health calls, and 30 seconds for a match.
 

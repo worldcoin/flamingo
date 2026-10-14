@@ -19,6 +19,7 @@ pub mod bootstrap;
 pub mod keys;
 /// Interim mapping of WIP-201 requests onto the engine operations.
 pub mod pipeline;
+mod replay;
 /// Nitro hardware RNG verification.
 pub mod rng;
 /// Pontifex operations exposed to the host.
