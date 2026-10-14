@@ -48,6 +48,8 @@ allow = [
 exceptions = [
     # Upstream protocol generation reaches foldhash through prost-build/petgraph.
     { allow = ["Zlib"], name = "foldhash", version = "0.1.5" },
+    # Shared Flamingo types activate alloy-primitives/foldhash; LICENSE is identical to 0.1.5.
+    { allow = ["Zlib"], name = "foldhash", version = "0.2.0" },
     # telemetry-batteries uses this public-domain instrumentation helper for HTTP spans.
     { allow = ["CC0-1.0"], name = "tracing-opentelemetry-instrumentation-sdk", version = "0.38.3" },
     # telemetry-batteries reaches option-ext through dirs; MPL's copyleft is file-scoped.
