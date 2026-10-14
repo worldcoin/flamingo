@@ -4,27 +4,28 @@
 //! verifies the token without parsing CBOR.
 
 use ark_babyjubjub::Fq;
-use ark_ff::{BigInteger, PrimeField};
-use coset::{
-    CborSerializable, CoseSign1, CoseSign1Builder, Header, RegisteredLabelWithPrivate,
-    cbor::value::Value,
-};
+use ark_ff::PrimeField;
 use eddsa_babyjubjub::{EdDSAPublicKey, EdDSASignature};
 use serde::{Deserialize, Serialize};
+use world_id_flamingo::{
+    AatClaims as SharedAatClaims, FlamingoClaims as SharedFlamingoClaims,
+    FlamingoToken as SharedFlamingoToken, TokenError,
+};
+use world_id_primitives::FieldElement;
 
 use crate::error::Error;
 
 /// COSE `alg` of a Flamingo Token (Private Use, `BabyJubJub-EdDSA-Poseidon2`).
-pub const COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2: i64 = -65537;
+pub const COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2: i64 = world_id_flamingo::COSE_ALG_FLAMINGO_TOKEN;
 
 /// Domain separator of the signed digest.
 pub const DS_SIGN: &[u8] = b"WORLD-ID/WIP-201/SIGN";
 /// Domain separator of [`engine_config_hash`].
 pub const DS_ENGINE: &[u8] = b"WORLD-ID/WIP-201/ENGINE";
 /// The `eat_profile` claim of every Flamingo Token.
-pub const EAT_PROFILE: &str = "https://world.org/eat/flamingo/v1";
+pub const EAT_PROFILE: &str = world_id_flamingo::EAT_PROFILE;
 /// Compared entries a token carries.
-pub const MAX_COMPARED: usize = 4;
+pub const MAX_COMPARED: usize = world_id_flamingo::MAX_COMPARED;
 
 /// RFC 9711 `eat_profile`.
 pub const CLAIM_EAT_PROFILE: i64 = 265;
@@ -45,9 +46,6 @@ pub const CLAIM_NOW: i64 = -90_009;
 /// The Engine configuration that ran.
 pub const CLAIM_ENGINE_CONFIG_HASH: i64 = -90_010;
 
-/// Claims in the signed digest; the remaining four rate slots of the `t=16` state stay zero.
-const DIGEST_CLAIMS: usize = 11;
-
 /// The public values of a verified AAT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AatClaims {
@@ -57,17 +55,6 @@ pub struct AatClaims {
     pub aat_flags: u64,
     /// The AAT's `now`, in seconds since the Unix epoch.
     pub now: u32,
-}
-
-impl AatClaims {
-    /// The values a token carries without an AAT.
-    fn zero() -> Self {
-        Self {
-            authenticator_provider_key_hash: Fq::from(0u64),
-            aat_flags: 0,
-            now: 0,
-        }
-    }
 }
 
 /// The claims a Flamingo Token signs.
@@ -90,116 +77,46 @@ impl FlamingoClaims {
     /// authenticator_provider_key_hash, aat_flags, has_aat, engine_config_hash)`.
     #[must_use]
     pub fn digest(&self) -> Fq {
-        let aat = self.aat.unwrap_or_else(AatClaims::zero);
-        let [c0, c1, c2, c3] = self.compared_entry_hashes;
-        let claims: [Fq; DIGEST_CLAIMS] = [
-            Fq::from(aat.now),
-            c0,
-            c1,
-            c2,
-            c3,
-            self.aud,
-            self.nonce,
-            aat.authenticator_provider_key_hash,
-            Fq::from(aat.aat_flags),
-            Fq::from(u64::from(self.aat.is_some())),
-            self.engine_config_hash,
-        ];
-
-        let mut state = [Fq::from(0u64); 16];
-        state[0] = Fq::from_be_bytes_mod_order(DS_SIGN);
-        state[1..=DIGEST_CLAIMS].copy_from_slice(&claims);
-        poseidon2::bn254::t16::permutation_in_place(&mut state);
-        state[1]
+        *SharedFlamingoClaims::from(*self).digest()
     }
+}
 
-    fn payload(&self) -> Result<Vec<u8>, Error> {
-        let field = |key: i64, value: Fq| (Value::Integer(key.into()), field_bytes(value));
-        let uint =
-            |key: i64, value: u64| (Value::Integer(key.into()), Value::Integer(value.into()));
-        let aat = self.aat.unwrap_or_else(AatClaims::zero);
-
-        // Bytewise order of the encoded keys: 265 first, then the negatives by magnitude.
-        let mut entries = vec![(
-            Value::Integer(CLAIM_EAT_PROFILE.into()),
-            Value::Text(EAT_PROFILE.into()),
-        )];
-        entries.extend(
-            (0i64..)
-                .zip(self.compared_entry_hashes)
-                .map(|(k, hash)| field(CLAIM_COMPARED_ENTRY_HASH - k, hash)),
-        );
-        entries.extend([
-            field(CLAIM_AUD, self.aud),
-            field(CLAIM_NONCE, self.nonce),
-            field(
-                CLAIM_AUTHENTICATOR_PROVIDER_KEY_HASH,
-                aat.authenticator_provider_key_hash,
-            ),
-            uint(CLAIM_AAT_FLAGS, aat.aat_flags),
-            uint(CLAIM_HAS_AAT, u64::from(self.aat.is_some())),
-            uint(CLAIM_NOW, u64::from(aat.now)),
-            field(CLAIM_ENGINE_CONFIG_HASH, self.engine_config_hash),
-        ]);
-
-        let mut encoded = Vec::new();
-        coset::cbor::into_writer(&Value::Map(entries), &mut encoded)
-            .map_err(|_| Error::Encoding)?;
-        Ok(encoded)
+impl From<FlamingoClaims> for SharedFlamingoClaims {
+    fn from(claims: FlamingoClaims) -> Self {
+        Self {
+            compared_entry_hashes: claims.compared_entry_hashes.map(Into::into),
+            aud: claims.aud.into(),
+            nonce: claims.nonce.into(),
+            aat: claims.aat.map(|aat| SharedAatClaims {
+                authenticator_provider_key_hash: aat.authenticator_provider_key_hash.into(),
+                aat_flags: aat.aat_flags,
+                now: aat.now,
+            }),
+            engine_config_hash: claims.engine_config_hash.into(),
+        }
     }
+}
 
-    fn from_payload(payload: &[u8]) -> Result<Self, Error> {
-        let value: Value = coset::cbor::from_reader(payload).map_err(|_| Error::Malformed)?;
-        let entries = value.as_map().ok_or(Error::Malformed)?;
-        let claim = |key: i64| {
-            entries
-                .iter()
-                .find(|(k, _)| k.as_integer() == Some(key.into()))
-                .map(|(_, v)| v)
-                .ok_or(Error::Malformed)
-        };
-        let field = |key: i64| claim(key).and_then(parse_field);
-        let uint = |key: i64| {
-            claim(key)?
-                .as_integer()
-                .and_then(|value| u64::try_from(value).ok())
-                .ok_or(Error::Malformed)
-        };
-
-        let mut compared_entry_hashes = [Fq::from(0u64); MAX_COMPARED];
-        for (k, hash) in (0i64..).zip(&mut compared_entry_hashes) {
-            *hash = field(CLAIM_COMPARED_ENTRY_HASH - k)?;
+impl From<SharedFlamingoClaims> for FlamingoClaims {
+    fn from(claims: SharedFlamingoClaims) -> Self {
+        Self {
+            compared_entry_hashes: claims.compared_entry_hashes.map(|hash| *hash),
+            aud: *claims.aud,
+            nonce: *claims.nonce,
+            aat: claims.aat.map(|aat| AatClaims {
+                authenticator_provider_key_hash: *aat.authenticator_provider_key_hash,
+                aat_flags: aat.aat_flags,
+                now: aat.now,
+            }),
+            engine_config_hash: *claims.engine_config_hash,
         }
-        let aat = AatClaims {
-            authenticator_provider_key_hash: field(CLAIM_AUTHENTICATOR_PROVIDER_KEY_HASH)?,
-            aat_flags: uint(CLAIM_AAT_FLAGS)?,
-            now: u32::try_from(uint(CLAIM_NOW)?).map_err(|_| Error::Malformed)?,
-        };
-        let aat = match uint(CLAIM_HAS_AAT)? {
-            1 => Some(aat),
-            0 if aat == AatClaims::zero() => None,
-            _ => return Err(Error::Malformed),
-        };
-        let claims = Self {
-            compared_entry_hashes,
-            aud: field(CLAIM_AUD)?,
-            nonce: field(CLAIM_NONCE)?,
-            aat,
-            engine_config_hash: field(CLAIM_ENGINE_CONFIG_HASH)?,
-        };
-
-        // Re-encoding pins the exact claim set, the profile and deterministic CBOR.
-        if claims.payload()? != payload {
-            return Err(Error::Malformed);
-        }
-        Ok(claims)
     }
 }
 
 /// `R(d)`: a 256-bit digest read as a big-endian integer modulo p.
 #[must_use]
 pub fn digest_to_field(digest: &[u8; 32]) -> Fq {
-    Fq::from_be_bytes_mod_order(digest)
+    *world_id_flamingo::digest_to_field(digest)
 }
 
 /// `H_4(DS_ENGINE; R(engine_hash), pipeline, match_strictness)`.
@@ -248,31 +165,14 @@ pub fn build_token(
     signature: &EdDSASignature,
     signing_public_key: &EdDSAPublicKey,
 ) -> Result<FlamingoToken, Error> {
-    let signature = signature
-        .to_compressed_bytes()
-        .map_err(|_| Error::KeyEncoding)?;
-    let key_id = signing_public_key
-        .to_compressed_bytes()
-        .map_err(|_| Error::KeyEncoding)?;
-    let protected = Header {
-        alg: Some(RegisteredLabelWithPrivate::PrivateUse(
-            COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2,
-        )),
-        key_id: key_id.to_vec(),
-        ..Header::default()
-    };
-
-    CoseSign1Builder::new()
-        .protected(protected)
-        .payload(claims.payload()?)
-        .signature(signature.to_vec())
-        .build()
-        .to_vec()
-        .map(FlamingoToken::from_bytes)
-        .map_err(|_| Error::Encoding)
+    SharedFlamingoToken::new(&(*claims).into(), signature, signing_public_key)
+        .map(|token| FlamingoToken::from_bytes(token.into_bytes()))
+        .map_err(Into::into)
 }
 
-/// Decodes a token and verifies its signature under `signing_public_key`; `kid` is ignored.
+/// Decodes a token and verifies its signature under `signing_public_key`.
+///
+/// The shared verifier checks the exact canonical envelope, including `kid` and headers.
 ///
 /// # Errors
 /// Fails on any framing, claim or algorithm mismatch, or an invalid signature.
@@ -280,35 +180,21 @@ pub fn verify(
     token: &FlamingoToken,
     signing_public_key: &EdDSAPublicKey,
 ) -> Result<FlamingoClaims, Error> {
-    let sign1 = CoseSign1::from_slice(token.as_bytes()).map_err(|_| Error::Malformed)?;
-    match sign1.protected.header.alg {
-        Some(RegisteredLabelWithPrivate::PrivateUse(COSE_ALG_BABYJUBJUB_EDDSA_POSEIDON2)) => {}
-        _ => return Err(Error::UnexpectedAlgorithm),
-    }
-
-    let claims = FlamingoClaims::from_payload(sign1.payload.as_deref().ok_or(Error::Malformed)?)?;
-    let signature = <[u8; 64]>::try_from(sign1.signature.as_slice())
-        .ok()
-        .and_then(|bytes| EdDSASignature::from_compressed_bytes(bytes).ok())
-        .ok_or(Error::Malformed)?;
-
-    if signing_public_key.verify(claims.digest(), &signature) {
-        Ok(claims)
-    } else {
-        Err(Error::SignatureInvalid)
-    }
+    SharedFlamingoToken::from_bytes(token.as_bytes().to_vec())
+        .verify(signing_public_key)
+        .map(Into::into)
+        .map_err(Into::into)
 }
 
-fn field_bytes(value: Fq) -> Value {
-    Value::Bytes(field_to_bytes(value).to_vec())
-}
-
-fn parse_field(value: &Value) -> Result<Fq, Error> {
-    value
-        .as_bytes()
-        .and_then(|bytes| <&[u8; 32]>::try_from(bytes.as_slice()).ok())
-        .ok_or(Error::Malformed)
-        .and_then(canonical_field)
+impl From<TokenError> for Error {
+    fn from(error: TokenError) -> Self {
+        match error {
+            TokenError::Malformed => Self::Malformed,
+            TokenError::UnexpectedAlgorithm => Self::UnexpectedAlgorithm,
+            TokenError::SignatureInvalid => Self::SignatureInvalid,
+            TokenError::Encoding => Self::Encoding,
+        }
+    }
 }
 
 /// Accepts only the canonical 32-byte big-endian encoding of a field element.
@@ -316,26 +202,24 @@ fn parse_field(value: &Value) -> Result<Fq, Error> {
 /// # Errors
 /// Returns [`Error::Malformed`] for a value of at least the field modulus.
 pub fn canonical_field(bytes: &[u8; 32]) -> Result<Fq, Error> {
-    let element = Fq::from_be_bytes_mod_order(bytes);
-    if field_bytes(element).as_bytes().map(Vec::as_slice) == Some(bytes.as_slice()) {
-        Ok(element)
-    } else {
-        Err(Error::Malformed)
-    }
+    FieldElement::from_be_bytes(bytes)
+        .map(|element| *element)
+        .map_err(|_| Error::Malformed)
 }
 
 /// The canonical 32-byte big-endian encoding of a field element.
 #[must_use]
 pub fn field_to_bytes(value: Fq) -> [u8; 32] {
-    let mut bytes = [0; 32];
-    let encoded = value.into_bigint().to_bytes_be();
-    bytes[32 - encoded.len()..].copy_from_slice(&encoded);
-    bytes
+    FieldElement::from(value).to_be_bytes()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coset::{
+        CborSerializable, CoseSign1, CoseSign1Builder, RegisteredLabelWithPrivate,
+        cbor::value::Value,
+    };
     use eddsa_babyjubjub::EdDSAPrivateKey;
 
     // WIP-201 Appendix A1.
@@ -494,7 +378,11 @@ mod tests {
     }
 
     fn payload(claims: &FlamingoClaims) -> Vec<(Value, Value)> {
-        let encoded = claims.payload().unwrap();
+        let token = sign(claims);
+        let encoded = CoseSign1::from_slice(token.as_bytes())
+            .unwrap()
+            .payload
+            .unwrap();
         coset::cbor::from_reader::<Value, _>(encoded.as_slice())
             .unwrap()
             .into_map()
@@ -529,6 +417,39 @@ mod tests {
             non_canonical,
         ] {
             assert_eq!(verify(&resign(payload), &key), Err(Error::Malformed));
+        }
+    }
+
+    #[test]
+    fn shared_tokens_and_compatibility_wrapper_are_interoperable() {
+        for claims in [with_aat(), claims(None)] {
+            let shared_claims = SharedFlamingoClaims::from(claims);
+            let shared_token = shared_claims.sign(&signing_key()).unwrap();
+            let wrapped = FlamingoToken::from_bytes(shared_token.into_bytes());
+            assert_eq!(verify(&wrapped, &signing_key().public()), Ok(claims));
+            let shared_token = SharedFlamingoToken::from_bytes(sign(&claims).into_bytes());
+            assert_eq!(
+                shared_token.verify(&signing_key().public()),
+                Ok(shared_claims)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_modified_token_envelopes() {
+        let token = sign(&with_aat());
+        let original = CoseSign1::from_slice(token.as_bytes()).unwrap();
+        let mut wrong_kid = original.clone();
+        wrong_kid.protected.header.key_id = vec![0; 32];
+        wrong_kid.protected.original_data = None;
+        let mut extra_header = original;
+        extra_header.unprotected.key_id = vec![0; 32];
+        for sign1 in [wrong_kid, extra_header] {
+            let token = FlamingoToken::from_bytes(sign1.to_vec().unwrap());
+            assert_eq!(
+                verify(&token, &signing_key().public()),
+                Err(Error::Malformed)
+            );
         }
     }
 
