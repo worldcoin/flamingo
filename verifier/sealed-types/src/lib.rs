@@ -21,7 +21,7 @@ pub const CHANNEL_DOMAIN: ChannelDomain = ChannelDomain::new("WORLD-ID/WIP-201/C
     .with_key_commitment_domain(b"WORLD-ID/WIP-201/CHANNEL-KEY\0");
 
 /// WIP-201 `MAX_ATTESTATION_AGE`: the oldest channel or signing-key attestation to accept.
-pub const MAX_ATTESTATION_AGE: std::time::Duration = std::time::Duration::from_hours(24);
+pub const MAX_ATTESTATION_AGE: std::time::Duration = std::time::Duration::from_hours(3);
 
 pub use aat::{AatInputs, provider_key_hash};
 pub use errors::{

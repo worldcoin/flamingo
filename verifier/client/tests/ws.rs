@@ -17,13 +17,15 @@ use tokio_tungstenite::tungstenite::handshake::server::Request;
 use tokio_tungstenite::{WebSocketStream, accept_async, accept_hdr_async};
 
 fn config(base_url: &str) -> Config {
-    let pcrs = vec![PcrMeasurement::new(
+    let mut pcrs = vec![PcrMeasurement::new(
         0,
         hex!(
             "108b32466f5dc0a9971e0bc8e3e4074e7821bb2dcad3841bdec9a08b30f173386f0394a01486df181f316b39443dab34"
         ),
     )];
 
+    pcrs.push(PcrMeasurement::new(1, [0xab; 48]));
+    pcrs.push(PcrMeasurement::new(2, [0xcd; 48]));
     Config::new(base_url, vec![pcrs]).expect("config should be valid")
 }
 
