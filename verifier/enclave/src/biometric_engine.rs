@@ -163,37 +163,32 @@ mod sandboxed {
         request::Operation,
         response::Outcome,
     };
-    use flamingo_verifier_sandbox_client::{SandboxClientError, Worker, WorkerError};
-    use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
+    use flamingo_verifier_sandbox_client::{Rejection, SandboxClient};
+    use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
 
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
-        executor: Executor<Worker>,
+        executor: Executor<SandboxClient>,
     }
 
     impl SandboxBiometricEngine {
         /// Takes a worker initialized before enclave key generation.
         #[must_use]
-        pub fn new(worker: Worker) -> Self {
+        pub fn new(worker: SandboxClient) -> Self {
             Self {
                 executor: Executor::new(worker),
             }
         }
 
+        /// Fatal worker failures exit the enclave inside the client and never return here.
         async fn run(&self, operation: Operation) -> Result<Outcome, BiometricError> {
             self.executor
                 .run(move |worker| worker.evaluate(operation))
                 .await?
-                .map_err(|error| match error {
-                    WorkerError::Rpc(SandboxClientError::AnalysisFailed(failure)) => {
-                        BiometricError::from(failure)
-                    }
-                    WorkerError::Rpc(SandboxClientError::InvalidImages) => {
+                .map_err(|rejection| match rejection {
+                    Rejection::AnalysisFailed(failure) => BiometricError::from(failure),
+                    Rejection::InvalidImages => {
                         BiometricError::Rejected(FailureReason::MalformedInputs)
-                    }
-                    _ => {
-                        tracing::error!("sandboxed biometric worker failed");
-                        std::process::exit(1);
                     }
                 })
         }
@@ -289,6 +284,7 @@ mod sandboxed {
             })
         }
 
+        // An async mutex, so tabernaculum's std-mutex `check_alive_if_idle` does not apply.
         fn check_health(&self) {
             if let Ok(worker) = self.executor.worker.try_lock() {
                 worker.check_alive();

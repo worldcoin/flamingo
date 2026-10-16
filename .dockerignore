@@ -7,6 +7,5 @@
 !rust-toolchain.toml
 !verifier/**/Cargo.toml
 !verifier/**/*.rs
-!verifier/sandbox-client/worker.policy
 **/target/
 **/.git/

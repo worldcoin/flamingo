@@ -35,6 +35,7 @@ tracing-subscriber.workspace = true
 vsock.workspace = true
 libc.workspace = true
 flamingo-verifier-sandbox-client.workspace = true
+tabernaculum.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
