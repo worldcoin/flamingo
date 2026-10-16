@@ -8,11 +8,11 @@ Use the Rust toolchain in [`rust-toolchain.toml`](../rust-toolchain.toml). Git c
 nix develop
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features
-cargo test --locked --workspace --all-features --exclude flamingo-verifier-worker-process
+cargo test --locked --workspace --all-features
 cargo deny --all-features check
 ```
 
-Install `cargo-deny` separately. Minijail process tests need x86_64 Linux and root privileges; [Rust CI](../.github/workflows/rust-ci.yml) shows how to build and run that test binary separately.
+Install `cargo-deny` separately. Minijail process tests live in [tabernaculum](https://github.com/worldcoin/tabernaculum).
 
 ## Build images
 

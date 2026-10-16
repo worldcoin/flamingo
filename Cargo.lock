@@ -1106,11 +1106,9 @@ dependencies = [
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",
  "flamingo-verifier-protocol",
- "flamingo-verifier-sandbox-bundle",
  "flamingo-verifier-sandbox-client",
  "flamingo-verifier-sealed-types",
  "hex",
- "libc",
  "pontifex",
  "rand 0.8.8",
  "serde",
@@ -1122,7 +1120,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vsock",
 ]
 
 [[package]]
@@ -1171,20 +1168,6 @@ dependencies = [
  "taceo-ark-babyjubjub",
  "taceo-eddsa-babyjubjub",
  "taceo-poseidon2",
-]
-
-[[package]]
-name = "flamingo-verifier-sandbox-bundle"
-version = "0.8.0"
-dependencies = [
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-vsock",
 ]
 
 [[package]]

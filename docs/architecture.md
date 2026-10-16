@@ -36,6 +36,6 @@ All crates share the root [Cargo workspace](../Cargo.toml) and lockfile.
 | [`sealed-types`](../verifier/sealed-types) | Plaintext CBOR requests and results carried inside encryption. |
 | [`protocol`](../verifier/protocol) | Signed match claims and token encoding. |
 
-The [sandbox client](../verifier/sandbox-client) launches the external biometric worker under Minijail and exchanges messages using `biometric-engines-protocol`. The [sandbox bundle](../verifier/sandbox-bundle) provisions the executable with size and digest integrity checks. The enclave owns PCP verification, threshold policy and signing. Worker access uses one mutex with a timeout.
+[tabernaculum](https://github.com/worldcoin/tabernaculum) receives the external biometric worker with size and digest integrity checks and launches it under Minijail with its reviewed seccomp policy. The [sandbox client](../verifier/sandbox-client) validates, encodes and checks the worker's `biometric-engines-protocol` messages. The enclave owns PCP verification, threshold policy and signing. Worker access uses one mutex with a timeout.
 
 Nix uses the root workspace and lockfile to build the enclave. Public binaries, Docker images and EIFs exclude the biometric engine and models; the worker is provisioned at runtime. Shared dependency changes can affect its PCR measurements. The separate [DeepIdentifier migration](https://github.com/worldcoin/di-migration-tee) lives in its own repository.

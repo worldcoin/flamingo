@@ -9,7 +9,6 @@ members = [
     "verifier/host",
     "verifier/protocol",
     "verifier/sandbox-client",
-    "verifier/sandbox-bundle",
 ]
 resolver = "3"
 
@@ -41,12 +40,10 @@ flamingo-verifier-protocol = { version = "0.8.0", path = "verifier/protocol" }
 flamingo-verifier-sealed-types = { version = "0.8.0", path = "verifier/sealed-types" }
 eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
 flamingo-verifier-sandbox-client = { path = "verifier/sandbox-client" }
-flamingo-verifier-sandbox-bundle = { path = "verifier/sandbox-bundle" }
 futures-util = "0.3"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"
-libc = "0.2"
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
 pontifex = { version = "3.0.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
@@ -59,8 +56,6 @@ serde_json = "1.0"
 sha2 = { version = "0.10", default-features = false }
 tabernaculum = { git = "https://github.com/worldcoin/tabernaculum", rev = "e268499cf5e515a26eae2a851d446a009189d52c" }
 thiserror = "2"
-tempfile = "3.27"
-vsock = "0.5.4"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots", "url"] }
 tungstenite = "0.29"

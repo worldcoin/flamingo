@@ -1,18 +1,26 @@
 //! Provisioned worker startup and enclave serving on Linux.
 
-use std::sync::{Arc, LazyLock};
+use std::{
+    path::Path,
+    sync::{Arc, LazyLock},
+};
 
 use anyhow::{Context, anyhow};
 use flamingo_verifier_enclave::{
     attestation::{self, NsmAttestor},
     biometric_engine::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, SandboxBiometricEngine},
-    bootstrap::{self, BootWorker},
     rng, server,
     state::EnclaveState,
 };
 use flamingo_verifier_sandbox_client::{FaceLimits, SandboxClient};
 use pontifex::SecureModule;
-use tabernaculum::{ConnectionError, Limits, Policy, SandboxConfig, Worker};
+use tabernaculum::{
+    ConnectionError, Limits, Policy, SandboxConfig, Worker,
+    bundle::{
+        BootstrapConfig,
+        enclave::{self, Bootstrap, STAGING_DIR},
+    },
+};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
@@ -31,19 +39,19 @@ pub(super) fn run() -> anyhow::Result<()> {
     }));
 
     rng::verify_nsm_hwrng_current().context("Nitro hardware RNG is not configured")?;
-    let mut boot = bootstrap::receive().context("worker artifact provisioning failed")?;
+    let boot = enclave::accept(&BootstrapConfig::default(), Path::new(STAGING_DIR))
+        .context("worker artifact provisioning failed")?;
+    let runtime = boot.runtime();
+    tracing::info!(release_id = %runtime.release_id, worker_sha384 = %runtime.sha384, "worker executable provisioned");
     let limits = FaceLimits {
         max_request_bytes: MAX_REQUEST_BYTES,
         max_image_bytes: MAX_IMAGE_BYTES,
     };
     let (worker, ready) = Worker::spawn(
-        &boot.runtime.binary,
+        &runtime.binary,
         SandboxConfig {
-            root: boot.runtime.root.path(),
-            limits: Limits {
-                address_space_bytes: boot.address_space_bytes,
-                max_threads: boot.max_threads,
-            },
+            root: runtime.root.path(),
+            limits: Limits::default(),
             policy: &POLICY,
         },
         limits.connection().context("invalid worker limits")?,
@@ -59,7 +67,7 @@ pub(super) fn run() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("failed to start enclave executor")?
-        .block_on(serve(&mut boot, worker))
+        .block_on(serve(boot, worker))
 }
 
 /// A terminal worker cannot be replaced within an enclave boot; init tears down the guest.
@@ -73,7 +81,7 @@ fn worker_failed(error: ConnectionError) -> ! {
 }
 
 /// Attests boot keys after isolation and model initialization, then accepts requests.
-async fn serve(boot: &mut BootWorker, worker: SandboxClient) -> anyhow::Result<()> {
+async fn serve(boot: Bootstrap, worker: SandboxClient) -> anyhow::Result<()> {
     worker.check_alive();
     let engine = Box::new(SandboxBiometricEngine::new(worker));
     // Attests both boot keys, so a broken NSM stops the boot and both caches start populated.
@@ -91,7 +99,9 @@ async fn serve(boot: &mut BootWorker, worker: SandboxClient) -> anyhow::Result<(
     attestation::log_boot_measurements(&document);
 
     state.check_worker_health();
-    boot.acknowledge()
+    // The verified runtime root must outlive the worker, so hold it while serving.
+    let _runtime = boot
+        .acknowledge()
         .context("failed to acknowledge worker startup")?;
 
     tokio::select! {
