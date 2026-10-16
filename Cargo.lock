@@ -1106,22 +1106,20 @@ dependencies = [
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",
  "flamingo-verifier-protocol",
- "flamingo-verifier-sandbox-bundle",
  "flamingo-verifier-sandbox-client",
  "flamingo-verifier-sealed-types",
  "hex",
- "libc",
  "pontifex",
  "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tabernaculum",
  "taceo-ark-babyjubjub",
  "taceo-eddsa-babyjubjub",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vsock",
 ]
 
 [[package]]
@@ -1173,30 +1171,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "flamingo-verifier-sandbox-bundle"
-version = "0.8.0"
-dependencies = [
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-vsock",
-]
-
-[[package]]
 name = "flamingo-verifier-sandbox-client"
 version = "0.1.0"
 dependencies = [
  "biometric-engines-protocol",
- "flamingo-verifier-sandbox-bundle",
- "hex",
- "libc",
- "minijail",
- "serde_json",
- "sha2 0.10.9",
+ "tabernaculum",
  "thiserror 2.0.20",
  "tracing",
 ]
@@ -2992,6 +2971,33 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tabernaculum"
+version = "0.1.0"
+source = "git+https://github.com/worldcoin/tabernaculum?rev=e268499cf5e515a26eae2a851d446a009189d52c#e268499cf5e515a26eae2a851d446a009189d52c"
+dependencies = [
+ "libc",
+ "minijail",
+ "tabernaculum-bundle",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "tabernaculum-bundle"
+version = "0.1.0"
+source = "git+https://github.com/worldcoin/tabernaculum?rev=e268499cf5e515a26eae2a851d446a009189d52c#e268499cf5e515a26eae2a851d446a009189d52c"
+dependencies = [
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "vsock",
 ]
 
 [[package]]

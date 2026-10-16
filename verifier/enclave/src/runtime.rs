@@ -1,22 +1,33 @@
 //! Provisioned worker startup and enclave serving on Linux.
 
-use std::sync::Arc;
+use std::{
+    path::Path,
+    sync::{Arc, LazyLock},
+};
 
 use anyhow::{Context, anyhow};
 use flamingo_verifier_enclave::{
     attestation::{self, NsmAttestor},
     biometric_engine::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, SandboxBiometricEngine},
-    bootstrap::{self, BootWorker},
     rng, server,
     state::EnclaveState,
 };
-use flamingo_verifier_sandbox_client::{SandboxClientConfig, SandboxClientError};
-use flamingo_verifier_sandbox_client::{SandboxConfig, Worker};
+use flamingo_verifier_sandbox_client::{FaceLimits, SandboxClient};
 use pontifex::SecureModule;
+use tabernaculum::{
+    ConnectionError, Limits, Policy, SandboxConfig, Worker,
+    bundle::{
+        BootstrapConfig,
+        enclave::{self, Bootstrap, STAGING_DIR},
+    },
+};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
 const PONTIFEX_PORT: u32 = 1000;
+
+/// The reviewed default worker policy, unchanged.
+static POLICY: LazyLock<Policy> = LazyLock::new(Policy::default_worker);
 
 /// Provisions and forks the worker while no executor threads or broker keys exist.
 pub(super) fn run() -> anyhow::Result<()> {
@@ -28,22 +39,27 @@ pub(super) fn run() -> anyhow::Result<()> {
     }));
 
     rng::verify_nsm_hwrng_current().context("Nitro hardware RNG is not configured")?;
-    let mut boot = bootstrap::receive().context("worker artifact provisioning failed")?;
-    let worker = Worker::spawn(
-        &boot.runtime.binary,
+    let boot = enclave::accept(&BootstrapConfig::default(), Path::new(STAGING_DIR))
+        .context("worker artifact provisioning failed")?;
+    let runtime = boot.runtime();
+    tracing::info!(release_id = %runtime.release_id, worker_sha384 = %runtime.sha384, "worker executable provisioned");
+    let limits = FaceLimits {
+        max_request_bytes: MAX_REQUEST_BYTES,
+        max_image_bytes: MAX_IMAGE_BYTES,
+    };
+    let (worker, ready) = Worker::spawn(
+        &runtime.binary,
         SandboxConfig {
-            root: boot.runtime.root.path(),
-            address_space_bytes: boot.address_space_bytes,
-            max_threads: boot.max_threads,
+            root: runtime.root.path(),
+            limits: Limits::default(),
+            policy: &POLICY,
         },
-        SandboxClientConfig {
-            max_request_bytes: MAX_REQUEST_BYTES,
-            max_image_bytes: MAX_IMAGE_BYTES,
-            ..SandboxClientConfig::default()
-        },
+        limits.connection().context("invalid worker limits")?,
         worker_failed,
     )
     .context("sandboxed worker launch failed")?;
+    let worker =
+        SandboxClient::new(worker, &ready, limits).context("sandboxed worker launch failed")?;
     worker.check_alive();
 
     // The verified runtime root must outlive the worker and every blocking comparison.
@@ -51,11 +67,11 @@ pub(super) fn run() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("failed to start enclave executor")?
-        .block_on(serve(&mut boot, worker))
+        .block_on(serve(boot, worker))
 }
 
 /// A terminal worker cannot be replaced within an enclave boot; init tears down the guest.
-fn worker_failed(error: SandboxClientError) -> ! {
+fn worker_failed(error: ConnectionError) -> ! {
     error!(
         dependency = "biometric_worker",
         %error,
@@ -65,7 +81,7 @@ fn worker_failed(error: SandboxClientError) -> ! {
 }
 
 /// Attests boot keys after isolation and model initialization, then accepts requests.
-async fn serve(boot: &mut BootWorker, worker: Worker) -> anyhow::Result<()> {
+async fn serve(boot: Bootstrap, worker: SandboxClient) -> anyhow::Result<()> {
     worker.check_alive();
     let engine = Box::new(SandboxBiometricEngine::new(worker));
     // Attests both boot keys, so a broken NSM stops the boot and both caches start populated.
@@ -83,7 +99,9 @@ async fn serve(boot: &mut BootWorker, worker: Worker) -> anyhow::Result<()> {
     attestation::log_boot_measurements(&document);
 
     state.check_worker_health();
-    boot.acknowledge()
+    // The verified runtime root must outlive the worker, so hold it while serving.
+    let _runtime = boot
+        .acknowledge()
         .context("failed to acknowledge worker startup")?;
 
     tokio::select! {

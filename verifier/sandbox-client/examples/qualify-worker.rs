@@ -8,9 +8,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         request::Operation,
         response::Outcome,
     };
-    use flamingo_verifier_sandbox_client::{SandboxClientConfig, SandboxClientError};
-    use flamingo_verifier_sandbox_client::{SandboxConfig, Worker, WorkerError};
-    use std::{fs::File, io::Read, path::Path, time::Duration};
+    use flamingo_verifier_sandbox_client::{FaceLimits, Rejection, SandboxClient};
+    use std::{fs::File, io::Read, path::Path};
+    use tabernaculum::{Limits, Policy, SandboxConfig, Worker, bundle::WORKER_PATH};
 
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 5 {
@@ -42,24 +42,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         })
     };
-    let binary = File::open(root.join("bin/verifier-worker"))?;
-    let mut worker = Worker::spawn(
+    let binary = File::open(root.join(WORKER_PATH))?;
+    // Deliberately no dependency on the private implementation in this public launcher.
+    // Explicit IPC budgets for qualification.
+    let limits = FaceLimits {
+        max_request_bytes: 24 * 1024 * 1024 + 1024,
+        max_image_bytes: 8 * 1024 * 1024,
+    };
+    let policy = Policy::default_worker();
+    let (worker, ready) = Worker::spawn(
         &binary,
         SandboxConfig {
             root,
-            address_space_bytes: args[2].parse()?,
-            max_threads: args[3].parse()?,
+            limits: Limits {
+                address_space_bytes: args[2].parse()?,
+                max_threads: args[3].parse()?,
+            },
+            policy: &policy,
         },
-        // Deliberately no dependency on the private implementation in this public launcher.
-        // Explicit IPC budgets for qualification.
-        SandboxClientConfig {
-            startup_timeout: Duration::from_secs(120),
-            request_timeout: Duration::from_secs(10),
-            max_request_bytes: 24 * 1024 * 1024 + 1024,
-            max_image_bytes: 8 * 1024 * 1024,
-        },
+        limits.connection()?,
         fatal,
     )?;
+    let mut worker = SandboxClient::new(worker, &ready, limits)?;
     let cold = worker.evaluate(request())?;
     let Outcome::DeepFace(scores) = &cold else {
         unreachable!()
@@ -85,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     assert!(matches!(
         worker.evaluate(invalid),
-        Err(WorkerError::Rpc(SandboxClientError::AnalysisFailed(_)))
+        Err(Rejection::AnalysisFailed(_))
     ));
     assert_eq!(worker.evaluate(request())?, cold);
     let gray = worker.evaluate(Operation::GrayBadge(
@@ -106,8 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_os = "linux")]
-/// A terminal RPC error always ends this broker lifetime; no retry or worker restart.
-fn fatal(error: flamingo_verifier_sandbox_client::SandboxClientError) -> ! {
+/// A terminal worker error always ends this broker lifetime; no retry or worker restart.
+fn fatal(error: tabernaculum::ConnectionError) -> ! {
     eprintln!("worker qualification failed: {error}");
     std::process::exit(1)
 }

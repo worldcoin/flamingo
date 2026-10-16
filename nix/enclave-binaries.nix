@@ -37,8 +37,7 @@ let
     filter = path: type:
       type == "directory"
       || lib.hasSuffix ".rs" path
-      || builtins.elem (builtins.baseNameOf path) [ "Cargo.toml" "Cargo.lock" "rust-toolchain.toml" ]
-      || path == toString (root + "/verifier/sandbox-client/worker.policy");
+      || builtins.elem (builtins.baseNameOf path) [ "Cargo.toml" "Cargo.lock" "rust-toolchain.toml" ];
   };
 
   commonArgs = {

@@ -12,9 +12,6 @@
 pub mod attestation;
 /// Inference operations implemented by the sandboxed biometric worker.
 pub mod biometric_engine;
-/// Single-threaded runtime provisioning with integrity checks.
-#[cfg(target_os = "linux")]
-pub mod bootstrap;
 /// Boot-scoped key material.
 pub mod keys;
 /// PCP binding verification (transport-free).

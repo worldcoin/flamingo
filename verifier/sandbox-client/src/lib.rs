@@ -1,10 +1,8 @@
-//! Verifier-enclave client for a sandboxed external worker.
+//! Typed face client for the sandboxed biometric worker.
 //!
-//! Owns worker launch under Linux Minijail, readiness, bounded IPC and teardown.
+//! Launch, jail, seccomp policy and framed IPC come from `tabernaculum`; this crate owns the
+//! face request validation, encoding and response checks.
 mod client;
-mod transport;
-pub use client::{SandboxClient, SandboxClientConfig, SandboxClientError};
 #[cfg(target_os = "linux")]
-mod process;
-#[cfg(target_os = "linux")]
-pub use process::{SandboxConfig, WORKER_UID, Worker, WorkerError};
+pub use client::SandboxClient;
+pub use client::{FaceLimits, Rejection, SandboxClientError};
