@@ -219,7 +219,7 @@ mod tests {
     use super::*;
     use crate::{
         biometric_engine::{BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores},
-        test_support::{EchoAttestor, UnusedBiometricEngine},
+        test_support::{EchoAttestor, TEST_ENGINE_HASH, UnusedBiometricEngine},
     };
     use flamingo_verifier_protocol::match_token;
     use flamingo_verifier_sealed_types::{ComparisonRole, FailureReason, LiveCapture};
@@ -296,7 +296,10 @@ mod tests {
     }
 
     fn state(engine: impl BiometricEngine + 'static) -> Arc<EnclaveState> {
-        Arc::new(EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine)).unwrap())
+        Arc::new(
+            EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine), TEST_ENGINE_HASH)
+                .unwrap(),
+        )
     }
 
     async fn exchange(state: Arc<EnclaveState>, inputs: &MatchInputs) -> (MatchResult, usize) {

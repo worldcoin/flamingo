@@ -78,17 +78,17 @@ impl ApiError {
                 enclave_types::Error::NotReady
                 | enclave_types::Error::SecureModuleNotInitialized
                 | enclave_types::Error::AttestationFailed => Self::enclave_not_ready(*operation),
-                enclave_types::Error::RequestNotOpened | enclave_types::Error::Internal => {
-                    Self::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "Internal server error",
-                        false,
-                    )
-                    .with_detail(format!(
-                        "unexpected enclave error on assignment: {operation:?}"
-                    ))
-                }
+                enclave_types::Error::RequestNotOpened
+                | enclave_types::Error::ReleaseRejected
+                | enclave_types::Error::Internal => Self::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal server error",
+                    false,
+                )
+                .with_detail(format!(
+                    "unexpected enclave error on assignment: {operation:?}"
+                )),
             },
         }
     }
@@ -109,6 +109,14 @@ impl ApiError {
                     "reassign_required",
                     "The request was not sealed to this enclave's current encryption key",
                     true,
+                )
+                .with_detail(format!("{operation:?}")),
+                // Only the release route returns `ReleaseRejected`; reaching it here is a host bug.
+                enclave_types::Error::ReleaseRejected => Self::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal server error",
+                    false,
                 )
                 .with_detail(format!("{operation:?}")),
                 enclave_types::Error::Internal => Self::new(
@@ -381,6 +389,11 @@ mod tests {
                 enclave_types::Error::RequestNotOpened,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 StatusCode::CONFLICT,
+            ),
+            (
+                enclave_types::Error::ReleaseRejected,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
             ),
             (
                 enclave_types::Error::Internal,

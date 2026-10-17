@@ -29,10 +29,12 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+world-id-flamingo.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 flamingo-verifier-sandbox-client.workspace = true
 tabernaculum.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

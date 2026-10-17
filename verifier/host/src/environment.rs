@@ -1,6 +1,9 @@
 //! Host configuration parsed from environment variables and CLI flags.
 
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    path::PathBuf,
+};
 
 use clap::{Parser, ValueEnum};
 
@@ -59,6 +62,10 @@ pub struct HostConfig {
     /// Maximum WebSocket sessions served at once, per host process.
     #[arg(long = "ws-max-connections", env = "WS_MAX_CONNECTIONS", default_value_t = default_ws_max_connections())]
     pub ws_max_connections: NonZeroUsize,
+
+    /// File holding the WIP-201 release manifest (compact JWS) of the enclave's Engine bundle.
+    #[arg(long = "release-manifest-path", env = "RELEASE_MANIFEST_PATH")]
+    pub release_manifest_path: PathBuf,
 }
 
 impl Default for HostConfig {
@@ -70,6 +77,7 @@ impl Default for HostConfig {
             port: default_port(),
             ws_idle_timeout: default_ws_idle_timeout(),
             ws_max_connections: default_ws_max_connections(),
+            release_manifest_path: PathBuf::new(),
         }
     }
 }
@@ -98,8 +106,16 @@ mod tests {
 
     #[test]
     fn defaults_are_applied_when_only_the_required_fields_are_given() {
-        let config = parse(&["host", "--enclave-cid", "16", "--enclave-port", "1000"])
-            .expect("required fields should parse");
+        let config = parse(&[
+            "host",
+            "--enclave-cid",
+            "16",
+            "--enclave-port",
+            "1000",
+            "--release-manifest-path",
+            "release.jws",
+        ])
+        .expect("required fields should parse");
 
         assert_eq!(config.environment, Environment::Development);
         assert_eq!(config.enclave_cid, 16);
@@ -117,6 +133,8 @@ mod tests {
             "16",
             "--enclave-port",
             "1000",
+            "--release-manifest-path",
+            "release.jws",
             "--app-env",
             "production",
             "--port",
@@ -143,6 +161,8 @@ mod tests {
                 "16",
                 "--enclave-port",
                 "1000",
+                "--release-manifest-path",
+                "release.jws",
                 "--port",
                 "0",
             ],
@@ -152,6 +172,8 @@ mod tests {
                 "16",
                 "--enclave-port",
                 "1000",
+                "--release-manifest-path",
+                "release.jws",
                 "--ws-idle-timeout-secs",
                 "0",
             ],
@@ -161,6 +183,8 @@ mod tests {
                 "16",
                 "--enclave-port",
                 "1000",
+                "--release-manifest-path",
+                "release.jws",
                 "--ws-max-connections",
                 "0",
             ],
@@ -183,6 +207,8 @@ mod tests {
                 "16",
                 "--enclave-port",
                 "1000",
+                "--release-manifest-path",
+                "release.jws",
                 "--app-env",
                 "nope"
             ])

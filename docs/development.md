@@ -66,14 +66,15 @@ The host reads every setting from an environment variable and an equivalent CLI 
 | `--app-env` | `APP_ENV` | `development` | `production`, `staging`, or `development`. |
 | `--enclave-cid` | `ENCLAVE_CID` | required | Nitro enclave CID. |
 | `--enclave-port` | `ENCLAVE_PORT` | required | Enclave Pontifex port. |
+| `--release-manifest-path` | `RELEASE_MANIFEST_PATH` | required | WIP-201 release manifest (compact JWS) for the Engine bundle in the EIF. |
 | `--port` | `PORT` | `8000` | API listen port. |
 | `--ws-idle-timeout-secs` | `WS_IDLE_TIMEOUT_SECS` | `30` | Idle deadline for each WebSocket session phase. |
 | `--ws-max-connections` | `WS_MAX_CONNECTIONS` | `100` | Concurrent WebSocket sessions per host process. |
 
-`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero.
+`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The host sends the manifest to the enclave at startup and every 30 seconds; the enclave accepts only a manifest whose `engine_hash` is the SHA-256 of its Engine bundle, and reports not ready until it has one.
 
 ```bash
-RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 \
+RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 RELEASE_MANIFEST_PATH=release.jws \
   cargo run --locked --bin flamingo-verifier-host
 ```
 

@@ -15,8 +15,10 @@ mod error;
 mod health;
 mod keys;
 mod matches;
+mod release;
 
 pub use error::Error;
 pub use health::HealthRequest;
 pub use keys::{GetEncryptionKeyRequest, KeyAttestation};
 pub use matches::{MatchRequest, MatchResponse};
+pub use release::LoadReleaseRequest;

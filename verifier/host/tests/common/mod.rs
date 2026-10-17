@@ -45,6 +45,10 @@ impl EnclaveClient for StubEnclaveClient {
             .clone()
             .expect("route ran a match but the stub was not configured to answer")
     }
+
+    async fn load_release(&self, _: String) -> Result<(), enclave::Error> {
+        Ok(())
+    }
 }
 
 /// Builds an [`AppState`] backed by `client`, using the default host configuration.
