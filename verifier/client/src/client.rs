@@ -26,6 +26,11 @@ pub fn verify_assignment(
     let public_key = STANDARD
         .decode(&response.public_key)
         .map_err(|_| Error::MalformedAssignment)?;
+    let release_hashes = response
+        .release_hashes
+        .iter()
+        .map(|hash| parse_release_hash(hash))
+        .collect::<Result<_, _>>()?;
     let (consumer, attestation) = ChannelConsumer::from_attestation(
         ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
         verifier,
@@ -37,7 +42,18 @@ pub fn verify_assignment(
     Ok(VerifiedAssignment {
         attestation,
         consumer,
+        release_hashes,
     })
+}
+
+/// Parses a `release_hash` as 32 bytes of lowercase hex.
+fn parse_release_hash(hash: &str) -> Result<[u8; 32], Error> {
+    if hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(Error::MalformedAssignment);
+    }
+    let mut bytes = [0u8; 32];
+    hex::decode_to_slice(hash, &mut bytes).map_err(|_| Error::MalformedAssignment)?;
+    Ok(bytes)
 }
 
 /// Opens a sealed match response and verifies the statement it carries, if any.
@@ -120,6 +136,8 @@ pub struct VerifiedAssignment {
     /// Metadata read from the signed attestation document.
     attestation: VerifiedAttestation,
     consumer: ChannelConsumer,
+    /// Unattested; the Authenticator selects from these and the enclave rejects any it did not load.
+    release_hashes: Vec<[u8; 32]>,
 }
 
 impl VerifiedAssignment {
@@ -133,6 +151,12 @@ impl VerifiedAssignment {
     #[must_use]
     pub const fn consumer(&self) -> &ChannelConsumer {
         &self.consumer
+    }
+
+    /// The `release_hash` of every release the host says this enclave serves.
+    #[must_use]
+    pub fn release_hashes(&self) -> &[[u8; 32]] {
+        &self.release_hashes
     }
 }
 

@@ -88,6 +88,7 @@ fn full_stub() -> StubEnclaveClient {
         encryption_key: Some(Ok(KeyAttestation {
             document: vec![1, 2, 3],
             public_key: vec![0xab; 1216],
+            release_hashes: vec![[0x2a; 32]],
         })),
         match_result: Some(Ok(MatchResponse {
             ciphertext: vec![9u8; 48],
@@ -319,6 +320,7 @@ async fn stalled_peer_releases_its_slot() {
             encryption_key: Some(Ok(KeyAttestation {
                 document: vec![0u8; 8 * 1024 * 1024],
                 public_key: vec![0xab; 1216],
+                release_hashes: vec![],
             })),
             ..StubEnclaveClient::default()
         },
