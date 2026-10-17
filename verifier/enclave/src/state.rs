@@ -1,12 +1,13 @@
 //! Boot-scoped state owned by the enclave.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_sealed_types::MATCH_CHANNEL_DOMAIN;
 use pontifex::{ChannelDomain, ChannelEnclave};
 use tokio::task::JoinHandle;
+use world_id_flamingo::ReleaseManifest;
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
@@ -25,6 +26,10 @@ pub struct EnclaveState {
     /// Cached attestation of the statement key.
     attested_signing_key: AttestedKey,
     engine: Box<dyn BiometricEngine>,
+    /// `SHA-256` of the Engine bundle this boot runs.
+    engine_hash: [u8; 32],
+    /// The release manifest of that bundle, once the host has loaded it.
+    release: OnceLock<ReleaseManifest>,
 }
 
 impl EnclaveState {
@@ -40,6 +45,7 @@ impl EnclaveState {
     pub fn generate(
         attestor: Arc<dyn Attestor>,
         engine: Box<dyn BiometricEngine>,
+        engine_hash: [u8; 32],
     ) -> Result<Self, enclave_types::Error> {
         let channel = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN)).map_err(
             |error| {
@@ -73,7 +79,53 @@ impl EnclaveState {
             attested_encryption_key,
             attested_signing_key,
             engine,
+            engine_hash,
+            release: OnceLock::new(),
         })
+    }
+
+    /// Loads the release manifest of this boot's Engine bundle (WIP-201 §3.5.2).
+    ///
+    /// Loading the manifest already loaded succeeds again; any other manifest is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`enclave_types::Error::ReleaseRejected`] for a manifest that is malformed, breaks a
+    /// WIP-201 rule, names another bundle, or differs from the one already loaded.
+    pub fn load_release(&self, compact: &str) -> Result<(), enclave_types::Error> {
+        let manifest = ReleaseManifest::parse(compact).map_err(|error| {
+            tracing::warn!(%error, "release manifest rejected");
+            enclave_types::Error::ReleaseRejected
+        })?;
+        if manifest.payload().engine_hash() != Some(self.engine_hash) {
+            tracing::warn!(
+                engine_hash = %hex::encode(self.engine_hash),
+                "release manifest names another Engine bundle"
+            );
+            return Err(enclave_types::Error::ReleaseRejected);
+        }
+        let loaded = self.release.get_or_init(|| manifest.clone());
+        if loaded.release_hash() == manifest.release_hash() {
+            Ok(())
+        } else {
+            tracing::warn!("a different release manifest is already loaded");
+            Err(enclave_types::Error::ReleaseRejected)
+        }
+    }
+
+    /// The loaded release manifest, if any.
+    #[must_use]
+    pub fn release(&self) -> Option<&ReleaseManifest> {
+        self.release.get()
+    }
+
+    /// `release_hash` of each loaded release.
+    #[must_use]
+    pub fn release_hashes(&self) -> Vec<[u8; 32]> {
+        self.release()
+            .map(ReleaseManifest::release_hash)
+            .into_iter()
+            .collect()
     }
 
     /// Returns the channel that opens sealed requests for this boot.
@@ -141,7 +193,10 @@ mod tests {
     use flamingo_verifier_enclave_types as enclave_types;
 
     use super::EnclaveState;
-    use crate::test_support::{EchoAttestor, FailingAttestor, UnusedBiometricEngine, state_with};
+    use crate::test_support::{
+        EchoAttestor, FailingAttestor, TEST_ENGINE_HASH, UnusedBiometricEngine, manifest,
+        state_with,
+    };
 
     fn state() -> Arc<EnclaveState> {
         state_with(Arc::new(EchoAttestor))
@@ -188,10 +243,43 @@ mod tests {
     /// An enclave that cannot prove its own identity must not reach the point of serving.
     #[test]
     fn an_attestor_that_fails_fails_the_boot() {
-        let error =
-            EnclaveState::generate(Arc::new(FailingAttestor), Box::new(UnusedBiometricEngine))
-                .err();
+        let error = EnclaveState::generate(
+            Arc::new(FailingAttestor),
+            Box::new(UnusedBiometricEngine),
+            TEST_ENGINE_HASH,
+        )
+        .err();
 
         assert_eq!(error, Some(enclave_types::Error::AttestationFailed));
+    }
+
+    #[test]
+    fn loads_the_manifest_of_its_bundle_once() {
+        let state = state();
+        assert!(state.release_hashes().is_empty());
+
+        let current = manifest(TEST_ENGINE_HASH, "1.0.0");
+        assert_eq!(state.load_release(&current), Ok(()));
+        assert_eq!(state.load_release(&current), Ok(()));
+        let release_hash = state.release().expect("loaded").release_hash();
+        assert_eq!(state.release_hashes(), vec![release_hash]);
+
+        assert_eq!(
+            state.load_release(&manifest(TEST_ENGINE_HASH, "1.0.1")),
+            Err(enclave_types::Error::ReleaseRejected)
+        );
+        assert_eq!(state.release_hashes(), vec![release_hash]);
+    }
+
+    #[test]
+    fn rejects_a_manifest_for_another_bundle_or_a_malformed_one() {
+        let state = state();
+        for rejected in [manifest([0x2b; 32], "1.0.0"), "not.a.jws".to_owned()] {
+            assert_eq!(
+                state.load_release(&rejected),
+                Err(enclave_types::Error::ReleaseRejected)
+            );
+        }
+        assert!(state.release().is_none());
     }
 }

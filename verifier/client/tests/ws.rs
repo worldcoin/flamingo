@@ -28,10 +28,15 @@ fn config(base_url: &str) -> Config {
 }
 
 fn assignment(attestation: &str, public_key: &str) -> String {
+    assignment_with_releases(attestation, public_key, &["2a".repeat(32)])
+}
+
+fn assignment_with_releases(attestation: &str, public_key: &str, releases: &[String]) -> String {
     serde_json::json!({
         "type": "assignment",
         "attestation": attestation,
         "public_key": public_key,
+        "release_hashes": releases,
     })
     .to_string()
 }
@@ -159,6 +164,29 @@ async fn rejects_malformed_base64_in_either_assignment_field() {
             .connect()
             .await
             .expect_err("malformed base64 must be rejected");
+
+        assert!(
+            matches!(error, client::Error::MalformedAssignment),
+            "got {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejects_a_release_hash_that_is_not_32_bytes_of_lowercase_hex() {
+    for release in ["2a".repeat(31), "2A".repeat(32), "zz".repeat(32)] {
+        let base_url = serve(move |mut socket| async move {
+            expect_assignment_request(&mut socket).await;
+            let body = assignment_with_releases("hEBAQEA=", "a2V5", &[release]);
+            let _ = socket.send(Message::Text(body.into())).await;
+        })
+        .await;
+
+        let error = FlamingoVerifierClient::new(config(&base_url))
+            .expect("client should build")
+            .connect()
+            .await
+            .expect_err("a malformed release_hash must be rejected");
 
         assert!(
             matches!(error, client::Error::MalformedAssignment),

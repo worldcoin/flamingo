@@ -78,8 +78,10 @@ license-files = [{ path = "../../LICENSE", hash = 0x51549d2b }]
 unknown-registry = "deny"
 unknown-git = "deny"
 unused-allowed-source = "allow"
-# The sandbox library and its Minijail are the only Git dependencies; the protocol comes from crates.io.
+# The sandbox library, its Minijail and the unreleased WIP-201 wire formats are the only Git
+# dependencies; the Engine protocol comes from crates.io.
 allow-git = [
     "https://github.com/google/minijail",
     "https://github.com/worldcoin/tabernaculum",
+    "https://github.com/worldcoin/world-id-protocol",
 ]

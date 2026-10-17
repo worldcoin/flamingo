@@ -112,10 +112,37 @@ impl BiometricEngine for UnusedBiometricEngine {
     }
 }
 
+/// `engine_hash` of the bundle test states claim to run.
+pub const TEST_ENGINE_HASH: [u8; 32] = [0x2a; 32];
+
 /// Builds state whose biometric engine must not be called.
 pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
     Arc::new(
-        EnclaveState::generate(attestor, Box::new(UnusedBiometricEngine))
+        EnclaveState::generate(attestor, Box::new(UnusedBiometricEngine), TEST_ENGINE_HASH)
             .expect("boot state should generate"),
+    )
+}
+
+/// A release manifest for `engine_hash`; the enclave does not check its signature.
+pub fn manifest(engine_hash: [u8; 32], version: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let payload = serde_json::json!({
+        "engine_hash": hex::encode(engine_hash),
+        "version": version,
+        "pipelines": [{
+            "pipeline": 1,
+            "description": "credential image, live capture, challenge",
+            "response_slots": { "min": 500, "max": 4000, "count": 4 },
+            "max_request_bytes": 8_388_608,
+        }],
+        "match_strictness_levels": [{ "match_strictness": 2, "description": "strict" }],
+    });
+    let header = r#"{"alg":"ES256","kid":"test","typ":"world-id-engine-manifest"}"#;
+    format!(
+        "{}.{}.{}",
+        URL_SAFE_NO_PAD.encode(header),
+        URL_SAFE_NO_PAD.encode(payload.to_string()),
+        URL_SAFE_NO_PAD.encode([0u8; 64])
     )
 }

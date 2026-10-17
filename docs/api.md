@@ -5,7 +5,7 @@ The host exposes three routes:
 | Route | Purpose |
 | --- | --- |
 | `GET /health` | Host liveness. |
-| `GET /ready` | Returns `200` when the enclave answers a health request, otherwise `503`. |
+| `GET /ready` | Returns `200` when the enclave answers a health request and has loaded a release manifest, otherwise `503`. |
 | `GET /v1/matches` | WebSocket match: one assignment text frame, then one sealed binary match frame. |
 
 ## Client configuration
@@ -47,7 +47,7 @@ Image limits are 4 MiB per image and 7 MiB across all frames. `hashes.json` is l
 
 `GET /v1/matches` upgrades to a WebSocket. A session runs exactly two client frames in order, and the host closes after the second:
 
-1. An assignment request text frame, `{"type":"assignment_request"}`. The host answers with an assignment text frame, `{"type":"assignment","attestation":"…","public_key":"…"}`, carrying the enclave's attestation and encryption key.
+1. An assignment request text frame, `{"type":"assignment_request"}`. The host answers with an assignment text frame, `{"type":"assignment","attestation":"…","public_key":"…","release_hashes":["…"]}`, carrying the enclave's attestation, its encryption key, and the lowercase-hex `release_hash` of each loaded release. The release hashes are not attested.
 2. One sealed match binary frame, to which the host answers with one sealed result binary frame.
 
 The client verifies the assignment, seals the match to that key, and verifies the result and its claims without a second round trip for ordering. `FlamingoVerifierClient::connect` returns a session whose `request_match` runs the exchange; the session owns the socket and the verified assignment, so a match cannot be sent over a connection whose assignment was not verified. For authenticated gateways, call `build_request()`, add an `Authorization` header with `with_header`, then pass the builder to `connect_with()`.

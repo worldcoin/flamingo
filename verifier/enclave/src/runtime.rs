@@ -1,6 +1,9 @@
 //! Provisioned worker startup and enclave serving on Linux.
 
 use std::{
+    fs::File,
+    io,
+    os::unix::fs::FileExt as _,
     path::Path,
     sync::{Arc, LazyLock},
 };
@@ -14,6 +17,7 @@ use flamingo_verifier_enclave::{
 };
 use flamingo_verifier_sandbox_client::{FaceLimits, SandboxClient};
 use pontifex::SecureModule;
+use sha2::{Digest as _, Sha256};
 use tabernaculum::{
     ConnectionError, Limits, Policy, SandboxConfig, Worker,
     bundle::{
@@ -42,7 +46,14 @@ pub(super) fn run() -> anyhow::Result<()> {
     let boot = enclave::accept(&BootstrapConfig::default(), Path::new(STAGING_DIR))
         .context("worker artifact provisioning failed")?;
     let runtime = boot.runtime();
-    tracing::info!(release_id = %runtime.release_id, worker_sha384 = %runtime.sha384, "worker executable provisioned");
+    // WIP-201 names the bundle by SHA-256; tabernaculum's SHA-384 only checks the transfer.
+    let engine_hash = sha256(&runtime.binary).context("failed to hash the worker executable")?;
+    tracing::info!(
+        release_id = %runtime.release_id,
+        worker_sha384 = %runtime.sha384,
+        engine_hash = %hex::encode(engine_hash),
+        "worker executable provisioned"
+    );
     let limits = FaceLimits {
         max_request_bytes: MAX_REQUEST_BYTES,
         max_image_bytes: MAX_IMAGE_BYTES,
@@ -67,7 +78,22 @@ pub(super) fn run() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("failed to start enclave executor")?
-        .block_on(serve(boot, worker))
+        .block_on(serve(boot, worker, engine_hash))
+}
+
+/// `SHA-256` of a file, read without moving its offset.
+fn sha256(file: &File) -> io::Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 1 << 20];
+    let mut offset = 0;
+    loop {
+        let read = file.read_at(&mut buffer, offset)?;
+        if read == 0 {
+            return Ok(hasher.finalize().into());
+        }
+        hasher.update(&buffer[..read]);
+        offset += read as u64;
+    }
 }
 
 /// A terminal worker cannot be replaced within an enclave boot; init tears down the guest.
@@ -81,14 +107,18 @@ fn worker_failed(error: ConnectionError) -> ! {
 }
 
 /// Attests boot keys after isolation and model initialization, then accepts requests.
-async fn serve(boot: Bootstrap, worker: SandboxClient) -> anyhow::Result<()> {
+async fn serve(
+    boot: Bootstrap,
+    worker: SandboxClient,
+    engine_hash: [u8; 32],
+) -> anyhow::Result<()> {
     worker.check_alive();
     let engine = Box::new(SandboxBiometricEngine::new(worker));
     // Attests both boot keys, so a broken NSM stops the boot and both caches start populated.
     attestation::connect()
         .await
         .context("Nitro Secure Module is unavailable")?;
-    let mut state = EnclaveState::generate(Arc::new(NsmAttestor), engine)
+    let mut state = EnclaveState::generate(Arc::new(NsmAttestor), engine, engine_hash)
         .map_err(|error| anyhow!("failed to generate and attest the boot keys: {error:?}"))?;
     let (encryption_refresh, signing_refresh) = state.start_attestation_refresh();
     let state = Arc::new(state);

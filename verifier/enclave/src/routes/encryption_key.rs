@@ -13,6 +13,7 @@ pub async fn handler(
     Ok(KeyAttestation {
         document: state.encryption_key_attestation().await,
         public_key: state.encryption_public_key(),
+        release_hashes: state.release_hashes(),
     })
 }
 
