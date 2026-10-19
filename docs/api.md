@@ -10,13 +10,17 @@ The host exposes three routes:
 
 ## Client configuration
 
-Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encrypt requests, and check signed results. Save this configuration as `client.json`, replacing the PCR0 placeholder with the value from `target/eif/verifier-pcr.json` or a trusted release:
+Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encrypt requests, and check signed results. Save this configuration as `client.json`, replacing the PCR0–2 placeholders with the values from `target/eif/verifier-pcr.json` or a trusted release:
 
 ```json
 {
   "host_url": "http://localhost:8000",
   "allowed_pcr_configs": [
-    [{ "index": 0, "value": "<96-character PCR0 hex>" }]
+    [
+      { "index": 0, "value": "<96-character PCR0 hex>" },
+      { "index": 1, "value": "<96-character PCR1 hex>" },
+      { "index": 2, "value": "<96-character PCR2 hex>" }
+    ]
   ],
   "max_attestation_age_millis": 3600000,
   "connect_timeout_millis": 5000,
@@ -24,7 +28,7 @@ Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encr
 }
 ```
 
-Only `host_url` and `allowed_pcr_configs` are required. The other fields default to the values shown. Each PCR configuration must include a nonzero, 48-byte PCR0; every measurement must be 48 bytes and each index must be unique. An attestation must match one complete configuration. Debug enclaves report zero measurements and are rejected.
+Only `host_url` and `allowed_pcr_configs` are required. The other fields default to the values shown. `max_attestation_age_millis` must be nonzero and at most the WIP-201 `MAX_ATTESTATION_AGE` of 3 hours. Each PCR configuration must include nonzero, 48-byte PCR0, PCR1 and PCR2; every measurement must be 48 bytes and each index must be unique. An attestation must match one complete configuration. Debug enclaves report zero measurements and are rejected.
 
 ## Matches
 
@@ -39,7 +43,7 @@ The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-prot
 
 A LightGuard live capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the one uncompared entry. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
 
-A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 64 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix and channel domain `flamingo-verifier/matches/v4`, requiring matching enclave/client versions.
+A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 64 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix on the WIP-201 channel (`WORLD-ID/WIP-201/CHANNEL`, key commitment domain `WORLD-ID/WIP-201/CHANNEL-KEY\0`).
 
 The release manifest's `max_request_bytes` bounds each sealed request; the host additionally caps it at the [API constants](../verifier/api-types/src/matches.rs), which also define the response limits.
 

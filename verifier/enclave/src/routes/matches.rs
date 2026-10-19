@@ -193,8 +193,8 @@ mod tests {
         test_support::{TEST_MAX_REQUEST_BYTES, UnusedBiometricEngine, loaded_state},
     };
     use eddsa_babyjubjub::EdDSAPrivateKey;
-    use flamingo_verifier_sealed_types::{AatInputs, Entry, MATCH_CHANNEL_DOMAIN, Payload};
-    use pontifex::{ChannelConsumer, ChannelDomain};
+    use flamingo_verifier_sealed_types::{AatInputs, CHANNEL_DOMAIN, Entry, Payload};
+    use pontifex::ChannelConsumer;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use world_id_flamingo::{FlamingoToken, engine_config_hash};
     use world_id_primitives::{
@@ -334,7 +334,7 @@ mod tests {
 
     async fn exchange_bytes(state: Arc<EnclaveState>, plaintext: &[u8]) -> MatchResult {
         let consumer = ChannelConsumer::from_unverified_public_key(
-            ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
+            CHANNEL_DOMAIN,
             &state.channel().public_key(),
         )
         .unwrap();

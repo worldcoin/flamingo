@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_enclave_types as enclave_types;
-use flamingo_verifier_sealed_types::MATCH_CHANNEL_DOMAIN;
-use pontifex::{ChannelDomain, ChannelEnclave};
+use flamingo_verifier_sealed_types::CHANNEL_DOMAIN;
+use pontifex::ChannelEnclave;
 use tokio::task::JoinHandle;
 use world_id_flamingo::ReleaseManifest;
 
@@ -50,12 +50,10 @@ impl EnclaveState {
         engine: Box<dyn BiometricEngine>,
         engine_hash: [u8; 32],
     ) -> Result<Self, enclave_types::Error> {
-        let channel = ChannelEnclave::generate(ChannelDomain::new(MATCH_CHANNEL_DOMAIN)).map_err(
-            |error| {
-                tracing::error!(?error, "failed to generate channel key");
-                enclave_types::Error::Internal
-            },
-        )?;
+        let channel = ChannelEnclave::generate(CHANNEL_DOMAIN).map_err(|error| {
+            tracing::error!(?error, "failed to generate channel key");
+            enclave_types::Error::Internal
+        })?;
         let signing_key = SigningKey::generate();
 
         // Serialized once here rather than on every attestation.
@@ -238,7 +236,9 @@ mod tests {
 
         assert_eq!(
             state.encryption_key_attestation().await,
-            pontifex::channel::public_key_commitment(&state.encryption_public_key()).to_vec()
+            flamingo_verifier_sealed_types::CHANNEL_DOMAIN
+                .public_key_commitment(&state.encryption_public_key())
+                .to_vec()
         );
         assert_eq!(
             state.signing_key_attestation().await,
