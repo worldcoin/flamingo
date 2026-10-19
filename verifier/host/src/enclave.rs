@@ -12,8 +12,6 @@ use pontifex::client::ConnectionDetails;
 use tokio::time::timeout;
 
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-// Match requests can carry large payloads and require expensive computation.
-const MATCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Failures while calling an enclave operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +77,14 @@ impl EnclaveClient for PontifexEnclaveClient {
     }
 
     async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, Error> {
-        self.call(request, MATCH_REQUEST_TIMEOUT).await
+        let metadata = self.encryption_key_attestation().await?;
+        let last_slot = metadata
+            .max_response_slot_millis
+            .ok_or(Error::Operation(enclave_types::Error::NotReady))?;
+        self.call(
+            request,
+            Duration::from_millis(last_slot) + Duration::from_secs(5),
+        )
+        .await
     }
 }

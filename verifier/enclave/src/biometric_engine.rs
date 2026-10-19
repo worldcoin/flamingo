@@ -17,6 +17,9 @@ pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_ENTRY_BYTES;
 pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_ENTRY_BYTES + 1024;
 #[cfg(any(target_os = "linux", test))]
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Delay between an Engine overrun and the enclave exit that resets the worker.
+#[cfg(target_os = "linux")]
+const RESET_GRACE: Duration = Duration::from_secs(2);
 
 /// Which `LightGuard` frame is compared with the other images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +134,9 @@ pub trait BiometricEngine: Send + Sync {
     ) -> Result<GrayBadgeScores, BiometricError>;
     /// Checks liveness without waiting for an active inference operation.
     fn check_health(&self) {}
+    /// Terminates an Engine whose request overran its last response slot, so no state from that
+    /// request reaches the next one.
+    fn terminate(&self);
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -307,6 +313,19 @@ mod sandboxed {
                 ),
                 debug_report: scores.debug_report.into(),
             })
+        }
+
+        // The overrunning request still holds the worker, so only a new boot resets it. The grace
+        // period lets the sealed failure reach the client first.
+        fn terminate(&self) {
+            tokio::spawn(async {
+                tokio::time::sleep(super::RESET_GRACE).await;
+                tracing::error!(
+                    dependency = "biometric_worker",
+                    "exiting to reset the worker"
+                );
+                std::process::exit(1);
+            });
         }
 
         // An async mutex, so tabernaculum's std-mutex `check_alive_if_idle` does not apply.

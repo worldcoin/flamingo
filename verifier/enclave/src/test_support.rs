@@ -110,6 +110,10 @@ impl BiometricEngine for UnusedBiometricEngine {
     ) -> Result<GrayBadgeScores, BiometricError> {
         panic!("biometric engine was called unexpectedly")
     }
+
+    fn terminate(&self) {
+        panic!("biometric engine was terminated unexpectedly")
+    }
 }
 
 /// `engine_hash` of the bundle test states claim to run.
@@ -126,18 +130,38 @@ pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
 /// `max_request_bytes` of pipeline 1 in [`manifest`]; pipeline 2 allows half.
 pub const TEST_MAX_REQUEST_BYTES: u64 = 1 << 20;
 
+/// Response slots of [`manifest`]: the first is immediate, so tests not about timing stay fast.
+pub const TEST_SLOTS: (u64, u64, u32) = (1, 4000, 4);
+
 /// Builds state for `engine` with the [`manifest`] of [`TEST_ENGINE_HASH`] loaded.
 pub fn loaded_state(engine: impl BiometricEngine + 'static) -> Arc<EnclaveState> {
+    loaded_state_with_slots(engine, TEST_SLOTS)
+}
+
+/// [`loaded_state`] with every pipeline's response slots set to (`min`, `max`, `count`).
+pub fn loaded_state_with_slots(
+    engine: impl BiometricEngine + 'static,
+    slots: (u64, u64, u32),
+) -> Arc<EnclaveState> {
     let state = EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine), TEST_ENGINE_HASH)
         .expect("boot state should generate");
     state
-        .load_release(&manifest(TEST_ENGINE_HASH, "1.0.0"))
+        .load_release(&manifest_with_slots(TEST_ENGINE_HASH, "1.0.0", slots))
         .expect("the test manifest should load");
     Arc::new(state)
 }
 
 /// A release manifest for `engine_hash`; the enclave does not check its signature.
 pub fn manifest(engine_hash: [u8; 32], version: &str) -> String {
+    manifest_with_slots(engine_hash, version, TEST_SLOTS)
+}
+
+/// [`manifest`] with every pipeline's response slots set to (`min`, `max`, `count`).
+pub fn manifest_with_slots(
+    engine_hash: [u8; 32],
+    version: &str,
+    (min, max, count): (u64, u64, u32),
+) -> String {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     let payload = serde_json::json!({
@@ -147,13 +171,13 @@ pub fn manifest(engine_hash: [u8; 32], version: &str) -> String {
             {
                 "pipeline": 1,
                 "description": "credential image, live capture, challenge",
-                "response_slots": { "min": 500, "max": 4000, "count": 4 },
+                "response_slots": { "min": min, "max": max, "count": count },
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES,
             },
             {
                 "pipeline": 2,
                 "description": "live capture, challenge",
-                "response_slots": { "min": 500, "max": 4000, "count": 4 },
+                "response_slots": { "min": min, "max": max, "count": count },
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES / 2,
             },
         ],
