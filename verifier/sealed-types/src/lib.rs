@@ -22,6 +22,9 @@ pub use errors::{
 pub use messages::*;
 pub use response::*;
 pub use serde_bytes::ByteBuf;
+pub use world_id_flamingo::{
+    AatClaims, AatInputs, Entry, FlamingoClaims, FlamingoToken, Payload, Request, RequestError,
+};
 
 /// Bound on sealed match bytes before decryption.
 pub use flamingo_verifier_api_types::MAX_MATCH_BODY_BYTES;
