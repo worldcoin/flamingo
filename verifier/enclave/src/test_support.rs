@@ -7,7 +7,7 @@ use flamingo_verifier_enclave_types as enclave_types;
 
 use crate::{
     attestation::Attestor,
-    biometric_engine::{BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores},
+    biometric_engine::{BiometricEngine, BiometricError},
     state::EnclaveState,
 };
 
@@ -94,22 +94,11 @@ pub struct UnusedBiometricEngine;
 
 #[async_trait::async_trait]
 impl BiometricEngine for UnusedBiometricEngine {
-    async fn deepface(
+    async fn evaluate(
         &self,
         _: Vec<u8>,
-        _: crate::biometric_engine::LiveCapture,
-        _: Vec<u8>,
         _: tokio::time::Instant,
-    ) -> Result<DeepFaceScores, BiometricError> {
-        panic!("biometric engine was called unexpectedly")
-    }
-
-    async fn graybadge(
-        &self,
-        _: crate::biometric_engine::LiveCapture,
-        _: Vec<u8>,
-        _: tokio::time::Instant,
-    ) -> Result<GrayBadgeScores, BiometricError> {
+    ) -> Result<flamingo_verifier_sealed_types::DebugReport, BiometricError> {
         panic!("biometric engine was called unexpectedly")
     }
 

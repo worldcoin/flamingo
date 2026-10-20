@@ -11,11 +11,11 @@ use std::{
 use anyhow::{Context, anyhow};
 use flamingo_verifier_enclave::{
     attestation::{self, NsmAttestor},
-    biometric_engine::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, SandboxBiometricEngine},
+    biometric_engine::SandboxBiometricEngine,
     rng, server,
     state::EnclaveState,
 };
-use flamingo_verifier_sandbox_client::{FaceLimits, SandboxClient};
+use flamingo_verifier_sandbox_client::{EngineLimits, SandboxClient};
 use pontifex::SecureModule;
 use sha2::{Digest as _, Sha256};
 use tabernaculum::{
@@ -53,9 +53,8 @@ pub(super) fn run() -> anyhow::Result<()> {
         engine_hash = %hex::encode(engine_hash),
         "worker executable provisioned"
     );
-    let limits = FaceLimits {
-        max_request_bytes: MAX_REQUEST_BYTES,
-        max_image_bytes: MAX_IMAGE_BYTES,
+    let limits = EngineLimits {
+        max_payload_bytes: flamingo_engine_interface::MAX_PAYLOAD_BYTES,
     };
     let (worker, ready) = Worker::spawn(
         &runtime.binary,

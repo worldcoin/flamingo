@@ -7,7 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-biometric-engines-protocol.workspace = true
+flamingo-engine-interface.workspace = true
 tabernaculum.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+world-id-flamingo.workspace = true

@@ -16,7 +16,7 @@ The enclave validates request bounds, the release, pipeline, match strictness an
 
 The enclave runs each (`aud`, `nonce`) once per boot. It keeps up to 262,144 of them in memory; once full, it refuses requests and reports not ready until it reboots with a new channel key.
 
-The current engine still returns similarity scores, so the enclave's [interim adapter](../verifier/enclave/src/pipeline.rs) maps pipelines to engine operations and strictness levels to thresholds. Every compared pair must clear the level's threshold.
+The sandboxed Engine interprets pipelines and match strictness and returns Pass or a bounded error code. The verifier forwards the original canonical Payload bytes and signs only Pass; scores and embeddings never cross this boundary. The prototype Engine supports DeepFace and GrayBadge with strictness ID `2`.
 
 ## Repository layout
 
@@ -34,7 +34,8 @@ All crates share the root [Cargo workspace](../Cargo.toml) and lockfile.
 | [`api-types`](../verifier/api-types) | HTTP responses, errors, and payload limits. |
 | [`enclave-types`](../verifier/enclave-types) | Host/enclave vsock messages. |
 | [`sealed-types`](../verifier/sealed-types) | Plaintext CBOR requests and results carried inside encryption. |
+| [`engine-interface`](../verifier/engine-interface) | Versioned, bounded worker IPC around unchanged canonical Payload bytes. |
 
-[tabernaculum](https://github.com/worldcoin/tabernaculum) receives the external biometric worker with size and digest integrity checks and launches it under Minijail with its reviewed seccomp policy. The [sandbox client](../verifier/sandbox-client) validates, encodes and checks the worker's `biometric-engines-protocol` messages. The enclave owns request validation, the interim strictness policy, replay rejection and signing. Worker access uses one mutex with a timeout.
+[tabernaculum](https://github.com/worldcoin/tabernaculum) receives the external biometric worker with size and digest integrity checks and launches it under Minijail with its reviewed seccomp policy. The [sandbox client](../verifier/sandbox-client) checks protocol readiness, frame bounds, response IDs and verdicts. The enclave owns release selection checks, AAT verification, replay rejection and signing. Worker access uses one cancellation-safe mutex with a timeout. The persistent worker lifecycle is unchanged; per-request reset remains an outstanding WIP-201 conformance requirement.
 
 Nix uses the root workspace and lockfile to build the enclave. Public binaries, Docker images and EIFs exclude the biometric engine and models; the worker is provisioned at runtime. Shared dependency changes can affect its PCR measurements. The separate [DeepIdentifier migration](https://github.com/worldcoin/di-migration-tee) lives in its own repository.

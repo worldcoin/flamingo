@@ -14,8 +14,6 @@ pub mod attestation;
 pub mod biometric_engine;
 /// Boot-scoped key material.
 pub mod keys;
-/// Interim mapping of WIP-201 requests onto the engine operations.
-pub mod pipeline;
 /// Replay rejection for this boot's channel key.
 pub mod replay;
 /// Nitro hardware RNG verification.
@@ -28,9 +26,6 @@ pub mod server;
 pub mod state;
 #[cfg(test)]
 mod test_support;
-
-#[cfg(any(target_os = "linux", test))]
-mod error;
 
 /// Runs synchronous enclave work without blocking the async runtime.
 pub(crate) async fn blocking<T: Send + 'static>(
