@@ -2,7 +2,7 @@
 
 ## Setup and checks
 
-Use the Rust toolchain in [`rust-toolchain.toml`](../rust-toolchain.toml). Git credentials must allow access to the private `worldcoin/biometric-engines` dependency. The Nix development shell supplies Rust, Clang, pkg-config, jq, and Linux sandbox dependencies:
+Use the Rust toolchain in [`rust-toolchain.toml`](../rust-toolchain.toml). The Nix development shell supplies Rust, Clang, pkg-config, jq, and Linux sandbox dependencies:
 
 ```bash
 nix develop
@@ -16,16 +16,16 @@ Install `cargo-deny` separately. Minijail process tests live in [tabernaculum](h
 
 ## Build images
 
-Build on x86_64 Linux with Nix, jq, and curl. Nitro hardware is only needed to run the enclave. Git must have access to `biometric-engines`; set `HUGGING_FACE_TOKEN` to fetch private models that are not already in the Nix store.
+Build on x86_64 Linux with Nix, jq, and curl. Nitro hardware is only needed to run the enclave. The public verifier build excludes the biometric implementation and models; those are packaged separately in biometric-engines and sideloaded by the provisioner.
 
 ```bash
 scripts/build-enclaves.sh --workload verifier
 jq . target/eif/verifier-pcr.json
 ```
 
-The script builds a reproducible OCI image and writes `target/eif/verifier-enclave.eif` and `target/eif/verifier-pcr.json`. Both images use the same root filesystem. Expect about 90 minutes for a cold build.
+The script builds a reproducible OCI image and writes `target/eif/verifier-enclave.eif` and `target/eif/verifier-pcr.json`. Both images use the same root filesystem.
 
-To build and inspect only the OCI image after fetching the models:
+To build and inspect only the public OCI image:
 
 ```bash
 nix build --no-update-lock-file .#verifier-oci
@@ -59,7 +59,7 @@ docker version
 
 Use the Rust provisioner in [flamingo-deploy](https://github.com/worldcoin/flamingo-deploy)
 to launch the EIF, sideload its worker, load the matching WIP-201 manifest, and check enclave
-health before publishing readiness. The provisioner receives `RELEASE_MANIFEST_PATH`; the API
+health before publishing readiness. The provisioner receives the compact JWS as `RELEASE_MANIFEST`; the API
 host can start independently. Use a normal enclave, since the client rejects debug measurements.
 Set `ENCLAVE_CID` to the provisioned enclave's CID; its vsock port is `1000`.
 
