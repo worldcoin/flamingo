@@ -59,32 +59,13 @@ Check the downloaded artifacts' hashes against `manifest.json`. Rebuild the sour
 
 ## Server releases
 
-[Release server](../.github/workflows/release-server.yml) publishes the API, provisioner
-base, and enclave images to GHCR, plus the EIF, PCRs, and `release.json` under
-`server/v<version>`. The workflow runs from `main` and uses the `release` environment.
+[Release server](../.github/workflows/release-server.yml) publishes the API and enclave
+images to GHCR, plus the EIF, PCRs, and `release.json` under `server/v<version>`.
 
 ```sh
 gh workflow run release-server.yml --repo worldcoin/flamingo --ref main \
   -f version=1.0.0-rc.1
 ```
 
-Client crate versions are independent. `release.json` contains the API,
-`provisioner_image`, and enclave image digests, EIF checksum, and PCRs from the same
-source commit. The provisioner image contains the Flamingo bootstrap binary and its
-Nitro/S3 tooling; deployment adds the paired EIF at `/home/enclave.eif`.
-
-The [Docker build workflow](../.github/workflows/build-docker.yml) checks both API and
-provisioner images on pull requests without publishing. Its `verifier` workload
-continues to select only the API image; `verifier-provisioner` selects the provisioner.
-
-Deployment must consume `provisioner_image` by digest from the verified server
-release, replacing the generic Tabernaculum provisioner base. The provisioner also
-needs the provider's compact JWS mounted at `RELEASE_MANIFEST_PATH`; it sends the
-worker first, then loads the manifest and checks enclave health before writing the
-readiness file. This requires a deployment update: mounting the JWS only in the API
-container does not initialize the release.
-
-Keep the provisioner and EIF paired. This source uses Tabernaculum bundle schema 4,
-which is incompatible with the schema 3 provisioner/receiver in Tabernaculum v0.1.0.
-The deployment still supplies the worker archive and checksum separately; the
-worker and provider manifest are not embedded in the public images.
+Client crate versions are independent. The provisioner stays in the deploy repo;
+`release.json` contains the image digests, EIF checksum, and PCRs.

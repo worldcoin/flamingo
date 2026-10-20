@@ -57,24 +57,15 @@ docker version
 
 ## Run the host and a match
 
-Start the Flamingo provisioner on the Nitro host. It downloads and verifies the worker artifact,
-launches the EIF, sideloads the executable through Tabernaculum, loads the WIP-201 manifest,
-checks enclave health and publishes readiness. Use a normal enclave, since the client rejects
-debug measurements. The API host can start independently and reports not ready until provisioning
-finishes.
+Use the Rust provisioner in [flamingo-deploy](https://github.com/worldcoin/flamingo-deploy)
+to launch the EIF, sideload its worker, load the matching WIP-201 manifest, and check enclave
+health before publishing readiness. The provisioner receives `RELEASE_MANIFEST_PATH`; the API
+host can start independently. Use a normal enclave, since the client rejects debug measurements.
+Set `ENCLAVE_CID` to the provisioned enclave's CID; its vsock port is `1000`.
 
-```bash
-EIF_PATH=./verifier-enclave.eif \
-BUNDLE_ARTIFACT_URI=s3://your-bucket/worker.tar.gz \
-BUNDLE_ARTIFACT_SHA256='<archive-sha256>' \
-RELEASE_MANIFEST_PATH=./release.jws \
-ENCLAVE_CID=16 ENCLAVE_PORT=1000 \
-  cargo run --locked --bin flamingo-verifier-provisioner
-```
-
-See the [provisioner configuration](../verifier/provisioner/README.md) for CPU/memory limits,
-timeouts and the artifact format. The enclave and provisioner both pin the same unreleased
-Tabernaculum commit; the old version-3 provisioner image cannot boot this version-4 enclave.
+This branch pins Tabernaculum commit `288613703669c92978e8ecbe3a3b30c571f56361` (bootstrap
+format 4). The deploy-owned provisioner must use the matching revision; the generic
+Tabernaculum v0.1.0 provisioner image uses the incompatible format 3.
 
 The host reads every setting from an environment variable and an equivalent CLI flag, with a flag overriding its variable:
 

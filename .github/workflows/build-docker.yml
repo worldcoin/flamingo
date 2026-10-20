@@ -1,7 +1,7 @@
-# Builds and publishes the API and provisioner images to GHCR (attested).
+# Builds and publishes the host images to GHCR (attested).
 #
 # Enclave OCI images and EIFs are built reproducibly by flake.nix. This workflow only builds
-# and publishes host-side images.
+# and publishes host images.
 name: Build and Push Docker Image
 
 on:
@@ -40,7 +40,7 @@ on:
         required: false
         type: string
       workload:
-        description: "Build verifier or verifier-provisioner. Empty builds both images."
+        description: "Build only this workload's host image. Empty builds all."
         required: false
         type: string
       push:
@@ -76,8 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           all='[
-            {"name":"flamingo-verifier-host","dockerfile":"verifier/host/Dockerfile","image":"flamingo-verifier","workload":"verifier"},
-            {"name":"flamingo-verifier-provisioner","dockerfile":"verifier/provisioner/Dockerfile","image":"flamingo-verifier-provisioner","workload":"verifier-provisioner"}
+            {"name":"flamingo-verifier-host","dockerfile":"verifier/host/Dockerfile","image":"flamingo-verifier","workload":"verifier"}
           ]'
           if [[ -n "${WORKLOAD:-}" ]]; then
             include=$(jq -c --arg w "$WORKLOAD" 'map(select(.workload == $w))' <<<"$all")

@@ -1744,25 +1744,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flamingo-verifier-provisioner"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "flamingo-verifier-enclave-types",
- "hex",
- "libc",
- "pontifex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tabernaculum-provisioner",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "flamingo-verifier-sandbox-client"
 version = "0.1.0"
 dependencies = [
@@ -4163,28 +4144,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
- "tokio",
- "tokio-vsock",
- "tracing",
  "vsock",
-]
-
-[[package]]
-name = "tabernaculum-provisioner"
-version = "0.1.0"
-source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
-dependencies = [
- "anyhow",
- "hex",
- "libc",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tabernaculum-bundle",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
