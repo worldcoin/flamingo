@@ -1719,7 +1719,6 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "pontifex",
- "rand 0.8.8",
  "serde",
  "serde_json",
  "telemetry-batteries",
@@ -1742,6 +1741,25 @@ dependencies = [
  "taceo-ark-babyjubjub 0.5.3",
  "taceo-eddsa-babyjubjub 0.5.5",
  "taceo-poseidon2 0.2.1",
+]
+
+[[package]]
+name = "flamingo-verifier-provisioner"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "flamingo-verifier-enclave-types",
+ "hex",
+ "libc",
+ "pontifex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tabernaculum-provisioner",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4124,7 +4142,7 @@ dependencies = [
 [[package]]
 name = "tabernaculum"
 version = "0.1.0"
-source = "git+https://github.com/worldcoin/tabernaculum?tag=v0.1.0#9e7713be5a4b28ae97fd34c7636335155ce51152"
+source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
 dependencies = [
  "libc",
  "minijail",
@@ -4136,7 +4154,7 @@ dependencies = [
 [[package]]
 name = "tabernaculum-bundle"
 version = "0.1.0"
-source = "git+https://github.com/worldcoin/tabernaculum?tag=v0.1.0#9e7713be5a4b28ae97fd34c7636335155ce51152"
+source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
 dependencies = [
  "hex",
  "libc",
@@ -4145,7 +4163,28 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-vsock",
+ "tracing",
  "vsock",
+]
+
+[[package]]
+name = "tabernaculum-provisioner"
+version = "0.1.0"
+source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tabernaculum-bundle",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4311,7 +4350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

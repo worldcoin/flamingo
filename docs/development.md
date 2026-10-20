@@ -57,7 +57,24 @@ docker version
 
 ## Run the host and a match
 
-Start the EIF with `nitro-cli run-enclave`, using the CPU and memory allocation for your instance. Use a normal enclave, since the client rejects debug measurements. Set `ENCLAVE_CID` to the running enclave's CID; its vsock port is `1000`.
+Start the Flamingo provisioner on the Nitro host. It downloads and verifies the worker artifact,
+launches the EIF, sideloads the executable through Tabernaculum, loads the WIP-201 manifest,
+checks enclave health and publishes readiness. Use a normal enclave, since the client rejects
+debug measurements. The API host can start independently and reports not ready until provisioning
+finishes.
+
+```bash
+EIF_PATH=./verifier-enclave.eif \
+BUNDLE_ARTIFACT_URI=s3://your-bucket/worker.tar.gz \
+BUNDLE_ARTIFACT_SHA256='<archive-sha256>' \
+RELEASE_MANIFEST_PATH=./release.jws \
+ENCLAVE_CID=16 ENCLAVE_PORT=1000 \
+  cargo run --locked --bin flamingo-verifier-provisioner
+```
+
+See the [provisioner configuration](../verifier/provisioner/README.md) for CPU/memory limits,
+timeouts and the artifact format. The enclave and provisioner both pin the same unreleased
+Tabernaculum commit; the old version-3 provisioner image cannot boot this version-4 enclave.
 
 The host reads every setting from an environment variable and an equivalent CLI flag, with a flag overriding its variable:
 
@@ -66,15 +83,14 @@ The host reads every setting from an environment variable and an equivalent CLI 
 | `--app-env` | `APP_ENV` | `development` | `production`, `staging`, or `development`. |
 | `--enclave-cid` | `ENCLAVE_CID` | required | Nitro enclave CID. |
 | `--enclave-port` | `ENCLAVE_PORT` | required | Enclave Pontifex port. |
-| `--release-manifest-path` | `RELEASE_MANIFEST_PATH` | required | WIP-201 release manifest (compact JWS) for the Engine bundle in the EIF. |
 | `--port` | `PORT` | `8000` | API listen port. |
 | `--ws-idle-timeout-secs` | `WS_IDLE_TIMEOUT_SECS` | `30` | Idle deadline for each WebSocket session phase. |
 | `--ws-max-connections` | `WS_MAX_CONNECTIONS` | `100` | Concurrent WebSocket sessions per host process. |
 
-`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The host sends the manifest to the enclave at startup and every 30 seconds; the enclave accepts only a manifest whose `engine_hash` is the SHA-256 of its Engine bundle, and reports not ready until it has one.
+`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The API host does not load manifests. The enclave accepts only a manifest whose `engine_hash` matches the SHA-256 of its worker executable and reports not ready until the provisioner has loaded it.
 
 ```bash
-RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 RELEASE_MANIFEST_PATH=release.jws \
+RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 \
   cargo run --locked --bin flamingo-verifier-host
 ```
 

@@ -49,7 +49,6 @@ pub(super) fn run() -> anyhow::Result<()> {
     // WIP-201 names the bundle by SHA-256; tabernaculum's SHA-384 only checks the transfer.
     let engine_hash = sha256(&runtime.binary).context("failed to hash the worker executable")?;
     tracing::info!(
-        release_id = %runtime.release_id,
         worker_sha384 = %runtime.sha384,
         engine_hash = %hex::encode(engine_hash),
         "worker executable provisioned"
