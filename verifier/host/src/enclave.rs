@@ -5,8 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_enclave_types::{
-    GetEncryptionKeyRequest, HealthRequest, KeyAttestation, LoadReleaseRequest, MatchRequest,
-    MatchResponse,
+    GetEncryptionKeyRequest, HealthRequest, KeyAttestation, MatchRequest, MatchResponse,
 };
 use pontifex::Request;
 use pontifex::client::ConnectionDetails;
@@ -38,9 +37,6 @@ pub trait EnclaveClient: Send + Sync {
 
     /// Runs a match inside the enclave.
     async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, Error>;
-
-    /// Loads the release manifest of the enclave's Engine bundle; loading it again succeeds.
-    async fn load_release(&self, manifest: String) -> Result<(), Error>;
 }
 
 /// Pontifex-backed enclave client.
@@ -84,10 +80,5 @@ impl EnclaveClient for PontifexEnclaveClient {
 
     async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, Error> {
         self.call(request, MATCH_REQUEST_TIMEOUT).await
-    }
-
-    async fn load_release(&self, manifest: String) -> Result<(), Error> {
-        self.call(LoadReleaseRequest { manifest }, CONTROL_REQUEST_TIMEOUT)
-            .await
     }
 }

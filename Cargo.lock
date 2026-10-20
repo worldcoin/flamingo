@@ -1719,7 +1719,6 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "pontifex",
- "rand 0.8.8",
  "serde",
  "serde_json",
  "telemetry-batteries",
@@ -4124,7 +4123,7 @@ dependencies = [
 [[package]]
 name = "tabernaculum"
 version = "0.1.0"
-source = "git+https://github.com/worldcoin/tabernaculum?tag=v0.1.0#9e7713be5a4b28ae97fd34c7636335155ce51152"
+source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
 dependencies = [
  "libc",
  "minijail",
@@ -4136,7 +4135,7 @@ dependencies = [
 [[package]]
 name = "tabernaculum-bundle"
 version = "0.1.0"
-source = "git+https://github.com/worldcoin/tabernaculum?tag=v0.1.0#9e7713be5a4b28ae97fd34c7636335155ce51152"
+source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
 dependencies = [
  "hex",
  "libc",
@@ -4311,7 +4310,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

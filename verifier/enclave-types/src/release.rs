@@ -6,7 +6,7 @@ use crate::Error;
 /// Loads the WIP-201 release manifest of this boot's Engine bundle.
 ///
 /// The enclave checks it against the bundle it runs and keeps it for the boot. Loading the same
-/// manifest again succeeds, so the host can resend it without tracking enclave restarts.
+/// manifest again succeeds, so the provisioner can retry a load during startup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadReleaseRequest {
     /// The release manifest as a compact JWS.

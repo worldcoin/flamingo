@@ -13,7 +13,6 @@ mod environment;
 
 pub mod enclave;
 pub mod error;
-pub mod release;
 pub mod routes;
 pub mod server;
 
