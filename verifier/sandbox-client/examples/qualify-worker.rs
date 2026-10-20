@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(matches!(
         worker.evaluate(&invalid.encode().unwrap()),
         Err(Rejection::Engine {
-            code: ErrorCode::BiometricRejected,
+            code: ErrorCode::InvalidPayload,
             ..
         })
     ));
