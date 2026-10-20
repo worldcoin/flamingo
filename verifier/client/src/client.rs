@@ -37,6 +37,7 @@ pub fn verify_assignment(
     Ok(VerifiedAssignment {
         attestation,
         consumer,
+        release_hashes: response.release_hashes.clone(),
     })
 }
 
@@ -120,6 +121,8 @@ pub struct VerifiedAssignment {
     /// Metadata read from the signed attestation document.
     attestation: VerifiedAttestation,
     consumer: ChannelConsumer,
+    /// Unattested; the Authenticator selects from these and the enclave rejects any it did not load.
+    release_hashes: Vec<[u8; 32]>,
 }
 
 impl VerifiedAssignment {
@@ -133,6 +136,12 @@ impl VerifiedAssignment {
     #[must_use]
     pub const fn consumer(&self) -> &ChannelConsumer {
         &self.consumer
+    }
+
+    /// The `release_hash` of every release the host says this enclave serves.
+    #[must_use]
+    pub fn release_hashes(&self) -> &[[u8; 32]] {
+        &self.release_hashes
     }
 }
 

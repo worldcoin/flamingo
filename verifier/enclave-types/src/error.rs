@@ -18,4 +18,6 @@ pub enum Error {
     RequestNotOpened,
     /// The enclave failed while producing a response. Detail stays in the enclave log.
     Internal,
+    /// The release manifest is malformed, breaks a WIP-201 rule, or names another Engine bundle.
+    ReleaseRejected,
 }

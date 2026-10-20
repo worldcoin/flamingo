@@ -68,13 +68,18 @@ async fn readiness_follows_the_enclave() {
     .await;
     assert_eq!(ready, StatusCode::OK);
 
-    let unreachable = status(
-        state_with(StubEnclaveClient {
-            health: Some(Err(enclave::Error::Timeout)),
-            ..StubEnclaveClient::default()
-        }),
-        request(Method::GET, "/ready"),
-    )
-    .await;
-    assert_eq!(unreachable, StatusCode::SERVICE_UNAVAILABLE);
+    for error in [
+        enclave::Error::Timeout,
+        enclave::Error::Operation(flamingo_verifier_enclave_types::Error::NotReady),
+    ] {
+        let not_ready = status(
+            state_with(StubEnclaveClient {
+                health: Some(Err(error)),
+                ..StubEnclaveClient::default()
+            }),
+            request(Method::GET, "/ready"),
+        )
+        .await;
+        assert_eq!(not_ready, StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
