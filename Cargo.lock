@@ -1689,10 +1689,15 @@ name = "flamingo-verifier-e2e"
 version = "0.9.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "flamingo-verifier-client",
  "flamingo-verifier-sealed-types",
+ "hex",
+ "p256",
  "rand 0.8.8",
+ "serde_json",
  "tokio",
+ "world-id-flamingo",
 ]
 
 [[package]]

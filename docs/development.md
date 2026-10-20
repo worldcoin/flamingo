@@ -95,13 +95,20 @@ curl --fail http://localhost:8000/ready
 
 The enclave binary, `verifier-enclave`, requires the Nitro Secure Module and its hardware RNG. Run it through the EIF.
 
-Create `client.json` using the [client configuration](api.md#client-configuration), then supply the three images:
+Create `client.json` using the [client configuration](api.md#client-configuration), pinning PCR0–2 from the verified server release. Obtain the selected engine release's `world-id-engine.json` from the signing workflow and independently enroll its provider JWK as `trusted-provider-dev.jwk.json`. Check that public key against the trusted KMS/provider identity; accepting a key merely because it accompanies a manifest does not establish trust. Then supply the reviewed release hash and the three images:
 
 ```bash
-VERIFIER_CONFIG=./client.json cargo run --locked --bin flamingo-verifier-e2e -- \
-  credential.png live.png challenge.png
+VERIFIER_CONFIG=./client.json \
+PROVIDER_METADATA=./signed/world-id-engine.json \
+PROVIDER_KEY=./trusted-provider-dev.jwk.json \
+EXPECTED_RELEASE_HASH="<reviewed-64-character-release-hash>" \
+  cargo run --locked --bin flamingo-verifier-e2e -- credential.png live.png challenge.png
 ```
 
-The harness opens the WebSocket session — one assignment text frame, then one sealed match binary frame over the same socket — submits an encrypted DeepFace request, and verifies the Flamingo Token and its claims. It uses the first Engine the host serves and match strictness `2`; `MATCH_STRICTNESS` overrides it.
+For cluster testing, an authorized `kubectl -n flamingo-verifier port-forward deployment/flamingo-verifier 8000:8000` exposes the internal API locally. Set `host_url` to `http://127.0.0.1:8000`; the client still verifies Nitro attestation and encrypts the biometric request. This tests the enclave path, not the external attested-proxy/gateway admission layer, whose authenticated handshake needs a separate client test.
+
+The harness verifies the selected active manifest under the independently trusted provider key, requires that exact release to be offered by the host, and rejects measurement bypass. It opens one WebSocket session, verifies the Nitro assignment against the configured PCR0–2, seals the DeepFace request to the attested channel key, and verifies the returned Flamingo Token, signing-key attestation and claims. Match strictness defaults to `2`; an override must be declared by the selected manifest.
+
+For a known rejection fixture, set `EXPECTED_OUTCOME=reject` and an exact serialized `EXPECTED_FAILURE`, for example `EXPECTED_FAILURE='"biometric_rejected"'`. Only that sealed rejection counts as success; transport, attestation, signature, internal and timeout failures fail the run. The default outcome is a successful signed match. Also verify that substituting an untrusted provider key, another release hash or incorrect PCRs fails before a successful match. No debug report or biometric data is printed.
 
 `MATCH_OPERATION=gray_badge` runs the credential-free operation instead and takes only `<live-image> <challenge-image>`. `LIGHT_GUARD_UNILLUMINATED_IMAGE` adds the second frame and `LIGHT_GUARD_MATCHING_FRAME` selects `illuminated` (default) or `unilluminated`.
