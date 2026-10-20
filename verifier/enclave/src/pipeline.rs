@@ -90,8 +90,9 @@ pub fn operation(payload: Payload) -> Result<Operation, FailureReason> {
 
     let mut entries: Vec<Option<Entry>> = payload.entries.into_iter().map(Some).collect();
     let mut take = |index: u8| {
-        entries[usize::from(index)]
-            .take()
+        entries
+            .get_mut(usize::from(index))
+            .and_then(Option::take)
             .ok_or(FailureReason::UnsupportedPipeline)
     };
     let mut compared = Vec::with_capacity(payload.compare.len());
@@ -242,6 +243,9 @@ mod tests {
         let plain = || vec![entry(b"a", b""), entry(b"b", b""), entry(b"c", b"")];
         for payload in [
             payload(3, plain(), vec![0, 1, 2]),
+            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1, 3]),
+            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1, 255]),
+            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1, 1]),
             payload(PIPELINE_DEEPFACE, plain(), vec![0, 1]),
             payload(PIPELINE_GRAYBADGE, plain(), vec![0, 1]),
             payload(

@@ -1,7 +1,7 @@
 //! The attested statement a passing request produces, and the claims it must carry.
 //!
-//! The request itself is `world_id_flamingo::Request`; the Verifier interprets none of its
-//! payload beyond the WIP-201 bounds.
+//! The request itself is `world_id_flamingo::Request`; this module does not interpret its
+//! payload here; the enclave validates it and its interim adapter maps pipeline roles and metadata.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use world_id_flamingo::{

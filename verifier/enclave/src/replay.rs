@@ -62,6 +62,12 @@ impl ReplayGuard {
             return Err(FailureReason::Internal);
         }
         processed.insert((aud, nonce));
+        if processed.len() >= self.limit && !self.full.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                limit = self.limit,
+                "replay set full; refusing requests until the enclave reboots"
+            );
+        }
         drop(processed);
         Ok(())
     }
@@ -82,10 +88,11 @@ mod tests {
         let pair = |aud: u64, nonce: u64| (aud.into(), nonce.into());
         let (aud, nonce) = pair(1, 1);
         assert_eq!(guard.reserve(aud, nonce), Ok(()));
+        assert!(!guard.is_full());
         assert_eq!(guard.reserve(aud, nonce), Err(FailureReason::Replayed));
         let (other_aud, _) = pair(2, 1);
         assert_eq!(guard.reserve(other_aud, nonce), Ok(()));
-        assert!(!guard.is_full());
+        assert!(guard.is_full());
 
         let (aud, nonce) = pair(3, 3);
         assert_eq!(guard.reserve(aud, nonce), Err(FailureReason::Internal));

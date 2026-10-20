@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn version_three_framing_has_frozen_bytes() {
+    fn version_four_framing_has_frozen_bytes() {
         let bytes = rejection(DebugReport::NotProduced)
             .to_padded_cbor()
             .unwrap();
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(&bytes[..4], &[0, 0, 0, 59]);
         assert_eq!(&bytes[4..63], payload);
         assert!(bytes[63..].iter().all(|byte| *byte == 0));
-        assert_eq!(crate::MATCH_CHANNEL_DOMAIN, "flamingo-verifier/matches/v3");
+        assert_eq!(crate::MATCH_CHANNEL_DOMAIN, "flamingo-verifier/matches/v4");
     }
 
     #[test]
