@@ -22,7 +22,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+# Rustls support only: `session::tls_connector` supplies the roots, so tokio-tungstenite
+# doesn't need to pull in its own (older) webpki-roots.
+tokio-tungstenite = { workspace = true, features = ["__rustls-tls"] }
 url.workspace = true
 webpki-roots.workspace = true
 
