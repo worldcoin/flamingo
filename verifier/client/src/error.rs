@@ -34,6 +34,12 @@ pub enum Error {
     #[error("sealed channel failure: {0:?}")]
     Channel(#[source] ChannelError),
 
+    /// The request violated a WIP-201 bound or its AAT did not verify.
+    #[error("match request was malformed")]
+    MalformedRequest,
+    /// The host does not list the release the request names.
+    #[error("the enclave has not loaded the requested release")]
+    ReleaseUnavailable,
     /// The sealed plaintext was not a match result.
     #[error("sealed response was not a match result")]
     MalformedResult,

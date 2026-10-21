@@ -79,6 +79,7 @@ impl ApiError {
                 | enclave_types::Error::SecureModuleNotInitialized
                 | enclave_types::Error::AttestationFailed => Self::enclave_not_ready(*operation),
                 enclave_types::Error::RequestNotOpened
+                | enclave_types::Error::RequestTooLarge
                 | enclave_types::Error::ReleaseRejected
                 | enclave_types::Error::Internal => Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -111,6 +112,9 @@ impl ApiError {
                     true,
                 )
                 .with_detail(format!("{operation:?}")),
+                // Above every pipeline's `max_request_bytes` of the loaded release.
+                enclave_types::Error::RequestTooLarge => Self::request_too_large()
+                    .with_detail("sealed request exceeds the release's max_request_bytes"),
                 // Only the release route returns `ReleaseRejected`; reaching it here is a host bug.
                 enclave_types::Error::ReleaseRejected => Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -389,6 +393,11 @@ mod tests {
                 enclave_types::Error::RequestNotOpened,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 StatusCode::CONFLICT,
+            ),
+            (
+                enclave_types::Error::RequestTooLarge,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::PAYLOAD_TOO_LARGE,
             ),
             (
                 enclave_types::Error::ReleaseRejected,

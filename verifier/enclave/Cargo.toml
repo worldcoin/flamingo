@@ -14,9 +14,7 @@ path = "src/main.rs"
 async-trait.workspace = true
 anyhow.workspace = true
 flamingo-verifier-api-types.workspace = true
-ark-babyjubjub.workspace = true
 flamingo-verifier-enclave-types.workspace = true
-flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 eddsa-babyjubjub.workspace = true
 biometric-engines-protocol.workspace = true
@@ -30,6 +28,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 world-id-flamingo.workspace = true
+world-id-primitives.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 flamingo-verifier-sandbox-client.workspace = true
@@ -38,3 +37,4 @@ tabernaculum.workspace = true
 [dev-dependencies]
 base64.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }

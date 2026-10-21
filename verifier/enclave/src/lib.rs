@@ -14,8 +14,10 @@ pub mod attestation;
 pub mod biometric_engine;
 /// Boot-scoped key material.
 pub mod keys;
-/// PCP binding verification (transport-free).
-pub mod pcp;
+/// Interim mapping of WIP-201 requests onto the engine operations.
+pub mod pipeline;
+/// Replay rejection for this boot's channel key.
+pub mod replay;
 /// Nitro hardware RNG verification.
 pub mod rng;
 /// Pontifex operations exposed to the host.

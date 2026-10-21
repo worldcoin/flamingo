@@ -142,7 +142,7 @@ impl MatchResult {
 mod tests {
     use super::*;
     use crate::{AttestedStatement, FailureReason};
-    use flamingo_verifier_protocol::match_token::MatchToken;
+    use world_id_flamingo::FlamingoToken;
 
     fn rejection(debug_report: DebugReport) -> MatchResult {
         MatchResult::Failed {
@@ -160,7 +160,7 @@ mod tests {
                 let response = if success {
                     MatchResult::Success {
                         statement: AttestedStatement {
-                            token: MatchToken::from_bytes(vec![1; 512]),
+                            token: FlamingoToken::from_bytes(vec![1; 512]),
                             signing_key_attestation: vec![2; 5000],
                         },
                         debug_report,
@@ -174,6 +174,12 @@ mod tests {
                 assert!(!format!("{response:?}").contains(&json));
             }
         }
+        assert_eq!(
+            DebugReport::from(Some("x".repeat(65_537))),
+            DebugReport::OmittedTooLarge {
+                original_size_bytes: 65_537
+            }
+        );
         let json = "é".repeat(MAX_DEBUG_REPORT_BYTES / 2 + 1);
         assert_eq!(
             DebugReport::from(Some(json)),
@@ -212,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn version_three_framing_has_frozen_bytes() {
+    fn version_four_framing_has_frozen_bytes() {
         let bytes = rejection(DebugReport::NotProduced)
             .to_padded_cbor()
             .unwrap();
@@ -221,18 +227,18 @@ mod tests {
         assert_eq!(&bytes[..4], &[0, 0, 0, 59]);
         assert_eq!(&bytes[4..63], payload);
         assert!(bytes[63..].iter().all(|byte| *byte == 0));
-        assert_eq!(crate::MATCH_CHANNEL_DOMAIN, "flamingo-verifier/matches/v3");
+        assert_eq!(crate::MATCH_CHANNEL_DOMAIN, "flamingo-verifier/matches/v4");
     }
 
     #[test]
     fn total_budget_omits_report_without_erasing_a_signed_outcome() {
         let statement = AttestedStatement {
-            token: MatchToken::from_bytes(vec![1; 170 * 1024]),
+            token: FlamingoToken::from_bytes(vec![1; 200 * 1024]),
             signing_key_attestation: vec![2; 5000],
         };
         let response = MatchResult::Success {
             statement: statement.clone(),
-            debug_report: Some("x".repeat(100 * 1024)).into(),
+            debug_report: Some("x".repeat(64 * 1024)).into(),
         };
         let decoded = MatchResult::from_padded_cbor(&response.to_padded_cbor().unwrap()).unwrap();
         assert_eq!(
@@ -240,13 +246,13 @@ mod tests {
             MatchResult::Success {
                 statement,
                 debug_report: DebugReport::OmittedTooLarge {
-                    original_size_bytes: 100 * 1024
+                    original_size_bytes: 64 * 1024
                 }
             }
         );
         let response = MatchResult::Success {
             statement: AttestedStatement {
-                token: MatchToken::from_bytes(vec![1; MATCH_RESPONSE_ENVELOPE_LEN]),
+                token: FlamingoToken::from_bytes(vec![1; MATCH_RESPONSE_ENVELOPE_LEN]),
                 signing_key_attestation: vec![],
             },
             debug_report: DebugReport::NotProduced,

@@ -7,7 +7,6 @@ members = [
     "verifier/sealed-types",
     "verifier/enclave",
     "verifier/host",
-    "verifier/protocol",
     "verifier/sandbox-client",
 ]
 resolver = "3"
@@ -24,8 +23,8 @@ publish = false
 [workspace.dependencies]
 biometric-engines-protocol = "0.1.0"
 anyhow = "1.0"
-ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.5" }
-ark-ff = "0.5"
+ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.6" }
+ark-ff = "0.6"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
@@ -36,9 +35,8 @@ coset = "0.4.2"
 flamingo-verifier-api-types = { version = "0.8.0", path = "verifier/api-types" }
 flamingo-verifier-client = { path = "verifier/client" }
 flamingo-verifier-enclave-types = { path = "verifier/enclave-types" }
-flamingo-verifier-protocol = { version = "0.8.0", path = "verifier/protocol" }
 flamingo-verifier-sealed-types = { version = "0.8.0", path = "verifier/sealed-types" }
-eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.5" }
+eddsa-babyjubjub = { package = "taceo-eddsa-babyjubjub", version = "0.6" }
 flamingo-verifier-sandbox-client = { path = "verifier/sandbox-client" }
 futures-util = "0.3"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
@@ -46,7 +44,7 @@ hex-literal = "1.1"
 http-body-util = "0.1"
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
 pontifex = { version = "3.0.0", default-features = false }
-poseidon2 = { package = "taceo-poseidon2", version = "0.2" }
+poseidon2 = { package = "taceo-poseidon2", version = "0.3" }
 rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
@@ -68,4 +66,5 @@ url = { version = "2", features = ["serde"] }
 webpki-roots = "0.26"
 # WIP-201 wire formats are unreleased (worldcoin/world-id-protocol#1079).
 world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", rev = "2854c89a91093bcb875264df366407ea346356c5" }
+world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "2854c89a91093bcb875264df366407ea346356c5", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
