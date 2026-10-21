@@ -4,6 +4,10 @@ FROM ghcr.io/rust-cross/rust-musl-cross:x86_64-musl AS builder
 USER root
 WORKDIR /app
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends --only-upgrade ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 RUN rustup show \
  && rustup target add x86_64-unknown-linux-musl
