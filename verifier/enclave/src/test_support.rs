@@ -99,6 +99,7 @@ impl BiometricEngine for UnusedBiometricEngine {
         _: Vec<u8>,
         _: crate::biometric_engine::LiveCapture,
         _: Vec<u8>,
+        _: tokio::time::Instant,
     ) -> Result<DeepFaceScores, BiometricError> {
         panic!("biometric engine was called unexpectedly")
     }
@@ -107,6 +108,7 @@ impl BiometricEngine for UnusedBiometricEngine {
         &self,
         _: crate::biometric_engine::LiveCapture,
         _: Vec<u8>,
+        _: tokio::time::Instant,
     ) -> Result<GrayBadgeScores, BiometricError> {
         panic!("biometric engine was called unexpectedly")
     }

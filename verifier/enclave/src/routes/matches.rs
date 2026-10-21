@@ -5,7 +5,7 @@ use flamingo_verifier_sealed_types::{
     AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims, MatchResult,
     Request, expected_claims,
 };
-use tokio::time::{Instant, sleep_until, timeout_at};
+use tokio::time::{Instant, sleep_until};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
 
 use crate::{
@@ -53,15 +53,7 @@ pub async fn handler(
 
     let last_slot = arrival + Duration::from_millis(slots.max);
     let result = match prepared {
-        Ok(prepared) => timeout_at(last_slot, run(Arc::clone(&state), prepared))
-            .await
-            .unwrap_or_else(|_| {
-                state.reset_overrunning_engine();
-                Ok(MatchResult::Failed {
-                    reason: FailureReason::EngineTimeout,
-                    debug_report: DebugReport::NotProduced,
-                })
-            }),
+        Ok(prepared) => run(Arc::clone(&state), prepared, last_slot).await,
         Err(reason) => Ok(MatchResult::Failed {
             reason,
             debug_report: DebugReport::NotProduced,
@@ -162,6 +154,7 @@ fn prepare(
 async fn run(
     state: Arc<EnclaveState>,
     prepared: Prepared,
+    deadline: Instant,
 ) -> Result<MatchResult, enclave_types::Error> {
     let scores = match prepared.operation {
         Operation::DeepFace {
@@ -170,7 +163,7 @@ async fn run(
             challenge,
         } => state
             .engine()
-            .deepface(credential, live, challenge)
+            .deepface(credential, live, challenge, deadline)
             .await
             .map(|scores| {
                 (
@@ -184,7 +177,7 @@ async fn run(
             }),
         Operation::GrayBadge { live, challenge } => state
             .engine()
-            .graybadge(live, challenge)
+            .graybadge(live, challenge, deadline)
             .await
             .map(|scores| {
                 (
@@ -200,6 +193,10 @@ async fn run(
                 .replay()
                 .release(prepared.claims.aud, prepared.claims.nonce);
             return BiometricError::Busy.into_result();
+        }
+        Err(BiometricError::EngineTimeout) => {
+            state.reset_overrunning_engine();
+            return BiometricError::EngineTimeout.into_result();
         }
         Err(error) => return error.into_result(),
     };
@@ -273,6 +270,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         busy: std::sync::atomic::AtomicBool,
         terminated: Arc<AtomicUsize>,
+        queue: Arc<tokio::sync::Mutex<()>>,
     }
 
     fn engine(third: f32) -> Engine {
@@ -282,6 +280,7 @@ mod tests {
             calls: Arc::default(),
             busy: std::sync::atomic::AtomicBool::new(false),
             terminated: Arc::default(),
+            queue: Arc::default(),
         }
     }
 
@@ -292,12 +291,18 @@ mod tests {
             credential: Vec<u8>,
             live: LiveCapture,
             challenge: Vec<u8>,
+            deadline: Instant,
         ) -> Result<DeepFaceScores, BiometricError> {
             if self.busy.swap(false, Ordering::SeqCst) {
                 return Err(BiometricError::Busy);
             }
+            let _guard = tokio::time::timeout_at(deadline, self.queue.lock())
+                .await
+                .map_err(|_| BiometricError::Busy)?;
             self.calls.fetch_add(1, Ordering::SeqCst);
-            tokio::time::sleep(self.delay).await;
+            tokio::time::timeout_at(deadline, tokio::time::sleep(self.delay))
+                .await
+                .map_err(|_| BiometricError::EngineTimeout)?;
             assert_eq!(&credential[..], b"orb");
             let LiveCapture::Vanilla(image) = live else {
                 panic!("expected a vanilla capture")
@@ -316,10 +321,14 @@ mod tests {
             &self,
             live: LiveCapture,
             _: Vec<u8>,
+            deadline: Instant,
         ) -> Result<GrayBadgeScores, BiometricError> {
             if self.busy.swap(false, Ordering::SeqCst) {
                 return Err(BiometricError::Busy);
             }
+            let _guard = tokio::time::timeout_at(deadline, self.queue.lock())
+                .await
+                .map_err(|_| BiometricError::Busy)?;
             self.calls.fetch_add(1, Ordering::SeqCst);
             let LiveCapture::LightGuard { .. } = live else {
                 panic!("expected a LightGuard capture")
@@ -722,6 +731,74 @@ mod tests {
         assert!(matches!(result, MatchResult::Success { .. }));
         assert!(elapsed >= Duration::from_millis(800), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(1600), "{elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn queued_request_can_retry_without_resetting_an_active_engine() {
+        use crate::test_support::{EchoAttestor, TEST_ENGINE_HASH, manifest_with_slots};
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let slow = Engine {
+            delay: Duration::from_millis(800),
+            ..engine(0.95)
+        };
+        let calls = Arc::clone(&slow.calls);
+        let terminated = Arc::clone(&slow.terminated);
+        let state = Arc::new(
+            EnclaveState::generate(Arc::new(EchoAttestor), Box::new(slow), TEST_ENGINE_HASH)
+                .unwrap(),
+        );
+        // DeepFace has time to finish, but the queued GrayBadge request expires first.
+        let manifest = manifest_with_slots(TEST_ENGINE_HASH, "1.0.0", SLOTS);
+        let parts: Vec<_> = manifest.split('.').collect();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        payload["pipelines"][1]["response_slots"] =
+            serde_json::json!({"min": 200, "max": 200, "count": 1});
+        state
+            .load_release(&format!(
+                "{}.{}.{}",
+                parts[0],
+                URL_SAFE_NO_PAD.encode(payload.to_string()),
+                parts[2]
+            ))
+            .unwrap();
+        let first = request(&deep_face(&state), 1);
+        let running = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { exchange(state, &first).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let queued = request(&gray_badge(&state), 2);
+        let consumer = ChannelConsumer::from_unverified_public_key(
+            CHANNEL_DOMAIN,
+            &state.channel().public_key(),
+        )
+        .unwrap();
+        let (sealed, _) = consumer.seal_to_enclave(&queued.encode()).unwrap();
+        assert_eq!(
+            handler(
+                Arc::clone(&state),
+                MatchRequest {
+                    body: sealed.into()
+                }
+            )
+            .await,
+            Err(enclave_types::Error::NotReady)
+        );
+        assert!(!state.engine_overran());
+        assert_eq!(terminated.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        verify(&state, running.await.unwrap());
+        verify(&state, exchange(Arc::clone(&state), &queued).await);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!state.engine_overran());
     }
 
     #[tokio::test]
