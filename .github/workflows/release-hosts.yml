@@ -44,6 +44,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
       - id: release
         env:
           INPUT_WORKLOAD: ${{ inputs.workload }}
@@ -73,8 +74,7 @@ jobs:
       id-token: write
       packages: write
       attestations: write
-    uses: ./.github/workflows/build-docker.yml
-    secrets: inherit
+    uses: $/.github/workflows/build-docker.yml
     with:
       ref: ${{ needs.prepare.outputs.sha }}
       version: v${{ needs.prepare.outputs.version }}
@@ -91,11 +91,13 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          WORKLOAD: ${{ needs.prepare.outputs.workload }}
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
           IMAGE: ${{ needs.build.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
         run: |
-          tag="${{ needs.prepare.outputs.workload }}-host/v$VERSION"
+          tag="$WORKLOAD-host/v$VERSION"
+          # shellcheck disable=SC2016 -- Markdown backticks are literal.
           printf 'Host image: `%s@%s`\n' "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/body.md"
           gh release create --draft --target "$RELEASE_SHA" -t "$tag" \
             -F "$RUNNER_TEMP/body.md" "$tag"

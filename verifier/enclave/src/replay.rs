@@ -1,7 +1,7 @@
 //! WIP-201 §3.8 replay rejection: one request per (`aud`, `nonce`) under this boot's channel key.
 //!
 //! The set lives as long as the channel key and is never evicted, since evicting would let a
-//! request run twice. It is bounded so an untrusted host cannot exhaust memory; once full, the
+//! request run twice. Reservations refused before inference may be released. It is bounded so an untrusted host cannot exhaust memory; once full, the
 //! enclave refuses every request and reports not ready until it reboots with a new channel key.
 
 use std::{
@@ -72,7 +72,18 @@ impl ReplayGuard {
         Ok(())
     }
 
-    /// Whether the set is full and the enclave must reboot to serve again.
+    /// Releases a reservation only when the Engine refused to start inference.
+    pub fn release(&self, aud: FieldElement, nonce: FieldElement) {
+        let mut processed = self
+            .processed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        processed.remove(&(aud, nonce));
+        self.full
+            .store(processed.len() >= self.limit, Ordering::Relaxed);
+    }
+
+    /// Whether the set has no capacity; only an unstarted request can release a slot.
     pub fn is_full(&self) -> bool {
         self.full.load(Ordering::Relaxed)
     }
@@ -81,6 +92,18 @@ impl ReplayGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn releasing_an_unstarted_request_restores_capacity() {
+        let guard = ReplayGuard::with_limit(1);
+        let aud = FieldElement::from(1u64);
+        let nonce = FieldElement::from(2u64);
+        guard.reserve(aud, nonce).unwrap();
+        assert!(guard.is_full());
+        guard.release(aud, nonce);
+        assert!(!guard.is_full());
+        assert_eq!(guard.reserve(aud, nonce), Ok(()));
+    }
 
     #[test]
     fn rejects_a_processed_pair_and_fails_closed_once_full() {

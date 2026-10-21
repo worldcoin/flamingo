@@ -99,7 +99,7 @@ fn prepare(
     // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
     let claims = expected_claims(&request, &payload)?;
     let operation = pipeline::operation(payload)?;
-    // Last, so only a request the Engine will run consumes its nonce.
+    // Reserve last; a Busy result releases it because inference never started.
     state.replay().reserve(request.aud, request.nonce)?;
     Ok(Prepared {
         claims,
@@ -144,6 +144,12 @@ async fn run(
     };
     let (scores, debug_report) = match scores {
         Ok(scores) => scores,
+        Err(BiometricError::Busy) => {
+            state
+                .replay()
+                .release(prepared.claims.aud, prepared.claims.nonce);
+            return BiometricError::Busy.into_result();
+        }
         Err(error) => return error.into_result(),
     };
 
@@ -211,12 +217,14 @@ mod tests {
     struct Engine {
         third: f32,
         calls: Arc<AtomicUsize>,
+        busy: std::sync::atomic::AtomicBool,
     }
 
     fn engine(third: f32) -> Engine {
         Engine {
             third,
             calls: Arc::default(),
+            busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -228,6 +236,9 @@ mod tests {
             live: LiveCapture,
             challenge: Vec<u8>,
         ) -> Result<DeepFaceScores, BiometricError> {
+            if self.busy.swap(false, Ordering::SeqCst) {
+                return Err(BiometricError::Busy);
+            }
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(&credential[..], b"orb");
             let LiveCapture::Vanilla(image) = live else {
@@ -248,6 +259,9 @@ mod tests {
             live: LiveCapture,
             _: Vec<u8>,
         ) -> Result<GrayBadgeScores, BiometricError> {
+            if self.busy.swap(false, Ordering::SeqCst) {
+                return Err(BiometricError::Busy);
+            }
             self.calls.fetch_add(1, Ordering::SeqCst);
             let LiveCapture::LightGuard { .. } = live else {
                 panic!("expected a LightGuard capture")
@@ -372,6 +386,65 @@ mod tests {
         };
         assert!(matches!(debug_report, DebugReport::Available { .. }));
         FlamingoToken::verify(&statement.token, state.signing_public_key()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn busy_request_can_retry_without_consuming_its_nonce() {
+        let passing = engine(0.95);
+        passing.busy.store(true, Ordering::SeqCst);
+        let calls = Arc::clone(&passing.calls);
+        let state = loaded_state(passing);
+        let request = request(&deep_face(&state), 77);
+        let consumer = ChannelConsumer::from_unverified_public_key(
+            CHANNEL_DOMAIN,
+            &state.channel().public_key(),
+        )
+        .unwrap();
+        let (sealed, _) = consumer.seal_to_enclave(&request.encode()).unwrap();
+        assert_eq!(
+            handler(
+                Arc::clone(&state),
+                MatchRequest {
+                    body: sealed.into()
+                }
+            )
+            .await,
+            Err(enclave_types::Error::NotReady)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        verify(&state, exchange(Arc::clone(&state), &request).await);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            exchange(state, &request).await,
+            rejected(FailureReason::Replayed)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_fresh_duplicates_run_once() {
+        let passing = engine(0.95);
+        let calls = Arc::clone(&passing.calls);
+        let state = loaded_state(passing);
+        let request = request(&deep_face(&state), 77);
+        let (a, b) = tokio::join!(
+            exchange(Arc::clone(&state), &request),
+            exchange(Arc::clone(&state), &request)
+        );
+        assert_eq!(
+            [&a, &b]
+                .into_iter()
+                .filter(|result| **result == rejected(FailureReason::Replayed))
+                .count(),
+            1
+        );
+        assert_eq!(
+            [&a, &b]
+                .into_iter()
+                .filter(|result| matches!(result, MatchResult::Success { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
