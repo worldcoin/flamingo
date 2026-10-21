@@ -72,8 +72,9 @@ impl ReplayGuard {
         Ok(())
     }
 
-    /// Releases a reservation only when the Engine refused to start inference.
-    pub fn release(&self, aud: FieldElement, nonce: FieldElement) {
+    /// Releases only the reservation owned by the request that acquired this pair,
+    /// and only when the Engine refused to start inference.
+    pub(crate) fn release(&self, aud: FieldElement, nonce: FieldElement) {
         let mut processed = self
             .processed
             .lock()

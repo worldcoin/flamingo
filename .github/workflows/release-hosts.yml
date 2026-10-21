@@ -97,7 +97,8 @@ jobs:
           DIGEST: ${{ needs.build.outputs.digest }}
         run: |
           tag="$WORKLOAD-host/v$VERSION"
-          # shellcheck disable=SC2016 -- Markdown backticks are literal.
+          # Markdown backticks are literal.
+          # shellcheck disable=SC2016
           printf 'Host image: `%s@%s`\n' "$IMAGE" "$DIGEST" > "$RUNNER_TEMP/body.md"
           gh release create --draft --target "$RELEASE_SHA" -t "$tag" \
             -F "$RUNNER_TEMP/body.md" "$tag"
