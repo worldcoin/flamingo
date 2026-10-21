@@ -9,6 +9,7 @@
 )]
 
 mod app_state;
+mod engine_provider;
 mod environment;
 
 pub mod enclave;
@@ -17,4 +18,8 @@ pub mod routes;
 pub mod server;
 
 pub use app_state::AppState;
+pub use engine_provider::{
+    ENGINE_METADATA_PATH, EngineProviderMetadata, EngineProviderMetadataError,
+    MAX_ENGINE_METADATA_BYTES,
+};
 pub use environment::{Environment, HostConfig};

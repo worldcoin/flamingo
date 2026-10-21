@@ -22,9 +22,11 @@ pontifex = { workspace = true, features = ["client"] }
 serde.workspace = true
 serde_json.workspace = true
 telemetry-batteries = { workspace = true, features = ["axum"] }
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tungstenite.workspace = true
+world-id-flamingo.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

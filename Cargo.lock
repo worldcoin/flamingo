@@ -1753,11 +1753,13 @@ dependencies = [
  "serde",
  "serde_json",
  "telemetry-batteries",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tower",
  "tracing",
  "tungstenite",
+ "world-id-flamingo",
 ]
 
 [[package]]

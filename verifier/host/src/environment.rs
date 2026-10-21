@@ -1,6 +1,11 @@
 //! Host configuration parsed from environment variables and CLI flags.
 
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    sync::Arc,
+};
+
+use crate::EngineProviderMetadata;
 
 use clap::{Parser, ValueEnum};
 
@@ -39,6 +44,10 @@ pub struct HostConfig {
     )]
     pub environment: Environment,
 
+    /// Public WIP-201 provider metadata JSON. Omit to disable discovery during rollout.
+    #[arg(long = "engine-provider-metadata", env = "ENGINE_PROVIDER_METADATA", value_parser = EngineProviderMetadataParser, hide_env_values = true)]
+    pub engine_provider_metadata: Option<Arc<EngineProviderMetadata>>,
+
     /// Nitro enclave CID.
     #[arg(long, env = "ENCLAVE_CID")]
     pub enclave_cid: u32,
@@ -65,12 +74,41 @@ impl Default for HostConfig {
     fn default() -> Self {
         Self {
             environment: Environment::Development,
+            engine_provider_metadata: None,
             enclave_cid: 0,
             enclave_port: 0,
             port: default_port(),
             ws_idle_timeout: default_ws_idle_timeout(),
             ws_max_connections: default_ws_max_connections(),
         }
+    }
+}
+
+#[derive(Clone)]
+struct EngineProviderMetadataParser;
+
+impl clap::builder::TypedValueParser for EngineProviderMetadataParser {
+    type Value = Arc<EngineProviderMetadata>;
+
+    fn parse_ref(
+        &self,
+        _: &clap::Command,
+        _: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value = value.to_str().ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidUtf8,
+                "Engine Provider metadata must be UTF-8",
+            )
+        })?;
+        // Clap's default error echoes the input, which could accidentally include a private JWK.
+        value
+            .parse::<EngineProviderMetadata>()
+            .map(Arc::new)
+            .map_err(|error| {
+                clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
+            })
     }
 }
 
@@ -132,6 +170,38 @@ mod tests {
         assert_eq!(config.port.get(), 9000);
         assert_eq!(config.ws_idle_timeout.get(), 5);
         assert_eq!(config.ws_max_connections.get(), 7);
+    }
+
+    #[test]
+    fn provider_metadata_is_validated_without_echoing_input() {
+        let json = include_str!("../tests/fixtures/engine-provider.json");
+        let config = parse(&[
+            "host",
+            "--enclave-cid",
+            "16",
+            "--enclave-port",
+            "1000",
+            "--engine-provider-metadata",
+            json,
+        ])
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(config.engine_provider_metadata.unwrap().as_ref()).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        for invalid in ["", "{}", r#"{"secret":"PRIVATE-KEY-MUST-NOT-BE-ECHOED"}"#] {
+            let error = parse(&[
+                "host",
+                "--enclave-cid",
+                "16",
+                "--enclave-port",
+                "1000",
+                "--engine-provider-metadata",
+                invalid,
+            ])
+            .unwrap_err();
+            assert!(!error.to_string().contains("PRIVATE-KEY-MUST-NOT-BE-ECHOED"));
+        }
     }
 
     #[test]
