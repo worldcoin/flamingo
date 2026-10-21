@@ -63,9 +63,9 @@ health before publishing readiness. The provisioner receives `RELEASE_MANIFEST_P
 host can start independently. Use a normal enclave, since the client rejects debug measurements.
 Set `ENCLAVE_CID` to the provisioned enclave's CID; its vsock port is `1000`.
 
-This branch pins Tabernaculum commit `288613703669c92978e8ecbe3a3b30c571f56361` (bootstrap
-format 4). The deploy-owned provisioner must use the matching revision; the generic
-Tabernaculum v0.1.0 provisioner image uses the incompatible format 3.
+Flamingo pins Tabernaculum `v0.2.0` (bootstrap format 4). The deploy-owned provisioner
+must use the matching release. Rebuild the EIF and deploy it with the matching provisioner;
+the Tabernaculum v0.1.0 provisioner image uses the incompatible format 3.
 
 The host reads every setting from an environment variable and an equivalent CLI flag, with a flag overriding its variable:
 

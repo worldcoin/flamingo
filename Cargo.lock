@@ -4207,8 +4207,8 @@ dependencies = [
 
 [[package]]
 name = "tabernaculum"
-version = "0.1.0"
-source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
+version = "0.2.0"
+source = "git+https://github.com/worldcoin/tabernaculum?tag=v0.2.0#4182f239abb529efd8c623f72757ac8e33e88163"
 dependencies = [
  "libc",
  "minijail",
@@ -4219,8 +4219,8 @@ dependencies = [
 
 [[package]]
 name = "tabernaculum-bundle"
-version = "0.1.0"
-source = "git+https://github.com/worldcoin/tabernaculum?rev=288613703669c92978e8ecbe3a3b30c571f56361#288613703669c92978e8ecbe3a3b30c571f56361"
+version = "0.2.0"
+source = "git+https://github.com/worldcoin/tabernaculum?tag=v0.2.0#4182f239abb529efd8c623f72757ac8e33e88163"
 dependencies = [
  "hex",
  "libc",
