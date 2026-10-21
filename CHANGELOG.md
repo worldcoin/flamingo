@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.8.0...flamingo-verifier-client-v0.9.0) - 2026-10-21
+
+### Added
+
+- [**breaking**] use the WIP-201 channel domains and attestation policy ([#149](https://github.com/worldcoin/flamingo/pull/149))
+- [**breaking**] verify WIP-201 requests with world-id-flamingo and reject replays ([#148](https://github.com/worldcoin/flamingo/pull/148))
+- [**breaking**] load WIP-201 release manifests and serve their release_hash ([#147](https://github.com/worldcoin/flamingo/pull/147))
+- [**breaking**] release responses at WIP-201 response slots and apply its response limits ([#150](https://github.com/worldcoin/flamingo/pull/150))
+
+### Fixed
+
+- *(client)* depend on webpki-roots 1, drop tokio-tungstenite's roots feature ([#154](https://github.com/worldcoin/flamingo/pull/154))
+
 ## [0.8.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.7.0...flamingo-verifier-client-v0.8.0) - 2026-10-02
 
 ### Added
