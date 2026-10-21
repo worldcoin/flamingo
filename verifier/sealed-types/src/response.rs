@@ -174,6 +174,12 @@ mod tests {
                 assert!(!format!("{response:?}").contains(&json));
             }
         }
+        assert_eq!(
+            DebugReport::from(Some("x".repeat(65_537))),
+            DebugReport::OmittedTooLarge {
+                original_size_bytes: 65_537
+            }
+        );
         let json = "é".repeat(MAX_DEBUG_REPORT_BYTES / 2 + 1);
         assert_eq!(
             DebugReport::from(Some(json)),
@@ -227,12 +233,12 @@ mod tests {
     #[test]
     fn total_budget_omits_report_without_erasing_a_signed_outcome() {
         let statement = AttestedStatement {
-            token: FlamingoToken::from_bytes(vec![1; 170 * 1024]),
+            token: FlamingoToken::from_bytes(vec![1; 200 * 1024]),
             signing_key_attestation: vec![2; 5000],
         };
         let response = MatchResult::Success {
             statement: statement.clone(),
-            debug_report: Some("x".repeat(100 * 1024)).into(),
+            debug_report: Some("x".repeat(64 * 1024)).into(),
         };
         let decoded = MatchResult::from_padded_cbor(&response.to_padded_cbor().unwrap()).unwrap();
         assert_eq!(
@@ -240,7 +246,7 @@ mod tests {
             MatchResult::Success {
                 statement,
                 debug_report: DebugReport::OmittedTooLarge {
-                    original_size_bytes: 100 * 1024
+                    original_size_bytes: 64 * 1024
                 }
             }
         );
