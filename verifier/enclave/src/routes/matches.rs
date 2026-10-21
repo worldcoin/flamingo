@@ -1,11 +1,12 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
 use flamingo_verifier_sealed_types::{
     AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims, MatchResult,
     Request, expected_claims,
 };
-use world_id_flamingo::ReleaseManifest;
+use tokio::time::{Instant, sleep_until};
+use world_id_flamingo::{ReleaseManifest, ResponseSlots};
 
 use crate::{
     biometric_engine::BiometricError,
@@ -14,14 +15,19 @@ use crate::{
     state::EnclaveState,
 };
 
-/// Opens one request, runs it on the loaded release and seals the outcome.
+/// Opens one request, runs it on the loaded release and seals the outcome, released at the
+/// pipeline's next response slot (WIP-201 §3.5.4).
 pub async fn handler(
     state: Arc<EnclaveState>,
     request: MatchRequest,
 ) -> Result<MatchResponse, enclave_types::Error> {
+    let arrival = Instant::now();
     let Some(release) = state.release() else {
         return Err(enclave_types::Error::NotReady);
     };
+    if state.engine_overran() {
+        return Err(enclave_types::Error::NotReady);
+    }
     // WIP-201 §3.2: a sealed request above every pipeline's limit is rejected before opening.
     let sealed_len = u64::try_from(request.body.len()).unwrap_or(u64::MAX);
     if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES
@@ -31,7 +37,7 @@ pub async fn handler(
     }
 
     let opening_state = Arc::clone(&state);
-    let (sealer, prepared) = blocking(move || {
+    let (sealer, slots, prepared) = blocking(move || {
         let (plaintext, sealer) = opening_state
             .channel()
             .open(&request.body)
@@ -39,31 +45,42 @@ pub async fn handler(
         let release = opening_state
             .release()
             .ok_or(enclave_types::Error::Internal)?;
-        let prepared = prepare(&opening_state, release, &plaintext, sealed_len);
+        let (slots, prepared) = prepare(&opening_state, release, &plaintext, sealed_len);
         drop(plaintext);
-        Ok::<_, enclave_types::Error>((sealer, prepared))
+        Ok::<_, enclave_types::Error>((sealer, slots, prepared))
     })
     .await??;
 
+    let last_slot = arrival + Duration::from_millis(slots.max);
     let result = match prepared {
-        Ok(prepared) => run(state, prepared).await?,
-        Err(reason) => MatchResult::Failed {
+        Ok(prepared) => run(Arc::clone(&state), prepared, last_slot).await,
+        Err(reason) => Ok(MatchResult::Failed {
             reason,
             debug_report: DebugReport::NotProduced,
-        },
+        }),
+    };
+    let response = match result {
+        Ok(result) => {
+            blocking(move || {
+                let encoded = result
+                    .to_padded_cbor()
+                    .map_err(|_| enclave_types::Error::Internal)?;
+                Ok(MatchResponse {
+                    ciphertext: sealer
+                        .seal(&encoded)
+                        .map_err(|_| enclave_types::Error::Internal)?,
+                })
+            })
+            .await?
+        }
+        Err(error) => Err(error),
     };
 
-    blocking(move || {
-        let encoded = result
-            .to_padded_cbor()
-            .map_err(|_| enclave_types::Error::Internal)?;
-        Ok(MatchResponse {
-            ciphertext: sealer
-                .seal(&encoded)
-                .map_err(|_| enclave_types::Error::Internal)?,
-        })
-    })
-    .await?
+    // Every outcome after opening, errors included, leaves at a slot.
+    let elapsed = u64::try_from(arrival.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let slot = slots.release_at(elapsed).unwrap_or(slots.max);
+    sleep_until(arrival + Duration::from_millis(slot)).await;
+    response
 }
 
 /// A request that passed every check before inference.
@@ -75,42 +92,69 @@ struct Prepared {
 
 /// Checks the request against the release, verifies its AAT and records its (`aud`, `nonce`).
 /// A failure here never reaches the Engine.
+///
+/// Returns the slots the response is released at: the pipeline's, or, before the pipeline is
+/// known, the latest first slot of any pipeline, so an early rejection never leaves sooner than
+/// a completed run.
 fn prepare(
     state: &EnclaveState,
     release: &ReleaseManifest,
     plaintext: &[u8],
     sealed_len: u64,
-) -> Result<Prepared, FailureReason> {
-    let request = Request::decode(plaintext, release.max_request_bytes())?;
-    let payload = request.payload()?;
+) -> (ResponseSlots, Result<Prepared, FailureReason>) {
+    let latest_first_slot = release
+        .payload()
+        .pipelines
+        .iter()
+        .map(|pipeline| pipeline.response_slots.min)
+        .max()
+        .unwrap_or_default();
+    let unresolved = ResponseSlots {
+        min: latest_first_slot,
+        max: latest_first_slot,
+        count: 1,
+    };
+    let request = match Request::decode(plaintext, release.max_request_bytes()) {
+        Ok(request) => request,
+        Err(error) => return (unresolved, Err(error.into())),
+    };
+    let payload = match request.payload() {
+        Ok(payload) => payload,
+        Err(error) => return (unresolved, Err(error.into())),
+    };
     if payload.release_hash != release.release_hash() {
-        return Err(FailureReason::UnsupportedRelease);
+        return (unresolved, Err(FailureReason::UnsupportedRelease));
     }
-    let pipeline = release
-        .pipeline(payload.pipeline)
-        .ok_or(FailureReason::UnsupportedPipeline)?;
-    if sealed_len > pipeline.max_request_bytes {
-        return Err(FailureReason::RequestTooLarge);
-    }
-    if !release.defines_strictness(payload.match_strictness) {
-        return Err(FailureReason::UnsupportedMatchStrictness);
-    }
-    let threshold = pipeline::threshold(payload.match_strictness)?;
-    // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
-    let claims = expected_claims(&request, &payload)?;
-    let operation = pipeline::operation(payload)?;
-    // Reserve last; a Busy result releases it because inference never started.
-    state.replay().reserve(request.aud, request.nonce)?;
-    Ok(Prepared {
-        claims,
-        threshold,
-        operation,
-    })
+    let Some(pipeline) = release.pipeline(payload.pipeline) else {
+        return (unresolved, Err(FailureReason::UnsupportedPipeline));
+    };
+    let slots = pipeline.response_slots;
+    let checked = (|| {
+        if sealed_len > pipeline.max_request_bytes {
+            return Err(FailureReason::RequestTooLarge);
+        }
+        if !release.defines_strictness(payload.match_strictness) {
+            return Err(FailureReason::UnsupportedMatchStrictness);
+        }
+        let threshold = pipeline::threshold(payload.match_strictness)?;
+        // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
+        let claims = expected_claims(&request, &payload)?;
+        let operation = pipeline::operation(payload)?;
+        // Reserve last; a Busy result releases it because inference never started.
+        state.replay().reserve(request.aud, request.nonce)?;
+        Ok(Prepared {
+            claims,
+            threshold,
+            operation,
+        })
+    })();
+    (slots, checked)
 }
 
 async fn run(
     state: Arc<EnclaveState>,
     prepared: Prepared,
+    deadline: Instant,
 ) -> Result<MatchResult, enclave_types::Error> {
     let scores = match prepared.operation {
         Operation::DeepFace {
@@ -119,7 +163,7 @@ async fn run(
             challenge,
         } => state
             .engine()
-            .deepface(credential, live, challenge)
+            .deepface(credential, live, challenge, deadline)
             .await
             .map(|scores| {
                 (
@@ -133,7 +177,7 @@ async fn run(
             }),
         Operation::GrayBadge { live, challenge } => state
             .engine()
-            .graybadge(live, challenge)
+            .graybadge(live, challenge, deadline)
             .await
             .map(|scores| {
                 (
@@ -149,6 +193,10 @@ async fn run(
                 .replay()
                 .release(prepared.claims.aud, prepared.claims.nonce);
             return BiometricError::Busy.into_result();
+        }
+        Err(BiometricError::EngineTimeout) => {
+            state.reset_overrunning_engine();
+            return BiometricError::EngineTimeout.into_result();
         }
         Err(error) => return error.into_result(),
     };
@@ -196,7 +244,9 @@ mod tests {
     use crate::{
         biometric_engine::{BiometricEngine, DeepFaceScores, GrayBadgeScores, LiveCapture},
         pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE},
-        test_support::{TEST_MAX_REQUEST_BYTES, UnusedBiometricEngine, loaded_state},
+        test_support::{
+            TEST_MAX_REQUEST_BYTES, UnusedBiometricEngine, loaded_state, loaded_state_with_slots,
+        },
     };
     use eddsa_babyjubjub::EdDSAPrivateKey;
     use flamingo_verifier_sealed_types::{AatInputs, CHANNEL_DOMAIN, Entry, Payload};
@@ -216,15 +266,21 @@ mod tests {
 
     struct Engine {
         third: f32,
+        delay: Duration,
         calls: Arc<AtomicUsize>,
         busy: std::sync::atomic::AtomicBool,
+        terminated: Arc<AtomicUsize>,
+        queue: Arc<tokio::sync::Mutex<()>>,
     }
 
     fn engine(third: f32) -> Engine {
         Engine {
             third,
+            delay: Duration::ZERO,
             calls: Arc::default(),
             busy: std::sync::atomic::AtomicBool::new(false),
+            terminated: Arc::default(),
+            queue: Arc::default(),
         }
     }
 
@@ -235,11 +291,18 @@ mod tests {
             credential: Vec<u8>,
             live: LiveCapture,
             challenge: Vec<u8>,
+            deadline: Instant,
         ) -> Result<DeepFaceScores, BiometricError> {
             if self.busy.swap(false, Ordering::SeqCst) {
                 return Err(BiometricError::Busy);
             }
+            let _guard = tokio::time::timeout_at(deadline, self.queue.lock())
+                .await
+                .map_err(|_| BiometricError::Busy)?;
             self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::timeout_at(deadline, tokio::time::sleep(self.delay))
+                .await
+                .map_err(|_| BiometricError::EngineTimeout)?;
             assert_eq!(&credential[..], b"orb");
             let LiveCapture::Vanilla(image) = live else {
                 panic!("expected a vanilla capture")
@@ -258,10 +321,14 @@ mod tests {
             &self,
             live: LiveCapture,
             _: Vec<u8>,
+            deadline: Instant,
         ) -> Result<GrayBadgeScores, BiometricError> {
             if self.busy.swap(false, Ordering::SeqCst) {
                 return Err(BiometricError::Busy);
             }
+            let _guard = tokio::time::timeout_at(deadline, self.queue.lock())
+                .await
+                .map_err(|_| BiometricError::Busy)?;
             self.calls.fetch_add(1, Ordering::SeqCst);
             let LiveCapture::LightGuard { .. } = live else {
                 panic!("expected a LightGuard capture")
@@ -270,6 +337,10 @@ mod tests {
                 live_challenge: f64::from(self.third),
                 debug_report: Some("{\"engine\":\"test\"}".to_owned()).into(),
             })
+        }
+
+        fn terminate(&self) {
+            self.terminated.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -616,5 +687,143 @@ mod tests {
             exchange(loaded_state(engine(0.95)), &request).await,
             MatchResult::Success { .. }
         ));
+    }
+
+    /// Slots 400, 800 and 1600 ms, far apart so a debug build's decryption fits the first.
+    const SLOTS: (u64, u64, u32) = (400, 1600, 3);
+
+    async fn timed(state: Arc<EnclaveState>, request: &Request) -> (MatchResult, Duration) {
+        let start = Instant::now();
+        let result = exchange(state, request).await;
+        (result, start.elapsed())
+    }
+
+    #[tokio::test]
+    async fn an_early_rejection_waits_for_the_first_slot() {
+        let state = loaded_state_with_slots(UnusedBiometricEngine, SLOTS);
+        let mut payload = deep_face(&state);
+        payload.match_strictness = 4;
+        let (result, elapsed) = timed(state, &request(&payload, 1)).await;
+        assert_eq!(result, rejected(FailureReason::UnsupportedMatchStrictness));
+        assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(800), "{elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_request_waits_for_the_latest_first_slot() {
+        let state = loaded_state_with_slots(UnusedBiometricEngine, SLOTS);
+        let start = Instant::now();
+        assert_eq!(
+            exchange_bytes(state, b"invalid").await,
+            rejected(FailureReason::MalformedInputs)
+        );
+        assert!(start.elapsed() >= Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn a_result_is_released_at_the_next_slot() {
+        let slow = Engine {
+            delay: Duration::from_millis(500),
+            ..engine(0.95)
+        };
+        let state = loaded_state_with_slots(slow, SLOTS);
+        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        assert!(matches!(result, MatchResult::Success { .. }));
+        assert!(elapsed >= Duration::from_millis(800), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(1600), "{elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn queued_request_can_retry_without_resetting_an_active_engine() {
+        use crate::test_support::{EchoAttestor, TEST_ENGINE_HASH, manifest_with_slots};
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let slow = Engine {
+            delay: Duration::from_millis(800),
+            ..engine(0.95)
+        };
+        let calls = Arc::clone(&slow.calls);
+        let terminated = Arc::clone(&slow.terminated);
+        let state = Arc::new(
+            EnclaveState::generate(Arc::new(EchoAttestor), Box::new(slow), TEST_ENGINE_HASH)
+                .unwrap(),
+        );
+        // DeepFace has time to finish, but the queued GrayBadge request expires first.
+        let manifest = manifest_with_slots(TEST_ENGINE_HASH, "1.0.0", SLOTS);
+        let parts: Vec<_> = manifest.split('.').collect();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        payload["pipelines"][1]["response_slots"] =
+            serde_json::json!({"min": 200, "max": 200, "count": 1});
+        state
+            .load_release(&format!(
+                "{}.{}.{}",
+                parts[0],
+                URL_SAFE_NO_PAD.encode(payload.to_string()),
+                parts[2]
+            ))
+            .unwrap();
+        let first = request(&deep_face(&state), 1);
+        let running = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { exchange(state, &first).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let queued = request(&gray_badge(&state), 2);
+        let consumer = ChannelConsumer::from_unverified_public_key(
+            CHANNEL_DOMAIN,
+            &state.channel().public_key(),
+        )
+        .unwrap();
+        let (sealed, _) = consumer.seal_to_enclave(&queued.encode()).unwrap();
+        assert_eq!(
+            handler(
+                Arc::clone(&state),
+                MatchRequest {
+                    body: sealed.into()
+                }
+            )
+            .await,
+            Err(enclave_types::Error::NotReady)
+        );
+        assert!(!state.engine_overran());
+        assert_eq!(terminated.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        verify(&state, running.await.unwrap());
+        verify(&state, exchange(Arc::clone(&state), &queued).await);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!state.engine_overran());
+    }
+
+    #[tokio::test]
+    async fn an_engine_past_the_last_slot_fails_and_is_terminated() {
+        let stuck = Engine {
+            delay: Duration::from_secs(5),
+            ..engine(0.95)
+        };
+        let terminated = Arc::clone(&stuck.terminated);
+        let state = loaded_state_with_slots(stuck, SLOTS);
+        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        assert_eq!(result, rejected(FailureReason::EngineTimeout));
+        assert!(elapsed >= Duration::from_millis(1600), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert_eq!(terminated.load(Ordering::SeqCst), 1);
+        assert!(state.engine_overran());
+        assert_eq!(
+            handler(
+                state,
+                MatchRequest {
+                    body: vec![0; 2048].into()
+                }
+            )
+            .await,
+            Err(enclave_types::Error::NotReady)
+        );
     }
 }

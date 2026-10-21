@@ -86,6 +86,7 @@ async fn recv_error(socket: &mut Client) -> Value {
 fn full_stub() -> StubEnclaveClient {
     StubEnclaveClient {
         encryption_key: Some(Ok(KeyAttestation {
+            max_response_slot_millis: Some(1000),
             document: vec![1, 2, 3],
             public_key: vec![0xab; 1216],
             release_hashes: vec![[0x2a; 32]],
@@ -318,6 +319,7 @@ async fn stalled_peer_releases_its_slot() {
         config,
         StubEnclaveClient {
             encryption_key: Some(Ok(KeyAttestation {
+                max_response_slot_millis: Some(1000),
                 document: vec![0u8; 8 * 1024 * 1024],
                 public_key: vec![0xab; 1216],
                 release_hashes: vec![],

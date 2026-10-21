@@ -1,6 +1,9 @@
 //! Boot-scoped state owned by the enclave.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_enclave_types as enclave_types;
@@ -33,6 +36,8 @@ pub struct EnclaveState {
     release: OnceLock<ReleaseManifest>,
     /// (`aud`, `nonce`) pairs processed under this boot's channel key.
     replay: ReplayGuard,
+    /// Set once the Engine overran a pipeline's last response slot.
+    engine_overran: AtomicBool,
 }
 
 impl EnclaveState {
@@ -83,6 +88,7 @@ impl EnclaveState {
             engine_hash,
             release: OnceLock::new(),
             replay: ReplayGuard::default(),
+            engine_overran: AtomicBool::new(false),
         })
     }
 
@@ -134,6 +140,23 @@ impl EnclaveState {
     #[must_use]
     pub const fn replay(&self) -> &ReplayGuard {
         &self.replay
+    }
+
+    /// Whether the Engine overran a last response slot; the enclave then serves nothing more.
+    #[must_use]
+    pub fn engine_overran(&self) -> bool {
+        self.engine_overran.load(Ordering::Relaxed)
+    }
+
+    /// WIP-201 §3.5.4: an Engine that overran the last slot is terminated and reset.
+    pub fn reset_overrunning_engine(&self) {
+        if !self.engine_overran.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                dependency = "biometric_worker",
+                "engine overran the last response slot; terminating it"
+            );
+            self.engine.terminate();
+        }
     }
 
     /// Returns the channel that opens sealed requests for this boot.

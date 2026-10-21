@@ -109,6 +109,8 @@ pub enum FailureReason {
     },
     /// Matching failed on a named comparison.
     MatchingFailed(ComparisonRole),
+    /// The Engine had not finished by the pipeline's last response slot.
+    EngineTimeout,
     /// Backend infrastructure failed, distinct from biological rejection.
     Internal,
 }

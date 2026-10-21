@@ -5,8 +5,11 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use flamingo_verifier_sealed_types::{DebugReport, FailureReason, MatchResult};
+use tokio::time::Instant;
+#[cfg(test)]
+use tokio::time::timeout;
 #[cfg(any(target_os = "linux", test))]
-use tokio::{sync::Mutex, time::timeout};
+use tokio::{sync::Mutex, time::timeout_at};
 
 #[cfg(any(target_os = "linux", test))]
 use crate::blocking;
@@ -17,6 +20,9 @@ pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_ENTRY_BYTES;
 pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_ENTRY_BYTES + 1024;
 #[cfg(any(target_os = "linux", test))]
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Delay between an Engine overrun and the enclave exit that resets the worker.
+#[cfg(target_os = "linux")]
+const RESET_GRACE: Duration = Duration::from_secs(2);
 
 /// Which `LightGuard` frame is compared with the other images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +75,8 @@ pub struct GrayBadgeScores {
 pub enum BiometricError {
     /// A bounded wait for inference expired.
     Busy,
+    /// Inference started but did not finish by the final response slot.
+    EngineTimeout,
     /// Structured input or biological rejection.
     Rejected(FailureReason),
     /// Worker rejection with its bounded report.
@@ -88,6 +96,10 @@ impl BiometricError {
 
         match self {
             Self::Busy => Err(Error::NotReady),
+            Self::EngineTimeout => Ok(MatchResult::Failed {
+                reason: FailureReason::EngineTimeout,
+                debug_report: DebugReport::NotProduced,
+            }),
             Self::Internal
             | Self::Rejected(FailureReason::Internal)
             | Self::AnalysisRejected {
@@ -110,6 +122,9 @@ impl BiometricError {
 }
 
 /// Image-only operations; PCP verification, policy and signing stay in the enclave operations.
+///
+/// Implementations must respect the absolute response deadline: queue expiry returns `Busy`,
+/// while expiry after starting inference returns `EngineTimeout`.
 #[async_trait]
 pub trait BiometricEngine: Send + Sync {
     /// Compares the credential, live and challenge images.
@@ -120,6 +135,7 @@ pub trait BiometricEngine: Send + Sync {
         credential: Vec<u8>,
         live: LiveCapture,
         challenge: Vec<u8>,
+        deadline: Instant,
     ) -> Result<DeepFaceScores, BiometricError>;
     /// Compares live and challenge images.
     /// # Errors
@@ -128,9 +144,13 @@ pub trait BiometricEngine: Send + Sync {
         &self,
         live: LiveCapture,
         challenge: Vec<u8>,
+        deadline: Instant,
     ) -> Result<GrayBadgeScores, BiometricError>;
     /// Checks liveness without waiting for an active inference operation.
     fn check_health(&self) {}
+    /// Terminates an Engine whose request overran its last response slot, so no state from that
+    /// request reaches the next one.
+    fn terminate(&self);
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -148,15 +168,23 @@ impl<W: Send + 'static> Executor<W> {
 
     async fn run<T: Send + 'static>(
         &self,
+        deadline: Instant,
         work: impl FnOnce(&mut W) -> T + Send + 'static,
     ) -> Result<T, BiometricError> {
         // TODO: Bound waiting request memory if traffic requires more than this single mutex.
-        let mut worker = timeout(QUEUE_TIMEOUT, Arc::clone(&self.worker).lock_owned())
-            .await
-            .map_err(|_| BiometricError::Busy)?;
+        let mut worker = timeout_at(
+            deadline.min(Instant::now() + QUEUE_TIMEOUT),
+            Arc::clone(&self.worker).lock_owned(),
+        )
+        .await
+        .map_err(|_| BiometricError::Busy)?;
+        if Instant::now() >= deadline {
+            return Err(BiometricError::Busy);
+        }
         // The blocking task owns the guard even when its async caller disconnects.
-        blocking(move || work(&mut worker))
+        timeout_at(deadline, blocking(move || work(&mut worker)))
             .await
+            .map_err(|_| BiometricError::EngineTimeout)?
             .map_err(|_| BiometricError::Internal)
     }
 }
@@ -175,10 +203,10 @@ pub use sandboxed::SandboxBiometricEngine;
 
 #[cfg(target_os = "linux")]
 mod sandboxed {
-    use super::LiveCapture;
     use super::{
         BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores, normalized,
     };
+    use super::{Instant, LiveCapture};
     use async_trait::async_trait;
     use biometric_engines_protocol::{
         face::{
@@ -206,9 +234,13 @@ mod sandboxed {
         }
 
         /// Fatal worker failures exit the enclave inside the client and never return here.
-        async fn run(&self, operation: Operation) -> Result<Outcome, BiometricError> {
+        async fn run(
+            &self,
+            operation: Operation,
+            deadline: Instant,
+        ) -> Result<Outcome, BiometricError> {
             self.executor
-                .run(move |worker| worker.evaluate(operation))
+                .run(deadline, move |worker| worker.evaluate(operation))
                 .await?
                 .map_err(|rejection| match rejection {
                     Rejection::AnalysisFailed(failure) => BiometricError::from(failure),
@@ -254,13 +286,17 @@ mod sandboxed {
             credential: Vec<u8>,
             live: LiveCapture,
             challenge: Vec<u8>,
+            deadline: Instant,
         ) -> Result<DeepFaceScores, BiometricError> {
             let Outcome::DeepFace(scores) = self
-                .run(Operation::DeepFace(DeepFaceRequest {
-                    credential: Some(image(Source::Orb(credential))),
-                    live: Some(image(live_source(live))),
-                    challenge: Some(image(Source::Rtms(challenge))),
-                }))
+                .run(
+                    Operation::DeepFace(DeepFaceRequest {
+                        credential: Some(image(Source::Orb(credential))),
+                        live: Some(image(live_source(live))),
+                        challenge: Some(image(Source::Rtms(challenge))),
+                    }),
+                    deadline,
+                )
                 .await?
             else {
                 unreachable!("client validates response operation")
@@ -289,12 +325,16 @@ mod sandboxed {
             &self,
             live: LiveCapture,
             challenge: Vec<u8>,
+            deadline: Instant,
         ) -> Result<GrayBadgeScores, BiometricError> {
             let Outcome::GrayBadge(scores) = self
-                .run(Operation::GrayBadge(GrayBadgeRequest {
-                    live: Some(image(live_source(live))),
-                    challenge: Some(image(Source::Rtms(challenge))),
-                }))
+                .run(
+                    Operation::GrayBadge(GrayBadgeRequest {
+                        live: Some(image(live_source(live))),
+                        challenge: Some(image(Source::Rtms(challenge))),
+                    }),
+                    deadline,
+                )
                 .await?
             else {
                 unreachable!("client validates response operation")
@@ -307,6 +347,19 @@ mod sandboxed {
                 ),
                 debug_report: scores.debug_report.into(),
             })
+        }
+
+        // The overrunning request still holds the worker, so only a new boot resets it. The grace
+        // period lets the sealed failure reach the client first.
+        fn terminate(&self) {
+            tokio::spawn(async {
+                tokio::time::sleep(super::RESET_GRACE).await;
+                tracing::error!(
+                    dependency = "biometric_worker",
+                    "exiting to reset the worker"
+                );
+                std::process::exit(1);
+            });
         }
 
         // An async mutex, so tabernaculum's std-mutex `check_alive_if_idle` does not apply.
@@ -399,7 +452,7 @@ mod tests {
             let entered = Arc::clone(&entered);
             async move {
                 executor
-                    .run(move |()| {
+                    .run(Instant::now() + Duration::from_secs(30), move |()| {
                         entered.notify_one();
                         receiver.recv_timeout(Duration::from_secs(5)).unwrap();
                     })
@@ -411,7 +464,11 @@ mod tests {
             .unwrap();
         let mut second = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move { executor.run(|()| 42).await }
+            async move {
+                executor
+                    .run(Instant::now() + Duration::from_secs(30), |()| 42)
+                    .await
+            }
         });
         assert!(
             timeout(Duration::from_millis(50), &mut second)
@@ -442,7 +499,13 @@ mod tests {
         let guard = executor.worker.lock().await;
         let mut task = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move { executor.run(|()| panic!("cancelled waiter executed")).await }
+            async move {
+                executor
+                    .run(Instant::now() + Duration::from_secs(30), |()| {
+                        panic!("cancelled waiter executed")
+                    })
+                    .await
+            }
         });
         assert!(timeout(Duration::from_millis(50), &mut task).await.is_err());
         task.abort();
@@ -455,7 +518,52 @@ mod tests {
     async fn queue_wait_is_bounded() {
         let executor = Executor::new(());
         let _guard = executor.worker.lock().await;
-        assert_eq!(executor.run(|()| ()).await, Err(BiometricError::Busy));
+        assert_eq!(
+            executor
+                .run(Instant::now() + Duration::from_secs(30), |()| ())
+                .await,
+            Err(BiometricError::Busy)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_inference_timeout_keeps_worker_exclusive() {
+        let executor = Executor::new(());
+        let (release, receiver) = mpsc::sync_channel(1);
+        let result = executor
+            .run(Instant::now() + Duration::from_millis(100), move |()| {
+                receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+            .await;
+        assert_eq!(result, Err(BiometricError::EngineTimeout));
+        assert!(executor.worker.try_lock().is_err());
+        release.send(()).unwrap();
+        let _guard = timeout(Duration::from_secs(2), executor.worker.lock())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_deadline_expires_in_queue_without_starting_inference() {
+        let executor = Executor::new(());
+        let guard = executor.worker.lock().await;
+        let start = Instant::now();
+        assert_eq!(
+            executor
+                .run(start + Duration::from_secs(1), |()| panic!(
+                    "queued request ran"
+                ))
+                .await,
+            Err(BiometricError::Busy)
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        drop(guard);
+        assert_eq!(
+            executor
+                .run(Instant::now(), |()| panic!("expired request ran"))
+                .await,
+            Err(BiometricError::Busy)
+        );
     }
 
     #[test]
@@ -475,7 +583,7 @@ mod tests {
                         let entered = Arc::clone(&entered);
                         async move {
                             executor
-                                .run(move |()| {
+                                .run(Instant::now() + Duration::from_secs(30), move |()| {
                                     entered.notify_one();
                                     receiver.recv_timeout(Duration::from_secs(5)).unwrap();
                                     panic!("detached inference panic");

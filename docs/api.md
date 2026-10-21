@@ -43,7 +43,9 @@ The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-prot
 
 A LightGuard live capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the one uncompared entry. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
 
-A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at 64 KiB. Responses use a 256 KiB padded envelope with a four-byte length prefix on the WIP-201 channel (`WORLD-ID/WIP-201/CHANNEL`, key commitment domain `WORLD-ID/WIP-201/CHANNEL-KEY\0`).
+The enclave releases every opened request's response at the first of its pipeline's `response_slots` at which the Engine has finished, counted from arrival; a request rejected before its pipeline is known waits for the latest first slot of any pipeline. An Engine still running at the last slot fails the request with `engine_timeout`; the enclave then reports not ready and exits to reset the worker.
+
+A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at the WIP-201 `MAX_DEBUG_REPORT` of 64 KiB. Responses use a 96 KiB padded envelope with a four-byte length prefix on the WIP-201 channel (`WORLD-ID/WIP-201/CHANNEL`, key commitment domain `WORLD-ID/WIP-201/CHANNEL-KEY\0`).
 
 The release manifest's `max_request_bytes` bounds each sealed request; the host additionally caps it at the [API constants](../verifier/api-types/src/matches.rs), which also define the response limits.
 
@@ -60,7 +62,7 @@ The upgrade is refused with an HTTP `503 at_capacity` envelope while the host se
 
 ## Errors and retries
 
-Host and transport failures use the JSON error envelope defined in [`api-types`](../verifier/api-types/src/error.rs). The Rust client returns `ReassignRequired` to the caller; it does not retry automatically. The host allows 2 seconds for assignment and health calls, and 30 seconds for a match.
+Host and transport failures use the JSON error envelope defined in [`api-types`](../verifier/api-types/src/error.rs). The Rust client returns `ReassignRequired` to the caller; it does not retry automatically. The host allows 2 seconds for assignment and health calls, and the release's latest response slot plus 5 seconds for a match. The host fetches that deadline from the enclave's loaded-release metadata before each match; it does not read or load a manifest file. Set the client's `request_timeout_millis` above that slot plus the control-call and transport margin too.
 
 A session reports failures as `ErrorEnvelope` text frames, then closes; the same envelope shape is used for HTTP upgrade errors. The upgrade is the only failure reported with an HTTP status.
 

@@ -15,6 +15,10 @@ pub struct KeyAttestation {
     /// `release_hash` of each loaded release; not covered by the attestation. Empty or one entry
     /// for now, as an enclave loads one Engine.
     pub release_hashes: Vec<[u8; 32]>,
+    /// Latest response slot across the loaded release's pipelines, in milliseconds.
+    /// Not attested; used only by the untrusted host for its transport deadline.
+    /// None until the provisioner loads a release.
+    pub max_response_slot_millis: Option<u64>,
 }
 
 /// Requests the attestation for this boot's encryption key.
