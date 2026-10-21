@@ -1,12 +1,35 @@
 # API and client
 
-The host exposes three routes:
+The host exposes these routes:
 
 | Route | Purpose |
 | --- | --- |
+| `GET /.well-known/world-id-engine.json` | Public WIP-201 Engine Provider metadata, when configured. `HEAD` is also supported. |
 | `GET /health` | Host liveness. |
 | `GET /ready` | Returns `200` when the enclave answers a health request and has loaded a release manifest, otherwise `503`. |
 | `GET /v1/matches` | WebSocket match: one assignment text frame, then one sealed binary match frame. |
+
+## Engine Provider discovery
+
+Set `ENGINE_PROVIDER_METADATA` to the complete JSON document defined by
+[WIP-201 §3.5.2](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md#352-release-manifests):
+`version: 1`, `provider_id`, `release_keys` (public P-256 JWKs and statuses), and
+`manifests` (exact compact JWS strings and statuses). The host uses the validated
+[`EngineProviderMetadata`](../verifier/api-types/src/engine_provider.rs) type and returns
+`application/json` with `Cache-Control: no-store`. Only `GET` and `HEAD` are served;
+the deployment must expose this exact path without match authentication over HTTPS.
+
+Absent configuration returns `404`; invalid configuration prevents host startup.
+The JSON is limited to 64 KiB. Private JWK material, ambiguous key identifiers,
+duplicate manifest entries, malformed keys and invalid manifest signatures are rejected.
+Active, retired and revoked entries are all published, including when there are no
+active releases. The handler does not contact the enclave or change its loaded release;
+external service routing still follows deployment readiness.
+
+Clients must establish provider trust independently and use only active manifests
+verified under active trusted keys. This document advertises provider policy;
+the match assignment separately identifies releases actually loaded by the enclave.
+See the deployment repository's [release and key operations](https://github.com/worldcoin/flamingo-deploy/blob/main/docs/engine-releases.md).
 
 ## Client configuration
 

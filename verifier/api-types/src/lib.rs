@@ -12,11 +12,16 @@
 )]
 
 mod assignment;
+mod engine_provider;
 mod error;
 mod matches;
 mod websocket;
 
 pub use assignment::EnclaveAssignmentResponse;
+pub use engine_provider::{
+    ENGINE_METADATA_PATH, EngineProviderMetadata, EngineProviderMetadataError,
+    MAX_ENGINE_METADATA_BYTES,
+};
 pub use error::{ErrorBody, ErrorEnvelope};
 pub use matches::*;
 pub use websocket::{ClientMessage, HostMessage};
