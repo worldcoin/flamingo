@@ -63,8 +63,7 @@ health before publishing readiness. The provisioner receives `RELEASE_MANIFEST_P
 host can start independently. Use a normal enclave, since the client rejects debug measurements.
 Set `ENCLAVE_CID` to the provisioned enclave's CID; its vsock port is `1000`.
 
-Flamingo targets Tabernaculum `v0.2.0` (bootstrap format 4), temporarily pinned to its
-release candidate until publication. The deploy-owned provisioner
+Flamingo pins Tabernaculum `v0.2.0` (bootstrap format 4). The deploy-owned provisioner
 must use the matching release. Rebuild the EIF and deploy it with the matching provisioner;
 the Tabernaculum v0.1.0 provisioner image uses the incompatible format 3.
 
