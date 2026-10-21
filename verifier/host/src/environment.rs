@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use flamingo_verifier_api_types::EngineProviderMetadata;
+use crate::EngineProviderMetadata;
 
 use clap::{Parser, ValueEnum};
 
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn provider_metadata_is_validated_without_echoing_input() {
-        let json = include_str!("../../api-types/tests/fixtures/engine-provider.json");
+        let json = include_str!("../tests/fixtures/engine-provider.json");
         let config = parse(&[
             "host",
             "--enclave-cid",

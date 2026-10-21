@@ -8,12 +8,11 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use common::{StubEnclaveClient, state_with_config};
-use flamingo_verifier_api_types::ENGINE_METADATA_PATH;
-use flamingo_verifier_host::{HostConfig, enclave, routes};
+use flamingo_verifier_host::{ENGINE_METADATA_PATH, HostConfig, enclave, routes};
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
-const METADATA: &str = include_str!("../../api-types/tests/fixtures/engine-provider.json");
+const METADATA: &str = include_str!("fixtures/engine-provider.json");
 
 #[tokio::test]
 async fn serves_exact_public_document_without_authentication_or_enclave_access() {

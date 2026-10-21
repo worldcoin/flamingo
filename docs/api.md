@@ -15,7 +15,7 @@ Set `ENGINE_PROVIDER_METADATA` to the complete JSON document defined by
 [WIP-201 §3.5.2](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md#352-release-manifests):
 `version: 1`, `provider_id`, `release_keys` (public P-256 JWKs and statuses), and
 `manifests` (exact compact JWS strings and statuses). The host uses the validated
-[`EngineProviderMetadata`](../verifier/api-types/src/engine_provider.rs) type and returns
+[`EngineProviderMetadata`](../verifier/host/src/engine_provider.rs) type and returns
 `application/json` with `Cache-Control: no-store`. Only `GET` and `HEAD` are served;
 the deployment must expose this exact path without match authentication over HTTPS.
 
