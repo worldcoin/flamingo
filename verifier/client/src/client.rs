@@ -4,11 +4,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_api_types::{EnclaveAssignmentResponse, ErrorEnvelope};
-use flamingo_verifier_sealed_types::{
-    DebugReport, FlamingoClaims, MATCH_CHANNEL_DOMAIN, MatchResult,
-};
+use flamingo_verifier_sealed_types::{CHANNEL_DOMAIN, DebugReport, FlamingoClaims, MatchResult};
+use pontifex::ChannelConsumer;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
-use pontifex::{ChannelConsumer, ChannelDomain};
 
 use crate::config::Config;
 use crate::error::Error;
@@ -28,13 +26,9 @@ pub fn verify_assignment(
     let public_key = STANDARD
         .decode(&response.public_key)
         .map_err(|_| Error::MalformedAssignment)?;
-    let (consumer, attestation) = ChannelConsumer::from_attestation(
-        ChannelDomain::new(MATCH_CHANNEL_DOMAIN),
-        verifier,
-        &document,
-        &public_key,
-    )
-    .map_err(Error::Channel)?;
+    let (consumer, attestation) =
+        ChannelConsumer::from_attestation(CHANNEL_DOMAIN, verifier, &document, &public_key)
+            .map_err(Error::Channel)?;
 
     Ok(VerifiedAssignment {
         attestation,

@@ -227,7 +227,22 @@ mod tests {
         assert_eq!(&bytes[..4], &[0, 0, 0, 59]);
         assert_eq!(&bytes[4..63], payload);
         assert!(bytes[63..].iter().all(|byte| *byte == 0));
-        assert_eq!(crate::MATCH_CHANNEL_DOMAIN, "flamingo-verifier/matches/v4");
+    }
+
+    #[test]
+    fn the_channel_uses_the_wip_201_domains() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            crate::CHANNEL_DOMAIN.public_key_commitment(b"key"),
+            <[u8; 32]>::from(Sha256::digest(b"WORLD-ID/WIP-201/CHANNEL-KEY\0key"))
+        );
+        assert_eq!(
+            format!("{:?}", crate::CHANNEL_DOMAIN),
+            format!(
+                "ChannelDomain {{ name: {:?}, key_commitment_domain: b\"WORLD-ID/WIP-201/CHANNEL-KEY\\x00\" }}",
+                std::str::from_utf8(world_id_flamingo::CHANNEL_DOMAIN).unwrap()
+            )
+        );
     }
 
     #[test]

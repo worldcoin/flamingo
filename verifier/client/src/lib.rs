@@ -9,10 +9,10 @@
 //! use flamingo_verifier_client::{Config, FlamingoVerifierClient, PcrMeasurement};
 //! use flamingo_verifier_sealed_types::Request;
 //!
-//! # async fn example(request: &Request, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(request: &Request, pcrs: [[u8; 48]; 3]) -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Config::new(
 //!     "https://verifier.example.com",
-//!     vec![vec![PcrMeasurement::new(0, pcr0)]],
+//!     vec![(0..).zip(pcrs).map(|(index, value)| PcrMeasurement::new(index, value)).collect()],
 //! )?;
 //! let client = FlamingoVerifierClient::new(config)?;
 //! let session = client.connect().await?;

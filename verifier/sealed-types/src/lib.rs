@@ -12,8 +12,15 @@ mod errors;
 mod messages;
 mod response;
 
-/// Pontifex channel domain shared by the consumer and enclave.
-pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v4";
+/// The WIP-201 request channel: `info` is `CHANNEL_DOMAIN || direction`, and the channel
+/// attestation commits to `SHA-256(CHANNEL_KEY_DOMAIN || channel_key)`.
+pub const CHANNEL_DOMAIN: pontifex::ChannelDomain =
+    pontifex::ChannelDomain::new("WORLD-ID/WIP-201/CHANNEL")
+        .with_key_commitment_domain(world_id_flamingo::CHANNEL_KEY_DOMAIN);
+
+/// WIP-201 `MAX_ATTESTATION_AGE`: the oldest channel or signing-key attestation to accept.
+pub const MAX_ATTESTATION_AGE: std::time::Duration =
+    std::time::Duration::from_secs(world_id_flamingo::MAX_ATTESTATION_AGE);
 
 pub use errors::{
     ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole, InputFailureReason,

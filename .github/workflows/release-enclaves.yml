@@ -117,7 +117,7 @@ jobs:
         run: |
           jq -r '"PCR0=0x\(.PCR0)", "PCR1=0x\(.PCR1)", "PCR2=0x\(.PCR2)"' \
             "target/release/$WORKLOAD-pcr.json" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: enclave-release
           path: |

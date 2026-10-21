@@ -12,11 +12,12 @@ publish = true
 
 [dependencies]
 flamingo-verifier-api-types.workspace = true
-sha2.workspace = true
+pontifex.workspace = true
 ciborium.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 world-id-flamingo.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 world-id-primitives.workspace = true

@@ -40,7 +40,7 @@ The EIF metadata's `BuildTime` is not measured. See [development](development.md
 
 ## Rotate a measurement
 
-1. Publish the new release and add its PCR0 alongside the old one in the clients' `allowed_pcr_configs`.
+1. Publish the new release and add its PCR0–2 configuration alongside the old one in the clients' `allowed_pcr_configs`.
 2. Wait for clients to receive the updated configuration.
 3. Deploy the new enclave. Clients accept either image during the rollout; the host does not pin PCRs.
 4. Remove the old measurement after clients no longer need to verify it.
