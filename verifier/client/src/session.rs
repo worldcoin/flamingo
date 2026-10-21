@@ -12,7 +12,7 @@ use flamingo_verifier_api_types::{
     ClientMessage, EnclaveAssignmentResponse, ErrorEnvelope, HostMessage, MAX_MATCH_BODY_BYTES,
     MAX_MATCH_RESPONSE_BYTES,
 };
-use flamingo_verifier_sealed_types::MatchInputs;
+use flamingo_verifier_sealed_types::{Request, expected_claims};
 use futures_util::{SinkExt, StreamExt};
 use pontifex::attestation::Verifier;
 use tokio::net::TcpStream;
@@ -52,7 +52,7 @@ impl FlamingoVerifierSession {
         &self.assignment
     }
 
-    /// Seals `inputs` to this session's verified enclave key, sends them as the one binary match
+    /// Seals `request` to this session's verified enclave key, sends it as the one binary match
     /// frame, and returns the verified result or the sealed rejection.
     ///
     /// Consumes the session: one socket carries exactly one match, and it is closed after the
@@ -60,16 +60,15 @@ impl FlamingoVerifierSession {
     ///
     /// # Errors
     ///
-    /// Returns [`Error`] if sealing or transport fails, the host answers with an error envelope,
-    /// the response is oversized, or the result or its claims do not verify.
-    pub async fn request_match(
-        mut self,
-        inputs: &MatchInputs,
-    ) -> Result<VerifiedMatchResult, Error> {
+    /// Returns [`Error`] if the request is malformed or names a release the host does not list,
+    /// sealing or transport fails, the host answers with an error envelope, the response is
+    /// oversized, or the result or its claims do not verify.
+    pub async fn request_match(mut self, request: &Request) -> Result<VerifiedMatchResult, Error> {
         let result = exchange_match(
             &mut self.socket,
             self.assignment.consumer(),
-            inputs,
+            self.assignment.release_hashes(),
+            request,
             &self.verifier,
             self.request_timeout,
         )
@@ -193,15 +192,23 @@ async fn request_assignment(
     }
 }
 
-/// Seals the inputs, sends the one binary frame, and verifies the one binary response.
+/// Seals the request, sends the one binary frame, and verifies the one binary response.
 async fn exchange_match(
     socket: &mut Socket,
     consumer: &pontifex::ChannelConsumer,
-    inputs: &MatchInputs,
+    release_hashes: &[[u8; 32]],
+    request: &Request,
     verifier: &Verifier,
     request_timeout: Duration,
 ) -> Result<VerifiedMatchResult, Error> {
-    let plaintext = inputs.to_cbor().map_err(|_| Error::MalformedResult)?;
+    // Checks the bounds and the AAT before any biometric data leaves the device.
+    let payload = request.payload().map_err(|_| Error::MalformedRequest)?;
+    let expected = expected_claims(request, &payload).map_err(|_| Error::MalformedRequest)?;
+    if !release_hashes.contains(&payload.release_hash) {
+        return Err(Error::ReleaseUnavailable);
+    }
+    drop(payload);
+    let plaintext = zeroize::Zeroizing::new(request.encode());
     let (sealed, opener) = consumer
         .seal_to_enclave(&plaintext)
         .map_err(Error::Channel)?;
@@ -220,7 +227,7 @@ async fn exchange_match(
                     return Err(Error::MalformedResult);
                 }
                 let result = open_verified_match(verifier, &ciphertext, opener)?;
-                ensure_claims_match(inputs, &result)?;
+                ensure_claims_match(&expected, &result)?;
                 return Ok(result);
             }
             Message::Text(text) => return Err(error_from_text(text.as_str())),
@@ -277,10 +284,9 @@ mod tests {
     use std::time::Duration;
 
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
-    use flamingo_verifier_protocol::match_token::MatchToken;
     use flamingo_verifier_sealed_types::{
-        AttestedStatement, DebugReport, FailureReason, MATCH_CHANNEL_DOMAIN, MatchInputs,
-        MatchResult,
+        AttestedStatement, DebugReport, Entry, FailureReason, FlamingoToken, MATCH_CHANNEL_DOMAIN,
+        MatchResult, Payload, Request,
     };
     use futures_util::{SinkExt, StreamExt};
     use pontifex::attestation::PcrConfig;
@@ -299,12 +305,22 @@ mod tests {
         super::Verifier::new(vec![PcrConfig::new([0xab; 48])], Duration::from_mins(1))
     }
 
-    fn inputs() -> MatchInputs {
-        MatchInputs::GrayBadge(flamingo_verifier_sealed_types::GrayBadgeInputs {
-            live: flamingo_verifier_sealed_types::LiveCapture::Vanilla(b"live".to_vec().into()),
-            rtms_challenge: b"challenge".to_vec().into(),
-            match_threshold: 0.5,
-        })
+    const RELEASE_HASH: [u8; 32] = [0x2a; 32];
+
+    fn request() -> Request {
+        let entry = |data: &[u8]| Entry {
+            data: data.to_vec(),
+            meta: Vec::new(),
+        };
+        let payload = Payload {
+            pipeline: 2,
+            match_strictness: 2,
+            hints: Vec::new(),
+            entries: vec![entry(b"live"), entry(b"challenge")],
+            compare: vec![0, 1],
+            release_hash: RELEASE_HASH,
+        };
+        Request::new(0u64.into(), 42u64.into(), &payload, None).expect("a valid request")
     }
 
     fn consumer_for(enclave: &ChannelEnclave) -> ChannelConsumer {
@@ -399,7 +415,8 @@ mod tests {
         exchange_match(
             &mut socket,
             &consumer_for(&responder),
-            &inputs(),
+            &[RELEASE_HASH],
+            &request(),
             &verifier(),
             TIMEOUT,
         )
@@ -452,7 +469,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &[RELEASE_HASH],
+            &request(),
             &verifier(),
             Duration::from_millis(100),
         )
@@ -481,7 +499,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &[RELEASE_HASH],
+            &request(),
             &verifier(),
             TIMEOUT,
         )
@@ -489,6 +508,24 @@ mod tests {
         .expect_err("an oversized response must be rejected");
 
         assert!(matches!(error, Error::MalformedResult), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_release_the_host_does_not_list_is_never_sent() {
+        let mut socket = connect_to_stub(|_| async {}).await;
+
+        let error = exchange_match(
+            &mut socket,
+            &consumer_for(&responder()),
+            &[[0x2b; 32]],
+            &request(),
+            &verifier(),
+            TIMEOUT,
+        )
+        .await
+        .expect_err("an unlisted release must be rejected");
+
+        assert!(matches!(error, Error::ReleaseUnavailable), "got {error:?}");
     }
 
     #[tokio::test]
@@ -505,7 +542,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &[RELEASE_HASH],
+            &request(),
             &verifier(),
             TIMEOUT,
         )
@@ -531,7 +569,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &[RELEASE_HASH],
+            &request(),
             &verifier(),
             TIMEOUT,
         )
@@ -555,7 +594,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &inputs(),
+            &[RELEASE_HASH],
+            &request(),
             &verifier(),
             TIMEOUT,
         )
@@ -570,7 +610,7 @@ mod tests {
         let responder = responder();
         let answer = MatchResult::Success {
             statement: AttestedStatement {
-                token: MatchToken::from_bytes(b"cose-sign1".to_vec()),
+                token: FlamingoToken::from_bytes(b"cose-sign1".to_vec()),
                 signing_key_attestation: b"not a COSE attestation document".to_vec(),
             },
             debug_report: DebugReport::NotProduced,
@@ -598,7 +638,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder),
-            &inputs(),
+            &[RELEASE_HASH],
+            &request(),
             &verifier(),
             TIMEOUT,
         )

@@ -161,45 +161,13 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "ark-bn254"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d69eab57e8d2663efa5c63135b2af4f396d66424f88954c21104125ab6b3e6bc"
-dependencies = [
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-std 0.5.0",
-]
-
-[[package]]
-name = "ark-bn254"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bc66f96ebe2a17a499475b4f94791d379817592ef494171586967ffdc6f95db"
 dependencies = [
- "ark-ec 0.6.0",
+ "ark-ec",
  "ark-ff 0.6.0",
  "ark-std 0.6.0",
-]
-
-[[package]]
-name = "ark-ec"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43d68f2d516162846c1238e755a7c4d131b892b70cc70c471a8e3ca3ed818fce"
-dependencies = [
- "ahash",
- "ark-ff 0.5.0",
- "ark-poly 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
- "educe",
- "fnv",
- "hashbrown 0.15.5",
- "itertools 0.13.0",
- "num-bigint",
- "num-integer",
- "num-traits",
- "zeroize",
 ]
 
 [[package]]
@@ -210,7 +178,7 @@ checksum = "8352a2b2aedf6ba2cc38f7520fc51191d518dde96175c729af19f2d059f191c4"
 dependencies = [
  "ahash",
  "ark-ff 0.6.0",
- "ark-poly 0.6.0",
+ "ark-poly",
  "ark-serialize 0.6.0",
  "ark-std 0.6.0",
  "educe",
@@ -391,21 +359,6 @@ dependencies = [
 
 [[package]]
 name = "ark-poly"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "579305839da207f02b89cd1679e50e67b4331e2f9294a57693e5051b7703fe27"
-dependencies = [
- "ahash",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
- "educe",
- "fnv",
- "hashbrown 0.15.5",
-]
-
-[[package]]
-name = "ark-poly"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75f55af10b672002b8d953e230282c51206842e20e5791a94432219b4201de5c"
@@ -446,7 +399,6 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f4d068aaf107ebcd7dfb52bc748f8030e0fc930ac8e360146ca54c1203088f7"
 dependencies = [
- "ark-serialize-derive 0.5.0",
  "ark-std 0.5.0",
  "arrayvec",
  "digest 0.10.7",
@@ -459,22 +411,11 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a74dd304fd536fb95d0a328e72be759209cc496a9da094c5bc56e5fea4f9e86b"
 dependencies = [
- "ark-serialize-derive 0.6.0",
+ "ark-serialize-derive",
  "ark-std 0.6.0",
  "digest 0.10.7",
  "num-bigint",
  "serde_with",
-]
-
-[[package]]
-name = "ark-serialize-derive"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "213888f660fddcca0d257e88e54ac05bca01885f258ccdf695bafd77031bb69d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1639,7 +1580,6 @@ version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "flamingo-verifier-api-types",
- "flamingo-verifier-protocol",
  "flamingo-verifier-sealed-types",
  "futures-util",
  "hex",
@@ -1648,11 +1588,15 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "taceo-eddsa-babyjubjub",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "url",
  "webpki-roots",
+ "world-id-flamingo",
+ "world-id-primitives",
+ "zeroize",
 ]
 
 [[package]]
@@ -1662,8 +1606,7 @@ dependencies = [
  "anyhow",
  "flamingo-verifier-client",
  "flamingo-verifier-sealed-types",
- "hex",
- "sha2 0.10.9",
+ "rand 0.8.8",
  "tokio",
 ]
 
@@ -1677,22 +1620,22 @@ dependencies = [
  "biometric-engines-protocol",
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",
- "flamingo-verifier-protocol",
  "flamingo-verifier-sandbox-client",
  "flamingo-verifier-sealed-types",
  "hex",
+ "p256",
  "pontifex",
  "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tabernaculum",
- "taceo-ark-babyjubjub 0.5.3",
- "taceo-eddsa-babyjubjub 0.5.5",
+ "taceo-eddsa-babyjubjub",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "world-id-flamingo",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -1730,20 +1673,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flamingo-verifier-protocol"
-version = "0.8.0"
-dependencies = [
- "ark-ff 0.5.0",
- "coset",
- "rand 0.8.8",
- "serde",
- "serde_bytes",
- "taceo-ark-babyjubjub 0.5.3",
- "taceo-eddsa-babyjubjub 0.5.5",
- "taceo-poseidon2 0.2.1",
-]
-
-[[package]]
 name = "flamingo-verifier-sandbox-client"
 version = "0.1.0"
 dependencies = [
@@ -1759,11 +1688,11 @@ version = "0.8.0"
 dependencies = [
  "ciborium",
  "flamingo-verifier-api-types",
- "flamingo-verifier-protocol",
  "serde",
  "serde_bytes",
  "sha2 0.10.9",
- "zeroize",
+ "world-id-flamingo",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -1976,15 +1905,6 @@ name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
-
-[[package]]
-name = "hashbrown"
-version = "0.15.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
-dependencies = [
- "allocator-api2",
-]
 
 [[package]]
 name = "hashbrown"
@@ -4149,40 +4069,14 @@ dependencies = [
 
 [[package]]
 name = "taceo-ark-babyjubjub"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55b5a2cc31c90e79778c4f6375e5d9828171d320db3f8c911a8ad47af4a70069"
-dependencies = [
- "ark-bn254 0.5.0",
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-std 0.5.0",
-]
-
-[[package]]
-name = "taceo-ark-babyjubjub"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14ecf2df99fec8b65be444d27f4ac20d75486be15423b4cd507517683312a4b0"
 dependencies = [
- "ark-bn254 0.6.0",
- "ark-ec 0.6.0",
+ "ark-bn254",
+ "ark-ec",
  "ark-ff 0.6.0",
  "ark-std 0.6.0",
-]
-
-[[package]]
-name = "taceo-ark-serde-compat"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18fcd6f55fec9dd131019bdc0319db2271915056607b75bf8b8bc0a6ec496347"
-dependencies = [
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "num-bigint",
- "serde",
- "taceo-ark-babyjubjub 0.5.3",
 ]
 
 [[package]]
@@ -4191,32 +4085,12 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f7a255d21a01f083cf373ff6b4903f9dafad1e0a2a1a2119a4cee971d1bb995"
 dependencies = [
- "ark-ec 0.6.0",
+ "ark-ec",
  "ark-ff 0.6.0",
  "ark-serialize 0.6.0",
  "num-bigint",
  "serde",
- "taceo-ark-babyjubjub 0.6.0",
-]
-
-[[package]]
-name = "taceo-eddsa-babyjubjub"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10becbd559ee21d8376a4c2e18f0e38257ec1b5bfff3dcb2cb2945ca1db38906"
-dependencies = [
- "ark-ec 0.5.0",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "blake3",
- "eyre",
- "num-bigint",
- "rand 0.8.8",
- "serde",
- "taceo-ark-babyjubjub 0.5.3",
- "taceo-ark-serde-compat 0.5.0",
- "taceo-poseidon2 0.2.1",
- "zeroize",
+ "taceo-ark-babyjubjub",
 ]
 
 [[package]]
@@ -4225,30 +4099,17 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c48e48ec4f882c334116410caaba90205fa63110d934df90ed9d23d16ae3dad6"
 dependencies = [
- "ark-ec 0.6.0",
+ "ark-ec",
  "ark-ff 0.6.0",
  "ark-serialize 0.6.0",
  "blake3",
  "eyre",
  "rand 0.8.8",
  "serde",
- "taceo-ark-babyjubjub 0.6.0",
- "taceo-ark-serde-compat 0.6.1",
- "taceo-poseidon2 0.3.1",
+ "taceo-ark-babyjubjub",
+ "taceo-ark-serde-compat",
+ "taceo-poseidon2",
  "zeroize",
-]
-
-[[package]]
-name = "taceo-poseidon2"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac59d3df4c827b3496bff929aebd6440997a5c2e946f46ff4fdd76f318447581"
-dependencies = [
- "ark-bn254 0.5.0",
- "ark-ff 0.5.0",
- "ark-std 0.5.0",
- "num-bigint",
- "num-traits",
 ]
 
 [[package]]
@@ -4257,7 +4118,7 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec520fb3e8be3d68d4e40efc62ae332e129c33df335c35892f25a79e2621626f"
 dependencies = [
- "ark-bn254 0.6.0",
+ "ark-bn254",
  "ark-ff 0.6.0",
  "ark-std 0.6.0",
  "num-traits",
@@ -5223,8 +5084,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "taceo-ark-babyjubjub 0.6.0",
- "taceo-eddsa-babyjubjub 0.6.1",
+ "taceo-ark-babyjubjub",
+ "taceo-eddsa-babyjubjub",
  "thiserror 2.0.20",
  "world-id-primitives",
 ]
@@ -5250,9 +5111,9 @@ dependencies = [
  "serde_json",
  "sha3 0.10.9",
  "strum",
- "taceo-ark-babyjubjub 0.6.0",
- "taceo-eddsa-babyjubjub 0.6.1",
- "taceo-poseidon2 0.3.1",
+ "taceo-ark-babyjubjub",
+ "taceo-eddsa-babyjubjub",
+ "taceo-poseidon2",
  "thiserror 2.0.20",
  "url",
 ]

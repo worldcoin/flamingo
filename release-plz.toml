@@ -11,11 +11,6 @@ release = true
 publish = true
 
 [[package]]
-name = "flamingo-verifier-protocol"
-release = true
-publish = true
-
-[[package]]
 name = "flamingo-verifier-sealed-types"
 release = true
 publish = true
@@ -28,6 +23,5 @@ changelog_update = true
 changelog_path = "CHANGELOG.md"
 changelog_include = [
     "flamingo-verifier-api-types",
-    "flamingo-verifier-protocol",
     "flamingo-verifier-sealed-types",
 ]

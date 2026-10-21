@@ -13,6 +13,7 @@ use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
     biometric_engine::BiometricEngine,
     keys::SigningKey,
+    replay::ReplayGuard,
 };
 
 /// Immutable state generated once during enclave boot.
@@ -30,6 +31,8 @@ pub struct EnclaveState {
     engine_hash: [u8; 32],
     /// The release manifest of that bundle, once the host has loaded it.
     release: OnceLock<ReleaseManifest>,
+    /// (`aud`, `nonce`) pairs processed under this boot's channel key.
+    replay: ReplayGuard,
 }
 
 impl EnclaveState {
@@ -81,6 +84,7 @@ impl EnclaveState {
             engine,
             engine_hash,
             release: OnceLock::new(),
+            replay: ReplayGuard::default(),
         })
     }
 
@@ -126,6 +130,12 @@ impl EnclaveState {
             .map(ReleaseManifest::release_hash)
             .into_iter()
             .collect()
+    }
+
+    /// Rejects requests this boot already processed.
+    #[must_use]
+    pub const fn replay(&self) -> &ReplayGuard {
+        &self.replay
     }
 
     /// Returns the channel that opens sealed requests for this boot.

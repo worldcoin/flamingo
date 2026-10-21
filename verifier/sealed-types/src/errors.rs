@@ -73,14 +73,20 @@ pub enum InputFailureReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureReason {
-    /// Invalid CBOR shape.
+    /// Invalid CBOR shape or a WIP-201 bound violated.
     MalformedInputs,
-    /// Invalid or oversized PCP hashes.
-    InvalidHashesJson,
-    /// PCP image binding failed.
-    ThumbnailHashMismatch,
-    /// Nonfinite or out-of-range threshold.
-    InvalidThreshold,
+    /// The plaintext exceeds the pipeline's `max_request_bytes`.
+    RequestTooLarge,
+    /// The Verifier has not loaded the release the request's `release_hash` names.
+    UnsupportedRelease,
+    /// The Engine does not define the request's `pipeline`, or the entries do not fit its layout.
+    UnsupportedPipeline,
+    /// The Engine does not define the request's `match_strictness`.
+    UnsupportedMatchStrictness,
+    /// The request's AAT failed a WIP-106 §3.8 check.
+    AatRejected,
+    /// The Verifier already answered a request with this `aud` and `nonce`.
+    Replayed,
     /// Structured malformed-input feedback.
     InputRejected {
         /// Exact failed constraint.
@@ -105,6 +111,17 @@ pub enum FailureReason {
     MatchingFailed(ComparisonRole),
     /// Backend infrastructure failed, distinct from biological rejection.
     Internal,
+}
+
+impl From<world_id_flamingo::RequestError> for FailureReason {
+    fn from(error: world_id_flamingo::RequestError) -> Self {
+        use world_id_flamingo::RequestError;
+        match error {
+            RequestError::AatRejected(_) => Self::AatRejected,
+            RequestError::OutOfBounds("request") => Self::RequestTooLarge,
+            RequestError::Malformed(_) | RequestError::OutOfBounds(_) => Self::MalformedInputs,
+        }
+    }
 }
 
 /// Stable public reason codes for client-owned feedback and localization.

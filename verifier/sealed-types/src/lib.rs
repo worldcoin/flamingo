@@ -13,7 +13,7 @@ mod messages;
 mod response;
 
 /// Pontifex channel domain shared by the consumer and enclave.
-pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v3";
+pub const MATCH_CHANNEL_DOMAIN: &str = "flamingo-verifier/matches/v4";
 
 pub use errors::{
     ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole, InputFailureReason,
@@ -22,6 +22,9 @@ pub use errors::{
 pub use messages::*;
 pub use response::*;
 pub use serde_bytes::ByteBuf;
+pub use world_id_flamingo::{
+    AatClaims, AatInputs, Entry, FlamingoClaims, FlamingoToken, Payload, Request, RequestError,
+};
 
 /// Bound on sealed match bytes before decryption.
 pub use flamingo_verifier_api_types::MAX_MATCH_BODY_BYTES;

@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use flamingo_verifier_sealed_types::{DebugReport, FailureReason, LiveCapture, MatchResult};
+use flamingo_verifier_sealed_types::{DebugReport, FailureReason, MatchResult};
 #[cfg(any(target_os = "linux", test))]
 use tokio::{sync::Mutex, time::timeout};
 
@@ -12,11 +12,35 @@ use tokio::{sync::Mutex, time::timeout};
 use crate::blocking;
 
 /// Maximum encoded bytes per image, derived from the public API.
-pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_IMAGE_BYTES;
+pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_ENTRY_BYTES;
 /// API image budget plus protobuf envelope overhead.
-pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_IMAGE_BYTES + 1024;
+pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_ENTRY_BYTES + 1024;
 #[cfg(any(target_os = "linux", test))]
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Which `LightGuard` frame is compared with the other images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightGuardMatchingFrame {
+    /// The illuminated frame.
+    Illuminated,
+    /// The unilluminated frame.
+    Unilluminated,
+}
+
+/// The live capture as the Engine reads it.
+pub enum LiveCapture {
+    /// One selfie.
+    Vanilla(Vec<u8>),
+    /// An illuminated and an unilluminated frame.
+    LightGuard {
+        /// The illuminated frame.
+        illuminated: Vec<u8>,
+        /// The unilluminated frame.
+        unilluminated: Vec<u8>,
+        /// The frame compared with the other images.
+        matching_frame: LightGuardMatchingFrame,
+    },
+}
 
 /// Normalized inference scores; policy and signed claims belong to the operation.
 #[derive(Clone, Debug)]
@@ -151,6 +175,7 @@ pub use sandboxed::SandboxBiometricEngine;
 
 #[cfg(target_os = "linux")]
 mod sandboxed {
+    use super::LiveCapture;
     use super::{
         BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores, normalized,
     };
@@ -164,7 +189,7 @@ mod sandboxed {
         response::Outcome,
     };
     use flamingo_verifier_sandbox_client::{Rejection, SandboxClient};
-    use flamingo_verifier_sealed_types::{FailureReason, LiveCapture};
+    use flamingo_verifier_sealed_types::FailureReason;
 
     /// Owns the sandboxed worker, queue and IPC execution for one enclave boot.
     pub struct SandboxBiometricEngine {
@@ -196,19 +221,19 @@ mod sandboxed {
 
     fn live_source(capture: LiveCapture) -> Source {
         match capture {
-            LiveCapture::Vanilla(image) => Source::VanillaSelfie(image.into_vec()),
+            LiveCapture::Vanilla(image) => Source::VanillaSelfie(image),
             LiveCapture::LightGuard {
                 illuminated,
                 unilluminated,
                 matching_frame,
             } => Source::LightGuard(LightGuard {
-                illuminated: illuminated.into_vec(),
-                unilluminated: unilluminated.into_vec(),
+                illuminated,
+                unilluminated,
                 matching_frame: match matching_frame {
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated => {
+                    super::LightGuardMatchingFrame::Illuminated => {
                         LightGuardMatchingFrame::Illuminated as i32
                     }
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated => {
+                    super::LightGuardMatchingFrame::Unilluminated => {
                         LightGuardMatchingFrame::Unilluminated as i32
                     }
                 },
@@ -300,19 +325,19 @@ mod sandboxed {
         fn light_guard_preserves_both_frames_and_the_selected_matching_frame() {
             for (matching_frame, expected) in [
                 (
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Illuminated,
+                    super::super::LightGuardMatchingFrame::Illuminated,
                     LightGuardMatchingFrame::Illuminated,
                 ),
                 (
-                    flamingo_verifier_sealed_types::LightGuardMatchingFrame::Unilluminated,
+                    super::super::LightGuardMatchingFrame::Unilluminated,
                     LightGuardMatchingFrame::Unilluminated,
                 ),
             ] {
                 let illuminated = vec![1, 2, 3];
                 let pointer = illuminated.as_ptr();
                 let Source::LightGuard(pair) = live_source(LiveCapture::LightGuard {
-                    illuminated: illuminated.into(),
-                    unilluminated: vec![4, 5].into(),
+                    illuminated,
+                    unilluminated: vec![4, 5],
                     matching_frame,
                 }) else {
                     panic!("must preserve LightGuard source")

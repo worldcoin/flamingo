@@ -13,7 +13,7 @@ publish = true
 pontifex = { workspace = true, features = ["channel", "attestation"] }
 base64.workspace = true
 flamingo-verifier-api-types.workspace = true
-flamingo-verifier-protocol.workspace = true
+eddsa-babyjubjub.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 hex = { workspace = true, features = ["serde"] }
@@ -27,9 +27,11 @@ tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls"] }
 url.workspace = true
 webpki-roots.workspace = true
+world-id-flamingo.workspace = true
+world-id-primitives.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-flamingo-verifier-protocol.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 hex-literal.workspace = true
 tokio.workspace = true

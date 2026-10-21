@@ -97,7 +97,7 @@ impl BiometricEngine for UnusedBiometricEngine {
     async fn deepface(
         &self,
         _: Vec<u8>,
-        _: flamingo_verifier_sealed_types::LiveCapture,
+        _: crate::biometric_engine::LiveCapture,
         _: Vec<u8>,
     ) -> Result<DeepFaceScores, BiometricError> {
         panic!("biometric engine was called unexpectedly")
@@ -105,7 +105,7 @@ impl BiometricEngine for UnusedBiometricEngine {
 
     async fn graybadge(
         &self,
-        _: flamingo_verifier_sealed_types::LiveCapture,
+        _: crate::biometric_engine::LiveCapture,
         _: Vec<u8>,
     ) -> Result<GrayBadgeScores, BiometricError> {
         panic!("biometric engine was called unexpectedly")
@@ -123,6 +123,19 @@ pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
     )
 }
 
+/// `max_request_bytes` of pipeline 1 in [`manifest`]; pipeline 2 allows half.
+pub const TEST_MAX_REQUEST_BYTES: u64 = 1 << 20;
+
+/// Builds state for `engine` with the [`manifest`] of [`TEST_ENGINE_HASH`] loaded.
+pub fn loaded_state(engine: impl BiometricEngine + 'static) -> Arc<EnclaveState> {
+    let state = EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine), TEST_ENGINE_HASH)
+        .expect("boot state should generate");
+    state
+        .load_release(&manifest(TEST_ENGINE_HASH, "1.0.0"))
+        .expect("the test manifest should load");
+    Arc::new(state)
+}
+
 /// A release manifest for `engine_hash`; the enclave does not check its signature.
 pub fn manifest(engine_hash: [u8; 32], version: &str) -> String {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -130,13 +143,25 @@ pub fn manifest(engine_hash: [u8; 32], version: &str) -> String {
     let payload = serde_json::json!({
         "engine_hash": hex::encode(engine_hash),
         "version": version,
-        "pipelines": [{
-            "pipeline": 1,
-            "description": "credential image, live capture, challenge",
-            "response_slots": { "min": 500, "max": 4000, "count": 4 },
-            "max_request_bytes": 8_388_608,
-        }],
-        "match_strictness_levels": [{ "match_strictness": 2, "description": "strict" }],
+        "pipelines": [
+            {
+                "pipeline": 1,
+                "description": "credential image, live capture, challenge",
+                "response_slots": { "min": 500, "max": 4000, "count": 4 },
+                "max_request_bytes": TEST_MAX_REQUEST_BYTES,
+            },
+            {
+                "pipeline": 2,
+                "description": "live capture, challenge",
+                "response_slots": { "min": 500, "max": 4000, "count": 4 },
+                "max_request_bytes": TEST_MAX_REQUEST_BYTES / 2,
+            },
+        ],
+        "match_strictness_levels": [
+            { "match_strictness": 1, "description": "lenient" },
+            { "match_strictness": 2, "description": "strict" },
+            { "match_strictness": 3, "description": "strictest" },
+        ],
     });
     let header = r#"{"alg":"ES256","kid":"test","typ":"world-id-engine-manifest"}"#;
     format!(

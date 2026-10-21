@@ -7,16 +7,16 @@
 //!
 //! ```no_run
 //! use flamingo_verifier_client::{Config, FlamingoVerifierClient, PcrMeasurement};
-//! use flamingo_verifier_sealed_types::MatchInputs;
+//! use flamingo_verifier_sealed_types::Request;
 //!
-//! # async fn example(inputs: &MatchInputs, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(request: &Request, pcr0: [u8; 48]) -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Config::new(
 //!     "https://verifier.example.com",
 //!     vec![vec![PcrMeasurement::new(0, pcr0)]],
 //! )?;
 //! let client = FlamingoVerifierClient::new(config)?;
 //! let session = client.connect().await?;
-//! let result = session.request_match(inputs).await?;
+//! let result = session.request_match(request).await?;
 //! # Ok(())
 //! # }
 //! ```

@@ -1,6 +1,6 @@
 # Architecture
 
-The client encrypts images for an attested enclave. The HTTP host forwards the ciphertext over vsock. The enclave compares the faces and returns an encrypted result. Successful matches include a signed statement and an attestation of the signing key.
+The client encrypts images for an attested enclave. The HTTP host forwards the ciphertext over vsock. The enclave compares the faces and returns an encrypted result. Successful matches include a signed [WIP-201](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md) Flamingo Token and an attestation of the signing key.
 
 ## Trust and attestation
 
@@ -10,13 +10,13 @@ The enclave generates encryption and signing keys at boot. Keys stay in memory a
 
 The enclave caches attestations and refreshes them every 10 minutes. Requests receive the last successful document while a refresh runs. If a refresh fails and the cached document is at least an hour old, the enclave exits.
 
-## Match statements
+## Flamingo Tokens
 
-DeepFace compares each pair of images: Orb photo and selfie, Orb photo and challenge, and selfie and challenge. Every score must meet the caller's threshold, a number from 0 to 1.
+The enclave validates request bounds, the release, pipeline, match strictness and optional AAT, and rejects replays. Its interim adapter interprets `pipeline`, positions in `compare` and LightGuard entry metadata to select the Engine operation and image roles; the Engine processes the image contents. A token signs `R(SHA-256(data))` of each compared entry, the RP's `aud` and `nonce`, and `engine_config_hash` over the `release_hash`, pipeline and match strictness. It carries no score. Binding the Credential image to a Credential is the job of the downstream proof (WIP-202). The request and token formats come from [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo).
 
-The enclave checks that the Orb photo matches the `thumbnail.png` hash in the supplied `hashes.json`. It does not verify the Orb's signature or prove that the credential came from an Orb. The downstream proof must bind this commitment to an issuer-signed credential.
+The enclave runs each (`aud`, `nonce`) once per boot. It keeps up to 262,144 of them in memory; once full, it refuses requests and reports not ready until it reboots with a new channel key.
 
-Version-2 BabyJubJub EdDSA statements bind the operation, live capture and challenge image. DeepFace additionally commits to raw `hashes.json` and reports the Orb/live score; GrayBadge has no credential commitment and reports the live/challenge score. Both operations accept vanilla or LightGuard captures. LightGuard commitments cover both frames and the matching-frame selection. The threshold and DeepFace’s other two scores remain enclave policy checks. See the [token format](../verifier/protocol/src/match_token.rs).
+The current engine still returns similarity scores, so the enclave's [interim adapter](../verifier/enclave/src/pipeline.rs) maps pipelines to engine operations and strictness levels to thresholds. Every compared pair must clear the level's threshold.
 
 ## Repository layout
 
@@ -34,8 +34,7 @@ All crates share the root [Cargo workspace](../Cargo.toml) and lockfile.
 | [`api-types`](../verifier/api-types) | HTTP responses, errors, and payload limits. |
 | [`enclave-types`](../verifier/enclave-types) | Host/enclave vsock messages. |
 | [`sealed-types`](../verifier/sealed-types) | Plaintext CBOR requests and results carried inside encryption. |
-| [`protocol`](../verifier/protocol) | Signed match claims and token encoding. |
 
-[tabernaculum](https://github.com/worldcoin/tabernaculum) receives the external biometric worker with size and digest integrity checks and launches it under Minijail with its reviewed seccomp policy. The [sandbox client](../verifier/sandbox-client) validates, encodes and checks the worker's `biometric-engines-protocol` messages. The enclave owns PCP verification, threshold policy and signing. Worker access uses one mutex with a timeout.
+[tabernaculum](https://github.com/worldcoin/tabernaculum) receives the external biometric worker with size and digest integrity checks and launches it under Minijail with its reviewed seccomp policy. The [sandbox client](../verifier/sandbox-client) validates, encodes and checks the worker's `biometric-engines-protocol` messages. The enclave owns request validation, the interim strictness policy, replay rejection and signing. Worker access uses one mutex with a timeout.
 
 Nix uses the root workspace and lockfile to build the enclave. Public binaries, Docker images and EIFs exclude the biometric engine and models; the worker is provisioned at runtime. Shared dependency changes can affect its PCR measurements. The separate [DeepIdentifier migration](https://github.com/worldcoin/di-migration-tee) lives in its own repository.

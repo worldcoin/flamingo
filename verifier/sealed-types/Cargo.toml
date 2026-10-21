@@ -14,7 +14,9 @@ publish = true
 flamingo-verifier-api-types.workspace = true
 sha2.workspace = true
 ciborium.workspace = true
-flamingo-verifier-protocol.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
-zeroize.workspace = true
+world-id-flamingo.workspace = true
+
+[dev-dependencies]
+world-id-primitives.workspace = true
