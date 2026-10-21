@@ -43,8 +43,7 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
 http-body-util = "0.1"
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
-# Key commitment domains are unreleased (worldcoin/pontifex#63).
-pontifex = { git = "https://github.com/worldcoin/pontifex", rev = "bd2845cb227015fc5e9493d8ec19cdb08b636834", default-features = false }
+pontifex = { version = "3.1.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.3" }
 rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
