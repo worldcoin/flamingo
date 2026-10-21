@@ -57,14 +57,18 @@ Only `host_url` and `allowed_pcr_configs` are required. The other fields default
 
 The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. Identity and certificate expiry come from the verified document.
 
-The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md) request, encoded by [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo): `version`, `aud`, `nonce`, optional `aat_inputs` and the nested `payload` (`pipeline`, `match_strictness`, `hints`, `entries`, `compare`, `release_hash`). The enclave rejects any other shape, a `release_hash` it did not load, a `pipeline` or `match_strictness` the release does not define, a request above the pipeline's `max_request_bytes`, and an (`aud`, `nonce`) it already processed. `aat_inputs` carry a WIP-106 TAKT and AAT; the enclave verifies them with `cdh = R(SHA-256(payload))` before the Engine runs and signs their public values into the token. The interim pipelines are:
+The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md) request, encoded by [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo): `version`, `aud`, `nonce`, optional `aat_inputs` and the nested `payload` (`pipeline`, `match_strictness`, `hints`, `entries`, `compare`, `release_hash`). The enclave rejects any other shape, a `release_hash` it did not load, a `pipeline` or `match_strictness` the release does not define, a request above the pipeline's `max_request_bytes`, and an (`aud`, `nonce`) it already processed. `aat_inputs` carry a WIP-106 TAKT and AAT; the enclave verifies them with `cdh = R(SHA-256(payload))` before the Engine runs and signs their public values into the token. The prototype worker release defines four explicit pipelines:
 
-| `pipeline` | `compare` positions | Engine operation |
+| `pipeline` | Name | `compare` positions |
 | --- | --- | --- |
-| `1` | Credential image, live capture, challenge | DeepFace |
-| `2` | Live capture, challenge | GrayBadge |
+| `1` | `deepface_vanilla` | Credential image, live capture, challenge |
+| `2` | `graybadge_vanilla` | Live capture, challenge |
+| `3` | `deepface_lightguard` | Credential image, selected LightGuard frame, challenge |
+| `4` | `graybadge_lightguard` | Selected LightGuard frame, challenge |
 
-A LightGuard live capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the one uncompared entry. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
+Vanilla pipelines require empty entry metadata and no uncompared partner. LightGuard pipelines require the selected capture's `meta` to be `illuminated` or `unilluminated`, plus exactly one uncompared partner labeled with the opposite frame type. All other `meta` is empty. The selected frame occupies the live capture's position in `compare`; the partner is used for LightGuard checks without becoming a compared entry. The worker rejects a capture shape that does not match the selected pipeline. The verifier forwards the payload without interpreting this policy.
+
+Only `match_strictness=2` is defined for this prototype release: every compared pair must have normalized similarity at least `0.90`. Pipeline IDs and strictness are bound into the signed Engine configuration hash; using a LightGuard variant selects a distinct policy from its vanilla counterpart.
 
 The enclave releases every opened request's response at the first of its pipeline's `response_slots` at which the Engine has finished, counted from arrival; a request rejected before its pipeline is known waits for the latest first slot of any pipeline. An Engine still running at the last slot fails the request with `engine_timeout`; the enclave then reports not ready and exits to reset the worker.
 

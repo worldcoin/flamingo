@@ -157,21 +157,21 @@ pub fn manifest_with_slots(engine_hash: [u8; 32], version: &str, slots: &[u64]) 
         "pipelines": [
             {
                 "pipeline": 1,
-                "description": "credential image, live capture, challenge",
+                "description": "opaque test pipeline with larger request limit",
                 "response_slots": slots,
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES,
             },
             {
                 "pipeline": 2,
-                "description": "live capture, challenge",
+                "description": "opaque test pipeline with smaller request limit",
                 "response_slots": slots,
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES / 2,
             },
         ],
         "match_strictness_levels": [
-            { "match_strictness": 1, "description": "lenient" },
-            { "match_strictness": 2, "description": "strict" },
-            { "match_strictness": 3, "description": "strictest" },
+            { "match_strictness": 1, "description": "opaque test policy 1" },
+            { "match_strictness": 2, "description": "opaque test policy 2" },
+            { "match_strictness": 3, "description": "opaque test policy 3" },
         ],
     });
     let header = r#"{"alg":"ES256","kid":"test","typ":"world-id-engine-manifest"}"#;

@@ -1,14 +1,13 @@
+mod capture;
 mod trust;
 
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
+use capture::MatchingFrame;
 use flamingo_verifier_client::{Config, FlamingoVerifierClient, VerifiedMatchResult};
-use flamingo_verifier_sealed_types::{Entry, FailureReason, Payload, Request};
+use flamingo_verifier_sealed_types::{FailureReason, Request};
 
-/// Pipeline identifiers supplied by the biometric worker release.
-const PIPELINE_DEEPFACE: u16 = 1;
-const PIPELINE_GRAYBADGE: u16 = 2;
 const DEFAULT_MATCH_STRICTNESS: u8 = 2;
 
 #[tokio::main]
@@ -21,58 +20,48 @@ async fn main() -> Result<()> {
         _ => bail!("MATCH_OPERATION must be deep_face or gray_badge"),
     };
     let image_paths = image_paths(gray_badge)?;
-    let entry = |data: Vec<u8>, meta: &[u8]| Entry {
-        data,
-        meta: meta.to_vec(),
-    };
-
-    // Compared entries in role order, then the uncompared LightGuard partner frame, if any.
-    let mut entries = Vec::new();
-    if let Some(path) = &image_paths.credential {
-        entries.push(entry(read_image(path, "credential")?, b""));
-    }
+    let credential = image_paths
+        .credential
+        .as_ref()
+        .map(|path| read_image(path, "credential"))
+        .transpose()?;
     let live = read_image(&image_paths.live, "live")?;
-    let partner = match env::var("LIGHT_GUARD_UNILLUMINATED_IMAGE") {
+    let challenge = read_image(&image_paths.challenge, "challenge")?;
+    let light_guard = match env::var("LIGHT_GUARD_UNILLUMINATED_IMAGE") {
         Ok(path) => {
-            let unilluminated = read_image(&PathBuf::from(path), "unilluminated")?;
-            match env::var("LIGHT_GUARD_MATCHING_FRAME").as_deref() {
-                Err(env::VarError::NotPresent) | Ok("illuminated") => {
-                    entries.push(entry(live, b"illuminated"));
-                    Some(entry(unilluminated, b"unilluminated"))
-                }
-                Ok("unilluminated") => {
-                    entries.push(entry(unilluminated, b"unilluminated"));
-                    Some(entry(live, b"illuminated"))
-                }
-                _ => bail!("LIGHT_GUARD_MATCHING_FRAME must be illuminated or unilluminated"),
-            }
+            let frame = match env::var("LIGHT_GUARD_MATCHING_FRAME") {
+                Ok(value) => MatchingFrame::parse(Some(&value))?,
+                Err(env::VarError::NotPresent) => MatchingFrame::parse(None)?,
+                Err(error) => return Err(error.into()),
+            };
+            Some((read_image(&PathBuf::from(path), "unilluminated")?, frame))
         }
         Err(env::VarError::NotPresent) => {
             ensure!(
                 env::var_os("LIGHT_GUARD_MATCHING_FRAME").is_none(),
                 "LIGHT_GUARD_MATCHING_FRAME requires LIGHT_GUARD_UNILLUMINATED_IMAGE"
             );
-            entries.push(entry(live, b""));
             None
         }
         Err(error) => return Err(error.into()),
     };
-    entries.push(entry(read_image(&image_paths.challenge, "challenge")?, b""));
-    let compare = (0..u8::try_from(entries.len())?).collect();
-    entries.extend(partner);
 
     let match_strictness = env::var("MATCH_STRICTNESS")
         .map_or(Ok(DEFAULT_MATCH_STRICTNESS), |value| {
             value.parse().context("MATCH_STRICTNESS must be a valid u8")
         })?;
 
-    let pipeline = if gray_badge {
-        PIPELINE_GRAYBADGE
-    } else {
-        PIPELINE_DEEPFACE
-    };
+    let release_hash = release.release_hash();
+    let payload = capture::payload(
+        credential,
+        live,
+        challenge,
+        light_guard,
+        match_strictness,
+        release_hash,
+    );
     release
-        .pipeline(pipeline)
+        .pipeline(payload.pipeline)
         .context("selected release does not define this pipeline")?;
     ensure!(
         release.defines_strictness(match_strictness),
@@ -84,17 +73,8 @@ async fn main() -> Result<()> {
         .connect()
         .await
         .context("enclave assignment did not verify")?;
-    let release_hash = release.release_hash();
     trust::require_offered(&release_hash, session.assignment().release_hashes())?;
 
-    let payload = Payload {
-        pipeline,
-        match_strictness,
-        hints: Vec::new(),
-        entries,
-        compare,
-        release_hash,
-    };
     // A test RP: `aud` 0 and a random nonce, since the enclave rejects a repeated one.
     let nonce = rand::random::<u64>().max(1);
     let request = Request::new(0u64.into(), nonce.into(), &payload, None)

@@ -210,8 +210,9 @@ mod tests {
         },
     };
 
-    const PIPELINE_DEEPFACE: u16 = 1;
-    const PIPELINE_GRAYBADGE: u16 = 2;
+    // Mock Engine policies exercise forwarding; these are not biometric pipeline definitions.
+    const PIPELINE_FIRST: u16 = 1;
+    const PIPELINE_SECOND: u16 = 2;
     const AUD: u64 = 1_928_118;
     const NOW: u32 = 1_783_446_000;
 
@@ -273,9 +274,9 @@ mod tests {
         }
     }
 
-    fn deep_face(state: &EnclaveState) -> Payload {
+    fn first_pipeline_payload(state: &EnclaveState) -> Payload {
         Payload {
-            pipeline: PIPELINE_DEEPFACE,
+            pipeline: PIPELINE_FIRST,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![
@@ -288,15 +289,15 @@ mod tests {
         }
     }
 
-    fn gray_badge(state: &EnclaveState) -> Payload {
+    fn second_pipeline_payload(state: &EnclaveState) -> Payload {
         Payload {
-            pipeline: PIPELINE_GRAYBADGE,
+            pipeline: PIPELINE_SECOND,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![
-                entry(b"lit", b"illuminated"),
+                entry(b"selected", b"opaque-selected"),
                 entry(b"challenge", b""),
-                entry(b"dark", b"unilluminated"),
+                entry(b"partner", b"opaque-partner"),
             ],
             compare: vec![0, 1],
             release_hash: state.release().unwrap().release_hash(),
@@ -445,7 +446,10 @@ mod tests {
         let mock = engine(None);
         let received = Arc::clone(&mock.received);
         let state = loaded_state(mock);
-        for (nonce, payload) in [(1, deep_face(&state)), (2, gray_badge(&state))] {
+        for (nonce, payload) in [
+            (1, first_pipeline_payload(&state)),
+            (2, second_pipeline_payload(&state)),
+        ] {
             let request = request(&payload, nonce);
             let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
             assert_eq!(received.lock().unwrap().last().unwrap(), &request.payload);
@@ -461,7 +465,7 @@ mod tests {
     #[tokio::test]
     async fn signs_the_verified_aat_values() {
         let state = loaded_state(engine(None));
-        let request = with_aat(request(&deep_face(&state), 1));
+        let request = with_aat(request(&first_pipeline_payload(&state), 1));
         let aat = request.verify_aat().unwrap();
         let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
         assert_eq!(claims.aat, aat);
@@ -471,8 +475,8 @@ mod tests {
     #[tokio::test]
     async fn an_aat_for_another_payload_rejects_before_inference() {
         let state = loaded_state(UnusedBiometricEngine);
-        let mut request = with_aat(request(&deep_face(&state), 1));
-        let mut other = deep_face(&state);
+        let mut request = with_aat(request(&first_pipeline_payload(&state), 1));
+        let mut other = first_pipeline_payload(&state);
         other.match_strictness = 3;
         request.payload = other.encode().unwrap();
         assert_eq!(
@@ -492,7 +496,11 @@ mod tests {
         ] {
             let state = loaded_state(engine(Some(reason)));
             assert_eq!(
-                exchange(Arc::clone(&state), &request(&deep_face(&state), 1)).await,
+                exchange(
+                    Arc::clone(&state),
+                    &request(&first_pipeline_payload(&state), 1)
+                )
+                .await,
                 MatchResult::Failed {
                     reason,
                     debug_report: Some("{\"engine\":\"test\"}".to_owned()).into()
@@ -517,7 +525,7 @@ mod tests {
         ];
         for (change, reason) in changes {
             let state = loaded_state(UnusedBiometricEngine);
-            let mut payload = deep_face(&state);
+            let mut payload = first_pipeline_payload(&state);
             change(&mut payload);
             assert_eq!(
                 exchange(state, &request(&payload, 1)).await,
@@ -536,7 +544,7 @@ mod tests {
     async fn enforces_the_pipeline_request_limit_after_opening() {
         let state = loaded_state(UnusedBiometricEngine);
         // Pipeline 2 allows half of pipeline 1, so this passes the pre-opening check only.
-        let mut payload = gray_badge(&state);
+        let mut payload = second_pipeline_payload(&state);
         payload.entries[1].data = vec![0; usize::try_from(TEST_MAX_REQUEST_BYTES / 2).unwrap()];
         assert_eq!(
             exchange(state, &request(&payload, 1)).await,
@@ -574,7 +582,7 @@ mod tests {
         let failing = engine(Some(FailureReason::MatchRejected));
         let calls = Arc::clone(&failing.calls);
         let state = loaded_state(failing);
-        let request = request(&deep_face(&state), 1);
+        let request = request(&first_pipeline_payload(&state), 1);
         // A failed comparison still consumes the nonce.
         assert!(matches!(
             exchange(Arc::clone(&state), &request).await,
@@ -592,7 +600,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         // Another `aud` or `nonce` is a new request; a new boot starts a new set.
-        let payload = deep_face(&state);
+        let payload = first_pipeline_payload(&state);
         let other_aud = Request::new(7u64.into(), 1u64.into(), &payload, None).unwrap();
         assert!(matches!(
             exchange(Arc::clone(&state), &other_aud).await,
@@ -619,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn an_early_rejection_waits_for_the_first_slot() {
         let state = loaded_state_with_slots(UnusedBiometricEngine, SLOTS);
-        let mut payload = deep_face(&state);
+        let mut payload = first_pipeline_payload(&state);
         payload.match_strictness = 4;
         let (result, elapsed) = timed(state, &request(&payload, 1)).await;
         assert_eq!(result, rejected(FailureReason::UnsupportedMatchStrictness));
@@ -645,7 +653,11 @@ mod tests {
             ..engine(None)
         };
         let state = loaded_state_with_slots(slow, SLOTS);
-        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        let (result, elapsed) = timed(
+            Arc::clone(&state),
+            &request(&first_pipeline_payload(&state), 1),
+        )
+        .await;
         assert!(matches!(result, MatchResult::Success { .. }));
         assert!(elapsed >= Duration::from_millis(800), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(1600), "{elapsed:?}");
@@ -726,7 +738,11 @@ mod tests {
         };
         let terminated = Arc::clone(&stuck.terminated);
         let state = loaded_state_with_slots(stuck, SLOTS);
-        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        let (result, elapsed) = timed(
+            Arc::clone(&state),
+            &request(&first_pipeline_payload(&state), 1),
+        )
+        .await;
         assert_eq!(result, rejected(FailureReason::EngineTimeout));
         assert!(elapsed >= Duration::from_millis(1600), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");

@@ -16,7 +16,7 @@ The enclave validates request bounds, the release, pipeline, match strictness an
 
 The enclave runs each (`aud`, `nonce`) once per boot. It keeps up to 262,144 of them in memory; once full, it refuses requests and reports not ready until it reboots with a new channel key.
 
-The sandboxed Engine interprets pipelines and match strictness and returns Pass or a bounded error code. The verifier forwards the original canonical Payload bytes and signs only Pass; scores and embeddings never cross this boundary. The prototype Engine supports DeepFace and GrayBadge with strictness ID `2`.
+The sandboxed Engine interprets pipelines and match strictness and returns Pass or a bounded error code. The verifier forwards the original canonical Payload bytes and signs only Pass; scores and embeddings never cross this boundary. The prototype Engine defines `deepface_vanilla` (1), `graybadge_vanilla` (2), `deepface_lightguard` (3), and `graybadge_lightguard` (4), all with strictness ID `2`. Callers choose a pipeline explicitly; the Engine checks that its capture shape and frame metadata match that policy.
 
 ## Repository layout
 
