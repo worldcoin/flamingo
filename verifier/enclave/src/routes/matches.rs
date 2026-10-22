@@ -542,6 +542,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_takt_or_aat_is_rejected_before_inference() {
+        for corrupt_takt in [true, false] {
+            let state = loaded_state(UnusedBiometricEngine);
+            let mut request = with_aat(request(&deep_face(&state), 1));
+            let inputs = request.aat_inputs.as_mut().unwrap();
+            let token = if corrupt_takt {
+                &mut inputs.takt
+            } else {
+                &mut inputs.aat
+            };
+            *token = vec![0xff];
+            assert_eq!(
+                exchange(state, &request).await,
+                rejected(FailureReason::AatRejected)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn an_aat_for_another_payload_rejects_before_inference() {
         let state = loaded_state(UnusedBiometricEngine);
         let mut request = with_aat(request(&deep_face(&state), 1));
@@ -687,8 +706,8 @@ mod tests {
         ));
     }
 
-    /// Slots 400, 800 and 1600 ms, far apart so a debug build's decryption fits the first.
-    const SLOTS: &[u64] = &[400, 800, 1600];
+    /// Explicit, non-geometric slots, far apart so a debug build's decryption fits the first.
+    const SLOTS: &[u64] = &[400, 900, 1600];
 
     async fn timed(state: Arc<EnclaveState>, request: &Request) -> (MatchResult, Duration) {
         let start = Instant::now();
@@ -704,7 +723,7 @@ mod tests {
         let (result, elapsed) = timed(state, &request(&payload, 1)).await;
         assert_eq!(result, rejected(FailureReason::UnsupportedMatchStrictness));
         assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
-        assert!(elapsed < Duration::from_millis(800), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(900), "{elapsed:?}");
     }
 
     #[tokio::test]
@@ -727,7 +746,7 @@ mod tests {
         let state = loaded_state_with_slots(slow, SLOTS);
         let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
         assert!(matches!(result, MatchResult::Success { .. }));
-        assert!(elapsed >= Duration::from_millis(800), "{elapsed:?}");
+        assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(1600), "{elapsed:?}");
     }
 

@@ -31,6 +31,12 @@ verified under active trusted keys. This document advertises provider policy;
 the match assignment separately identifies releases actually loaded by the enclave.
 See the deployment repository's [release and key operations](https://github.com/worldcoin/flamingo-deploy/blob/main/docs/engine-releases.md).
 
+The protocol revision pinned by this workspace rejects the old `{min,max,count}` response-slot
+objects and `{manifest,status}` discovery entries. Before upgrading an existing deployment,
+convert the unsigned manifest to explicit slots, sign it again, and update the provisioner JWS,
+provider metadata and consumer allowlists together. Changed payload bytes produce a new
+`release_hash` and `engine_config_hash` even when the Engine binary is unchanged.
+
 ## Client configuration
 
 Use [`flamingo-verifier-client`](../verifier/client) to verify attestation, encrypt requests, and check signed results. Save this configuration as `client.json`, replacing the PCR0–2 placeholders with the values from `target/eif/verifier-pcr.json` or a trusted release:
@@ -66,7 +72,7 @@ The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-prot
 
 A LightGuard live capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the one uncompared entry. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
 
-The enclave releases every opened request's response at the first of its pipeline's `response_slots` at which the Engine has finished, counted from arrival; a request rejected before its pipeline is known waits for the latest first slot of any pipeline. An Engine still running at the last slot fails the request with `engine_timeout`; the enclave then reports not ready and exits to reset the worker.
+The enclave releases every opened request's response at the first of its pipeline's explicit `response_slots` (a strictly increasing array of positive millisecond values) at which the Engine has finished, counted from arrival; a request rejected before its pipeline is known waits for the latest first slot of any pipeline. An Engine still running at the last slot fails the request with `engine_timeout`; the enclave then reports not ready and exits to reset the worker.
 
 A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at the WIP-201 `MAX_DEBUG_REPORT` of 64 KiB. Responses use a 96 KiB padded envelope with a four-byte length prefix on the WIP-201 channel (`WORLD-ID/WIP-201/CHANNEL`, key commitment domain `WORLD-ID/WIP-201/CHANNEL-KEY\0`).
 

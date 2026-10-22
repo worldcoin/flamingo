@@ -193,6 +193,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_legacy_manifest_status_objects() {
+        let mut value = fixture();
+        value["manifests"][0] = json!({
+            "manifest": value["manifests"][0].clone(),
+            "status": "active",
+        });
+        assert_eq!(
+            value.to_string().parse::<PublishedMetadata>(),
+            Err(PublishedMetadataError::Malformed)
+        );
+    }
+
+    #[test]
     fn rejects_private_keys_unknown_signers_and_invalid_signatures() {
         use PublishedMetadataError as Error;
         let mut value = fixture();
