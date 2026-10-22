@@ -3,10 +3,8 @@
 //! The request itself is `world_id_flamingo::Request`; this module does not interpret its
 //! payload here; the enclave validates it and its interim adapter maps pipeline roles and metadata.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use world_id_flamingo::{
-    FlamingoClaims, FlamingoToken, Payload, Request, RequestError, engine_config_hash,
-};
+use serde::{Deserialize, Serialize};
+use world_id_flamingo::{FlamingoClaims, Payload, Request, RequestError, engine_config_hash};
 
 use crate::{DebugReport, FailureReason};
 
@@ -35,9 +33,9 @@ pub fn expected_claims(
 /// A Flamingo Token with the attestation of the key that signed it, carried together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestedStatement {
-    /// The signed Flamingo Token.
-    #[serde(with = "token_bytes")]
-    pub token: FlamingoToken,
+    /// The signed Flamingo Token, as its CWT encoding.
+    #[serde(with = "serde_bytes")]
+    pub token: Vec<u8>,
     /// NSM document attesting the token's signing key.
     #[serde(with = "serde_bytes")]
     pub signing_key_attestation: Vec<u8>,
@@ -61,25 +59,6 @@ pub enum MatchResult {
         /// Engine diagnostics, if produced.
         debug_report: DebugReport,
     },
-}
-
-/// Encodes a [`FlamingoToken`] as a CBOR byte string.
-mod token_bytes {
-    use super::{Deserialize as _, Deserializer, FlamingoToken, Serializer};
-
-    pub fn serialize<S: Serializer>(
-        token: &FlamingoToken,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(token.as_bytes())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<FlamingoToken, D::Error> {
-        serde_bytes::ByteBuf::deserialize(deserializer)
-            .map(|bytes| FlamingoToken::from_bytes(bytes.into_vec()))
-    }
 }
 
 #[cfg(test)]
@@ -135,7 +114,7 @@ mod tests {
         use crate::MATCH_RESPONSE_ENVELOPE_LEN;
         let success = MatchResult::Success {
             statement: AttestedStatement {
-                token: FlamingoToken::from_bytes(vec![1; 512]),
+                token: vec![1; 512],
                 signing_key_attestation: vec![2; 5000],
             },
             debug_report: DebugReport::NotProduced,

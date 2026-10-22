@@ -4,7 +4,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_api_types::{EnclaveAssignmentResponse, ErrorEnvelope};
-use flamingo_verifier_sealed_types::{CHANNEL_DOMAIN, DebugReport, FlamingoClaims, MatchResult};
+use flamingo_verifier_sealed_types::{
+    CHANNEL_DOMAIN, DebugReport, FlamingoClaims, FlamingoToken, MatchResult,
+};
 use pontifex::ChannelConsumer;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
 
@@ -69,9 +71,8 @@ pub fn open_verified_match(
                 EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
             })?;
 
-            let claims = statement
-                .token
-                .verify(&signing_key)
+            let claims = FlamingoToken::from_cwt(&statement.token)
+                .and_then(|token| token.verify(&signing_key).copied())
                 .map_err(|_| Error::StatementInvalid)?;
             Ok(VerifiedMatchResult::Success {
                 verified: Box::new(VerifiedMatch { statement, claims }),
@@ -239,14 +240,14 @@ pub enum VerifiedMatchResult {
 #[cfg(test)]
 mod tests {
     use super::{Error, FlamingoClaims, VerifiedMatch, VerifiedMatchResult, ensure_claims_match};
-    use flamingo_verifier_sealed_types::{AttestedStatement, DebugReport, FlamingoToken};
+    use flamingo_verifier_sealed_types::{AttestedStatement, DebugReport};
     use world_id_primitives::FieldElement;
 
     fn success(claims: &FlamingoClaims) -> VerifiedMatchResult {
         VerifiedMatchResult::Success {
             verified: Box::new(VerifiedMatch {
                 statement: AttestedStatement {
-                    token: FlamingoToken::from_bytes(vec![]),
+                    token: vec![],
                     signing_key_attestation: vec![],
                 },
                 claims: *claims,

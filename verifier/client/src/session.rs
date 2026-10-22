@@ -285,8 +285,8 @@ mod tests {
 
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
     use flamingo_verifier_sealed_types::{
-        AttestedStatement, CHANNEL_DOMAIN, DebugReport, Entry, FailureReason, FlamingoToken,
-        MatchResult, Payload, Request,
+        AttestedStatement, CHANNEL_DOMAIN, DebugReport, Entry, FailureReason, MatchResult, Payload,
+        Request,
     };
     use futures_util::{SinkExt, StreamExt};
     use pontifex::attestation::PcrConfig;
@@ -601,7 +601,7 @@ mod tests {
         let responder = responder();
         let answer = MatchResult::Success {
             statement: AttestedStatement {
-                token: FlamingoToken::from_bytes(b"cose-sign1".to_vec()),
+                token: b"cose-sign1".to_vec(),
                 signing_key_attestation: b"not a COSE attestation document".to_vec(),
             },
             debug_report: DebugReport::NotProduced,

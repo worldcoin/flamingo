@@ -450,7 +450,10 @@ mod tests {
             panic!("expected a signed result, got {result:?}")
         };
         assert!(matches!(debug_report, DebugReport::Available { .. }));
-        FlamingoToken::verify(&statement.token, state.signing_public_key()).unwrap()
+        *FlamingoToken::from_cwt(&statement.token)
+            .unwrap()
+            .verify(state.signing_public_key())
+            .unwrap()
     }
 
     #[tokio::test]

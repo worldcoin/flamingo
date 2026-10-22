@@ -101,7 +101,8 @@ impl FromStr for EngineProviderMetadata {
             if !manifests.insert(&entry.manifest) {
                 return Err(Error::DuplicateManifest);
             }
-            let manifest = ReleaseManifest::parse(&entry.manifest).map_err(|_| Error::Manifest)?;
+            let manifest =
+                ReleaseManifest::from_compact(&entry.manifest).map_err(|_| Error::Manifest)?;
             let key = metadata
                 .release_keys
                 .iter()
