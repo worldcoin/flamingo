@@ -64,7 +64,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 webpki-roots = "1.0.10"
-# Protocol 0.17.0 release candidate; switch to crates.io after the first wire-crate publish.
-world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", version = "0.17.0", rev = "ef6e21e9f5816e2026f6d0a5314d0d765b92ca25" }
-world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", version = "0.17.0", rev = "ef6e21e9f5816e2026f6d0a5314d0d765b92ca25", default-features = false }
+world-id-flamingo = "0.17.0"
+world-id-primitives = { version = "0.17.0", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }

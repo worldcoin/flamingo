@@ -5285,7 +5285,8 @@ dependencies = [
 [[package]]
 name = "world-id-flamingo"
 version = "0.17.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=ef6e21e9f5816e2026f6d0a5314d0d765b92ca25#ef6e21e9f5816e2026f6d0a5314d0d765b92ca25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10d3ece3ee84355fb10c155d5f7a7e80cc42bb47113ffbc4676c82dda5e4ea89"
 dependencies = [
  "base64 0.22.1",
  "coset",
@@ -5303,7 +5304,8 @@ dependencies = [
 [[package]]
 name = "world-id-primitives"
 version = "0.17.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=ef6e21e9f5816e2026f6d0a5314d0d765b92ca25#ef6e21e9f5816e2026f6d0a5314d0d765b92ca25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252c542f969b5a49b52d21e2899e8192a7bae5e64e612c9961aa6bb74e739d0"
 dependencies = [
  "alloy-primitives",
  "ark-ff 0.6.0",
