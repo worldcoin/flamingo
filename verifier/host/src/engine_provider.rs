@@ -12,8 +12,8 @@ pub const MAX_ENGINE_METADATA_BYTES: usize = 64 * 1024;
 
 /// WIP-201 discovery document, validated before the host publishes it.
 ///
-/// Uses the protocol's wire types and retains inactive keys and manifests so consumers can
-/// discover revocations. This document does not establish a client's trust in its provider.
+/// Uses the protocol's wire types and retains inactive keys so consumers can discover
+/// revocations. This document does not establish a client's trust in its provider.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct PublishedMetadata(EngineProviderMetadata);
@@ -50,7 +50,7 @@ pub enum PublishedMetadataError {
     /// Key identifiers are ambiguous.
     #[error("release key kid values must be unique")]
     DuplicateKey,
-    /// A manifest is listed more than once, possibly with conflicting statuses.
+    /// A manifest is listed more than once.
     #[error("release manifest entries must be unique")]
     DuplicateManifest,
     /// A private key was supplied instead of its public part.
@@ -97,18 +97,17 @@ impl FromStr for PublishedMetadata {
             }
         }
         let mut manifests = BTreeSet::new();
-        for entry in &metadata.manifests {
-            if !manifests.insert(&entry.manifest) {
+        for jws in &metadata.manifests {
+            if !manifests.insert(jws) {
                 return Err(Error::DuplicateManifest);
             }
-            let manifest =
-                ReleaseManifest::from_jws(&entry.manifest).map_err(|_| Error::Manifest)?;
+            let manifest = ReleaseManifest::from_jws(jws).map_err(|_| Error::Manifest)?;
             let key = metadata
                 .release_keys
                 .iter()
                 .find(|key| key.jwk.kid == manifest.kid())
                 .ok_or(Error::Manifest)?;
-            // Verify consistency regardless of status: revocation must not prevent publication.
+            // Verify regardless of key status: revocation must not prevent publication.
             manifest.verify(&key.jwk).map_err(|_| Error::Signature)?;
         }
         Ok(Self(metadata))
@@ -127,15 +126,14 @@ mod tests {
     }
 
     #[test]
-    fn public_document_preserves_exact_manifests_and_all_statuses() {
+    fn public_document_preserves_exact_manifests_and_all_key_statuses() {
         for status in ["active", "retired", "revoked"] {
             let mut value = fixture();
             value["release_keys"][0]["status"] = status.into();
-            value["manifests"][0]["status"] = status.into();
             let metadata: PublishedMetadata = value.to_string().parse().unwrap();
             assert_eq!(serde_json::to_value(&metadata).unwrap(), value);
             assert_eq!(
-                metadata.0.active_manifests().len(),
+                metadata.0.verified_manifests().len(),
                 usize::from(status == "active")
             );
         }
@@ -146,7 +144,7 @@ mod tests {
         let mut value = fixture();
         value["release_keys"][0]["status"] = "revoked".into();
         let metadata: PublishedMetadata = value.to_string().parse().unwrap();
-        assert!(metadata.0.active_manifests().is_empty());
+        assert!(metadata.0.verified_manifests().is_empty());
         value["manifests"] = json!([]);
         assert!(value.to_string().parse::<PublishedMetadata>().is_ok());
         value["release_keys"] = json!([]);
@@ -162,7 +160,7 @@ mod tests {
             ("/release_keys/0/jwk/kid", json!(""), Error::Key),
             ("/release_keys/0/jwk/crv", json!("P-384"), Error::Key),
             ("/release_keys/0/jwk/x", json!("invalid"), Error::Key),
-            ("/manifests/0/manifest", json!("invalid"), Error::Manifest),
+            ("/manifests/0", json!("invalid"), Error::Manifest),
         ] {
             let mut value = fixture();
             *value.pointer_mut(pointer).unwrap() = replacement;
@@ -177,9 +175,8 @@ mod tests {
             Err(Error::DuplicateKey)
         );
         let mut value = fixture();
-        let mut revoked = value["manifests"][0].clone();
-        revoked["status"] = "revoked".into();
-        value["manifests"].as_array_mut().unwrap().push(revoked);
+        let duplicate = value["manifests"][0].clone();
+        value["manifests"].as_array_mut().unwrap().push(duplicate);
         assert_eq!(
             value.to_string().parse::<PublishedMetadata>(),
             Err(Error::DuplicateManifest)
@@ -208,10 +205,7 @@ mod tests {
             Err(Error::Manifest)
         );
         let mut value = fixture();
-        let mut manifest = value["manifests"][0]["manifest"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let mut manifest = value["manifests"][0].as_str().unwrap().to_owned();
         let start = manifest.rfind('.').unwrap() + 1;
         let replacement = if &manifest[start..=start] == "A" {
             "B"
@@ -219,7 +213,7 @@ mod tests {
             "A"
         };
         manifest.replace_range(start..=start, replacement);
-        value["manifests"][0]["manifest"] = manifest.into();
+        value["manifests"][0] = manifest.into();
         assert_eq!(
             value.to_string().parse::<PublishedMetadata>(),
             Err(Error::Signature)

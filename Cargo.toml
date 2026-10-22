@@ -65,6 +65,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 webpki-roots = "1.0.10"
 # WIP-201 wire formats are unreleased (worldcoin/world-id-protocol#1079).
-world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", rev = "8ae50382b60784eed820a679ce63e0df3b9def16" }
-world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "8ae50382b60784eed820a679ce63e0df3b9def16", default-features = false }
+world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", rev = "65832c90a3c4dd70673ad794b2b145c386efe4a9" }
+world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "65832c90a3c4dd70673ad794b2b145c386efe4a9", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
