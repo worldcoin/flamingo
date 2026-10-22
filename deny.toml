@@ -7,6 +7,8 @@ targets = ["x86_64-unknown-linux-gnu"]
 ignore = [
     # Required by Pontifex's AWS NSM dependencies; no maintained compatible release exists.
     "RUSTSEC-2021-0127",
+    # Unmaintained proc-macro `paste`, via `alloy-primitives` and `ark-ff`; no successor release.
+    "RUSTSEC-2024-0436",
 ]
 
 [bans]
