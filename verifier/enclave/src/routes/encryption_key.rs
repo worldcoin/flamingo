@@ -19,7 +19,7 @@ pub async fn handler(
                 .payload()
                 .pipelines
                 .iter()
-                .map(|pipeline| pipeline.response_slots.max)
+                .filter_map(|pipeline| pipeline.response_slots.last())
                 .max()
         }),
     })
@@ -49,7 +49,7 @@ mod tests {
         let parts: Vec<_> = manifest.split('.').collect();
         let mut payload: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
-        payload["pipelines"][1]["response_slots"]["max"] = 9000.into();
+        payload["pipelines"][1]["response_slots"] = serde_json::json!([1, 9000]);
         let manifest = format!(
             "{}.{}.{}",
             parts[0],
