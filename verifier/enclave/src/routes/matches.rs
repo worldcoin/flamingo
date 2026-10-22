@@ -131,7 +131,10 @@ fn prepare(
         if sealed_len > pipeline.max_request_bytes {
             return Err(FailureReason::RequestTooLarge);
         }
-        if !release.defines_strictness(payload.match_strictness) {
+        if release
+            .match_strictness_level(payload.match_strictness)
+            .is_none()
+        {
             return Err(FailureReason::UnsupportedMatchStrictness);
         }
         let threshold = pipeline::threshold(payload.match_strictness)?;
