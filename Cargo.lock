@@ -5250,17 +5250,15 @@ dependencies = [
 
 [[package]]
 name = "world-id-flamingo"
-version = "0.15.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=b388d86aef465cb33f5fa431f8f303a0118761a1#b388d86aef465cb33f5fa431f8f303a0118761a1"
+version = "0.16.0"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=96d0b62ad4345eb1efb04f0dee25b82715b77bb0#96d0b62ad4345eb1efb04f0dee25b82715b77bb0"
 dependencies = [
- "ark-ff 0.6.0",
  "base64 0.22.1",
  "coset",
  "p256",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "taceo-ark-babyjubjub",
  "taceo-eddsa-babyjubjub",
  "thiserror 2.0.20",
  "world-id-primitives",
@@ -5268,8 +5266,8 @@ dependencies = [
 
 [[package]]
 name = "world-id-primitives"
-version = "0.15.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=b388d86aef465cb33f5fa431f8f303a0118761a1#b388d86aef465cb33f5fa431f8f303a0118761a1"
+version = "0.16.0"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=96d0b62ad4345eb1efb04f0dee25b82715b77bb0#96d0b62ad4345eb1efb04f0dee25b82715b77bb0"
 dependencies = [
  "alloy-primitives",
  "ark-ff 0.6.0",
