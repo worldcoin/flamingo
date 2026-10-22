@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use serde::Serialize;
-use world_id_flamingo::{EngineProviderMetadata, ReleaseManifest};
+use world_id_flamingo::{EngineProviderMetadata, ReleaseManifest, release_manifest::verifying_key};
 
 pub use world_id_flamingo::engine_provider::METADATA_PATH as ENGINE_METADATA_PATH;
 
@@ -89,10 +89,11 @@ impl FromStr for PublishedMetadata {
         }
         let mut kids = BTreeSet::new();
         for key in &metadata.release_keys {
-            if key.jwk.kid.trim().is_empty() || key.jwk.verifying_key().is_err() {
+            let kid = key.jwk.prm.kid.as_deref().unwrap_or_default();
+            if kid.trim().is_empty() || verifying_key(&key.jwk).is_err() {
                 return Err(Error::Key);
             }
-            if !kids.insert(&key.jwk.kid) {
+            if !kids.insert(kid) {
                 return Err(Error::DuplicateKey);
             }
         }
@@ -105,7 +106,7 @@ impl FromStr for PublishedMetadata {
             let key = metadata
                 .release_keys
                 .iter()
-                .find(|key| key.jwk.kid == manifest.kid())
+                .find(|key| key.jwk.prm.kid.as_deref() == Some(manifest.kid()))
                 .ok_or(Error::Manifest)?;
             // Verify regardless of key status: revocation must not prevent publication.
             manifest.verify(&key.jwk).map_err(|_| Error::Signature)?;
@@ -159,7 +160,9 @@ mod tests {
             ("/provider_id", json!(" "), Error::ProviderId),
             ("/release_keys/0/jwk/kid", json!(""), Error::Key),
             ("/release_keys/0/jwk/crv", json!("P-384"), Error::Key),
-            ("/release_keys/0/jwk/x", json!("invalid"), Error::Key),
+            // Coordinates are decoded while parsing, so a non-base64url one is malformed.
+            ("/release_keys/0/jwk/x", json!("invalid"), Error::Malformed),
+            ("/release_keys/0/jwk/x", json!("AAAA"), Error::Key),
             ("/manifests/0", json!("invalid"), Error::Manifest),
         ] {
             let mut value = fixture();

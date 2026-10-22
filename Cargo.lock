@@ -2510,6 +2510,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "jose-b64"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bec69375368709666b21c76965ce67549f2d2db7605f1f8707d17c9656801b56"
+dependencies = [
+ "base64ct",
+ "serde",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "jose-jwa"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ab78e053fe886a351d67cf0d194c000f9d0dcb92906eb34d853d7e758a4b3a7"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "jose-jwk"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "280fa263807fe0782ecb6f2baadc28dffc04e00558a58e33bfdb801d11fd58e7"
+dependencies = [
+ "jose-b64",
+ "jose-jwa",
+ "p256",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5251,10 +5285,11 @@ dependencies = [
 [[package]]
 name = "world-id-flamingo"
 version = "0.16.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=65832c90a3c4dd70673ad794b2b145c386efe4a9#65832c90a3c4dd70673ad794b2b145c386efe4a9"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=80f2ed21669af0bb77fcd59ce31862f38ff6c618#80f2ed21669af0bb77fcd59ce31862f38ff6c618"
 dependencies = [
  "base64 0.22.1",
  "coset",
+ "jose-jwk",
  "p256",
  "serde",
  "serde_json",
@@ -5267,7 +5302,7 @@ dependencies = [
 [[package]]
 name = "world-id-primitives"
 version = "0.16.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=65832c90a3c4dd70673ad794b2b145c386efe4a9#65832c90a3c4dd70673ad794b2b145c386efe4a9"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=80f2ed21669af0bb77fcd59ce31862f38ff6c618#80f2ed21669af0bb77fcd59ce31862f38ff6c618"
 dependencies = [
  "alloy-primitives",
  "ark-ff 0.6.0",
@@ -5415,6 +5450,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 
