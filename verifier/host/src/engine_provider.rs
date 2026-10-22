@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, fmt, str::FromStr};
 use serde::Serialize;
 use world_id_flamingo::{EngineMetadata, ReleaseManifest};
 
-pub use world_id_flamingo::metadata::METADATA_PATH as ENGINE_METADATA_PATH;
+pub use world_id_flamingo::engine_provider::METADATA_PATH as ENGINE_METADATA_PATH;
 
 /// Maximum encoded provider document accepted from configuration.
 pub const MAX_ENGINE_METADATA_BYTES: usize = 64 * 1024;
