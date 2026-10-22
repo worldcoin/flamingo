@@ -33,13 +33,13 @@ impl SigningKey {
         &self.public_key
     }
 
-    /// Signs `claims` and returns the finished token.
+    /// Signs `claims` and returns the token's CWT encoding.
     ///
     /// # Errors
     ///
     /// Propagates [`TokenError`] if the token cannot be encoded.
-    pub fn sign_claims(&self, claims: &FlamingoClaims) -> Result<FlamingoToken, TokenError> {
-        claims.sign(&self.private_key)
+    pub fn sign_claims(&self, claims: &FlamingoClaims) -> Result<Vec<u8>, TokenError> {
+        FlamingoToken::sign(*claims, &self.private_key).map(|token| token.to_cwt())
     }
 }
 

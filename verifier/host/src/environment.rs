@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::EngineProviderMetadata;
+use crate::PublishedMetadata;
 
 use clap::{Parser, ValueEnum};
 
@@ -45,8 +45,8 @@ pub struct HostConfig {
     pub environment: Environment,
 
     /// Public WIP-201 provider metadata JSON. Omit to disable discovery during rollout.
-    #[arg(long = "engine-provider-metadata", env = "ENGINE_PROVIDER_METADATA", value_parser = EngineProviderMetadataParser, hide_env_values = true)]
-    pub engine_provider_metadata: Option<Arc<EngineProviderMetadata>>,
+    #[arg(long = "engine-provider-metadata", env = "ENGINE_PROVIDER_METADATA", value_parser = PublishedMetadataParser, hide_env_values = true)]
+    pub engine_provider_metadata: Option<Arc<PublishedMetadata>>,
 
     /// Nitro enclave CID.
     #[arg(long, env = "ENCLAVE_CID")]
@@ -85,10 +85,10 @@ impl Default for HostConfig {
 }
 
 #[derive(Clone)]
-struct EngineProviderMetadataParser;
+struct PublishedMetadataParser;
 
-impl clap::builder::TypedValueParser for EngineProviderMetadataParser {
-    type Value = Arc<EngineProviderMetadata>;
+impl clap::builder::TypedValueParser for PublishedMetadataParser {
+    type Value = Arc<PublishedMetadata>;
 
     fn parse_ref(
         &self,
@@ -104,7 +104,7 @@ impl clap::builder::TypedValueParser for EngineProviderMetadataParser {
         })?;
         // Clap's default error echoes the input, which could accidentally include a private JWK.
         value
-            .parse::<EngineProviderMetadata>()
+            .parse::<PublishedMetadata>()
             .map(Arc::new)
             .map_err(|error| {
                 clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())

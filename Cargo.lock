@@ -1551,7 +1551,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2510,6 +2510,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "jose-b64"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bec69375368709666b21c76965ce67549f2d2db7605f1f8707d17c9656801b56"
+dependencies = [
+ "base64ct",
+ "serde",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "jose-jwa"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ab78e053fe886a351d67cf0d194c000f9d0dcb92906eb34d853d7e758a4b3a7"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "jose-jwk"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "280fa263807fe0782ecb6f2baadc28dffc04e00558a58e33bfdb801d11fd58e7"
+dependencies = [
+ "jose-b64",
+ "jose-jwa",
+ "p256",
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3257,7 +3291,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3660,7 +3694,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4339,7 +4373,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5250,18 +5284,17 @@ dependencies = [
 
 [[package]]
 name = "world-id-flamingo"
-version = "0.15.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=2854c89a91093bcb875264df366407ea346356c5#2854c89a91093bcb875264df366407ea346356c5"
+version = "0.16.0"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=7fb2e46cf5d839d919c62b654b21d90ce8e778e9#7fb2e46cf5d839d919c62b654b21d90ce8e778e9"
 dependencies = [
- "ark-ff 0.6.0",
  "base64 0.22.1",
- "ciborium",
  "coset",
+ "hex",
+ "jose-jwk",
  "p256",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "taceo-ark-babyjubjub",
  "taceo-eddsa-babyjubjub",
  "thiserror 2.0.20",
  "world-id-primitives",
@@ -5269,13 +5302,14 @@ dependencies = [
 
 [[package]]
 name = "world-id-primitives"
-version = "0.15.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=2854c89a91093bcb875264df366407ea346356c5#2854c89a91093bcb875264df366407ea346356c5"
+version = "0.16.0"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=7fb2e46cf5d839d919c62b654b21d90ce8e778e9#7fb2e46cf5d839d919c62b654b21d90ce8e778e9"
 dependencies = [
  "alloy-primitives",
  "ark-ff 0.6.0",
  "arrayvec",
  "ciborium",
+ "coset",
  "embed-doc-image",
  "eyre",
  "getrandom 0.4.3",
@@ -5417,6 +5451,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

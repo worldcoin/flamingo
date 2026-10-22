@@ -30,7 +30,8 @@ pub use messages::*;
 pub use response::*;
 pub use serde_bytes::ByteBuf;
 pub use world_id_flamingo::{
-    AatClaims, AatInputs, Entry, FlamingoClaims, FlamingoToken, Payload, Request, RequestError,
+    AatInputs, Entry, FlamingoAatClaims, FlamingoClaims, FlamingoToken, Payload, Request,
+    RequestError,
 };
 
 /// Bound on sealed match bytes before decryption.

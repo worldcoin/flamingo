@@ -133,17 +133,17 @@ pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
 pub const TEST_MAX_REQUEST_BYTES: u64 = 1 << 20;
 
 /// Response slots of [`manifest`]: the first is immediate, so tests not about timing stay fast.
-pub const TEST_SLOTS: (u64, u64, u32) = (1, 4000, 4);
+pub const TEST_SLOTS: &[u64] = &[1, 15, 252, 4000];
 
 /// Builds state for `engine` with the [`manifest`] of [`TEST_ENGINE_HASH`] loaded.
 pub fn loaded_state(engine: impl BiometricEngine + 'static) -> Arc<EnclaveState> {
     loaded_state_with_slots(engine, TEST_SLOTS)
 }
 
-/// [`loaded_state`] with every pipeline's response slots set to (`min`, `max`, `count`).
+/// [`loaded_state`] with every pipeline's response slots set to `slots`.
 pub fn loaded_state_with_slots(
     engine: impl BiometricEngine + 'static,
-    slots: (u64, u64, u32),
+    slots: &[u64],
 ) -> Arc<EnclaveState> {
     let state = EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine), TEST_ENGINE_HASH)
         .expect("boot state should generate");
@@ -158,12 +158,8 @@ pub fn manifest(engine_hash: [u8; 32], version: &str) -> String {
     manifest_with_slots(engine_hash, version, TEST_SLOTS)
 }
 
-/// [`manifest`] with every pipeline's response slots set to (`min`, `max`, `count`).
-pub fn manifest_with_slots(
-    engine_hash: [u8; 32],
-    version: &str,
-    (min, max, count): (u64, u64, u32),
-) -> String {
+/// [`manifest`] with every pipeline's response slots set to `slots`.
+pub fn manifest_with_slots(engine_hash: [u8; 32], version: &str, slots: &[u64]) -> String {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     let payload = serde_json::json!({
@@ -173,13 +169,13 @@ pub fn manifest_with_slots(
             {
                 "pipeline": 1,
                 "description": "credential image, live capture, challenge",
-                "response_slots": { "min": min, "max": max, "count": count },
+                "response_slots": slots,
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES,
             },
             {
                 "pipeline": 2,
                 "description": "live capture, challenge",
-                "response_slots": { "min": min, "max": max, "count": count },
+                "response_slots": slots,
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES / 2,
             },
         ],

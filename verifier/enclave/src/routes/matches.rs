@@ -51,7 +51,9 @@ pub async fn handler(
     })
     .await??;
 
-    let last_slot = arrival + Duration::from_millis(slots.max);
+    // Loaded manifests have at least one slot.
+    let last = slots.last().unwrap_or_default();
+    let last_slot = arrival + Duration::from_millis(last);
     let result = match prepared {
         Ok(prepared) => run(Arc::clone(&state), prepared, last_slot).await,
         Err(reason) => Ok(MatchResult::Failed {
@@ -78,7 +80,7 @@ pub async fn handler(
 
     // Every outcome after opening, errors included, leaves at a slot.
     let elapsed = u64::try_from(arrival.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let slot = slots.release_at(elapsed).unwrap_or(slots.max);
+    let slot = slots.release_at(elapsed).unwrap_or(last);
     sleep_until(arrival + Duration::from_millis(slot)).await;
     response
 }
@@ -106,14 +108,10 @@ fn prepare(
         .payload()
         .pipelines
         .iter()
-        .map(|pipeline| pipeline.response_slots.min)
+        .filter_map(|pipeline| pipeline.response_slots.first())
         .max()
         .unwrap_or_default();
-    let unresolved = ResponseSlots {
-        min: latest_first_slot,
-        max: latest_first_slot,
-        count: 1,
-    };
+    let unresolved = ResponseSlots(vec![latest_first_slot]);
     let request = match Request::decode(plaintext, release.max_request_bytes()) {
         Ok(request) => request,
         Err(error) => return (unresolved, Err(error.into())),
@@ -128,12 +126,15 @@ fn prepare(
     let Some(pipeline) = release.pipeline(payload.pipeline) else {
         return (unresolved, Err(FailureReason::UnsupportedPipeline));
     };
-    let slots = pipeline.response_slots;
+    let slots = pipeline.response_slots.clone();
     let checked = (|| {
         if sealed_len > pipeline.max_request_bytes {
             return Err(FailureReason::RequestTooLarge);
         }
-        if !release.defines_strictness(payload.match_strictness) {
+        if release
+            .match_strictness_level(payload.match_strictness)
+            .is_none()
+        {
             return Err(FailureReason::UnsupportedMatchStrictness);
         }
         let threshold = pipeline::threshold(payload.match_strictness)?;
@@ -256,8 +257,8 @@ mod tests {
     use world_id_primitives::{
         FieldElement,
         authenticator_assertion::{
-            AuthenticatorAssertionToken, AuthenticatorMeta, Platform, SecFlags, SecLevel,
-            TrustAnchorKeyToken, UserPresence,
+            AatClaims, AuthenticatorAssertionToken, AuthenticatorMeta, Platform, SecFlags,
+            SecLevel, TaktClaims, TrustAnchorKeyToken, UserPresence,
         },
     };
 
@@ -391,22 +392,16 @@ mod tests {
         let assertion_key = p256::ecdsa::SigningKey::from_bytes(&[0x09; 32].into()).unwrap();
         let sec_flags =
             SecFlags::new(Platform::Ios.into(), SecLevel::HardwareKey.into(), 2006, 3).unwrap();
-        let takt =
-            TrustAnchorKeyToken::new(NOW, NOW + 3600, *assertion_key.verifying_key(), sec_flags)
-                .unwrap()
-                .sign(&trust_anchor_key)
-                .unwrap();
+        let exp = NOW + 3600;
+        let takt_claims =
+            TaktClaims::new(NOW, exp, exp, *assertion_key.verifying_key(), sec_flags).unwrap();
+        let takt = TrustAnchorKeyToken::sign(takt_claims, &trust_anchor_key)
+            .unwrap()
+            .to_cwt();
         let meta = AuthenticatorMeta::new(UserPresence::PresentVerified, 0b01).unwrap();
-        let aat = AuthenticatorAssertionToken::new(
-            NOW,
-            AUD,
-            NOW + 300,
-            request.nonce,
-            request.cdh(),
-            meta,
-        )
-        .unwrap()
-        .sign(&assertion_key);
+        let aat_claims =
+            AatClaims::new(NOW, AUD, NOW + 300, request.nonce, request.cdh(), meta).unwrap();
+        let aat = AuthenticatorAssertionToken::sign(aat_claims, &assertion_key).to_cwt();
         request.aat_inputs = Some(AatInputs {
             trust_anchor_key: trust_anchor_key.public().to_compressed_bytes().unwrap(),
             takt,
@@ -456,7 +451,10 @@ mod tests {
             panic!("expected a signed result, got {result:?}")
         };
         assert!(matches!(debug_report, DebugReport::Available { .. }));
-        FlamingoToken::verify(&statement.token, state.signing_public_key()).unwrap()
+        *FlamingoToken::from_cwt(&statement.token)
+            .unwrap()
+            .verify(state.signing_public_key())
+            .unwrap()
     }
 
     #[tokio::test]
@@ -690,7 +688,7 @@ mod tests {
     }
 
     /// Slots 400, 800 and 1600 ms, far apart so a debug build's decryption fits the first.
-    const SLOTS: (u64, u64, u32) = (400, 1600, 3);
+    const SLOTS: &[u64] = &[400, 800, 1600];
 
     async fn timed(state: Arc<EnclaveState>, request: &Request) -> (MatchResult, Duration) {
         let start = Instant::now();
@@ -753,8 +751,7 @@ mod tests {
         let parts: Vec<_> = manifest.split('.').collect();
         let mut payload: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
-        payload["pipelines"][1]["response_slots"] =
-            serde_json::json!({"min": 200, "max": 200, "count": 1});
+        payload["pipelines"][1]["response_slots"] = serde_json::json!([200]);
         state
             .load_release(&format!(
                 "{}.{}.{}",

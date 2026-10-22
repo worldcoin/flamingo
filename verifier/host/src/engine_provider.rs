@@ -3,25 +3,25 @@
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use serde::Serialize;
-use world_id_flamingo::manifest::{EngineMetadata, ReleaseManifest};
+use world_id_flamingo::{EngineProviderMetadata, ReleaseManifest, release_manifest::verifying_key};
 
-pub use world_id_flamingo::manifest::METADATA_PATH as ENGINE_METADATA_PATH;
+pub use world_id_flamingo::engine_provider::METADATA_PATH as ENGINE_METADATA_PATH;
 
 /// Maximum encoded provider document accepted from configuration.
 pub const MAX_ENGINE_METADATA_BYTES: usize = 64 * 1024;
 
 /// WIP-201 discovery document, validated before the host publishes it.
 ///
-/// Uses the protocol's wire types and retains inactive keys and manifests so consumers can
-/// discover revocations. This document does not establish a client's trust in its provider.
+/// Uses the protocol's wire types and retains inactive keys so consumers can discover
+/// revocations. This document does not establish a client's trust in its provider.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct EngineProviderMetadata(EngineMetadata);
+pub struct PublishedMetadata(EngineProviderMetadata);
 
-impl fmt::Debug for EngineProviderMetadata {
+impl fmt::Debug for PublishedMetadata {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("EngineProviderMetadata")
+            .debug_struct("PublishedMetadata")
             .field("provider_id", &self.0.provider_id)
             .field("release_keys", &self.0.release_keys.len())
             .field("manifests", &self.0.manifests.len())
@@ -31,7 +31,7 @@ impl fmt::Debug for EngineProviderMetadata {
 
 /// A configuration error that never echoes the supplied document or key material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum EngineProviderMetadataError {
+pub enum PublishedMetadataError {
     /// Document exceeds the configuration limit.
     #[error("Engine Provider metadata exceeds 64 KiB")]
     TooLarge,
@@ -50,7 +50,7 @@ pub enum EngineProviderMetadataError {
     /// Key identifiers are ambiguous.
     #[error("release key kid values must be unique")]
     DuplicateKey,
-    /// A manifest is listed more than once, possibly with conflicting statuses.
+    /// A manifest is listed more than once.
     #[error("release manifest entries must be unique")]
     DuplicateManifest,
     /// A private key was supplied instead of its public part.
@@ -64,11 +64,11 @@ pub enum EngineProviderMetadataError {
     Signature,
 }
 
-impl FromStr for EngineProviderMetadata {
-    type Err = EngineProviderMetadataError;
+impl FromStr for PublishedMetadata {
+    type Err = PublishedMetadataError;
 
     fn from_str(json: &str) -> Result<Self, Self::Err> {
-        use EngineProviderMetadataError as Error;
+        use PublishedMetadataError as Error;
         if json.len() > MAX_ENGINE_METADATA_BYTES {
             return Err(Error::TooLarge);
         }
@@ -79,7 +79,7 @@ impl FromStr for EngineProviderMetadata {
         {
             return Err(Error::PrivateKey);
         }
-        let metadata: EngineMetadata =
+        let metadata: EngineProviderMetadata =
             serde_json::from_value(value).map_err(|_| Error::Malformed)?;
         if metadata.version != 1 {
             return Err(Error::Version);
@@ -89,25 +89,26 @@ impl FromStr for EngineProviderMetadata {
         }
         let mut kids = BTreeSet::new();
         for key in &metadata.release_keys {
-            if key.jwk.kid.trim().is_empty() || key.jwk.verifying_key().is_err() {
+            let kid = key.jwk.prm.kid.as_deref().unwrap_or_default();
+            if kid.trim().is_empty() || verifying_key(&key.jwk).is_err() {
                 return Err(Error::Key);
             }
-            if !kids.insert(&key.jwk.kid) {
+            if !kids.insert(kid) {
                 return Err(Error::DuplicateKey);
             }
         }
         let mut manifests = BTreeSet::new();
-        for entry in &metadata.manifests {
-            if !manifests.insert(&entry.manifest) {
+        for jws in &metadata.manifests {
+            if !manifests.insert(jws) {
                 return Err(Error::DuplicateManifest);
             }
-            let manifest = ReleaseManifest::parse(&entry.manifest).map_err(|_| Error::Manifest)?;
+            let manifest = ReleaseManifest::from_jws(jws).map_err(|_| Error::Manifest)?;
             let key = metadata
                 .release_keys
                 .iter()
-                .find(|key| key.jwk.kid == manifest.kid())
+                .find(|key| key.jwk.prm.kid.as_deref() == Some(manifest.kid()))
                 .ok_or(Error::Manifest)?;
-            // Verify consistency regardless of status: revocation must not prevent publication.
+            // Verify regardless of key status: revocation must not prevent publication.
             manifest.verify(&key.jwk).map_err(|_| Error::Signature)?;
         }
         Ok(Self(metadata))
@@ -126,15 +127,14 @@ mod tests {
     }
 
     #[test]
-    fn public_document_preserves_exact_manifests_and_all_statuses() {
+    fn public_document_preserves_exact_manifests_and_all_key_statuses() {
         for status in ["active", "retired", "revoked"] {
             let mut value = fixture();
             value["release_keys"][0]["status"] = status.into();
-            value["manifests"][0]["status"] = status.into();
-            let metadata: EngineProviderMetadata = value.to_string().parse().unwrap();
+            let metadata: PublishedMetadata = value.to_string().parse().unwrap();
             assert_eq!(serde_json::to_value(&metadata).unwrap(), value);
             assert_eq!(
-                metadata.0.active_manifests().len(),
+                metadata.0.verified_manifests().len(),
                 usize::from(status == "active")
             );
         }
@@ -144,79 +144,71 @@ mod tests {
     fn revocation_and_key_first_bootstrap_do_not_require_active_releases() {
         let mut value = fixture();
         value["release_keys"][0]["status"] = "revoked".into();
-        let metadata: EngineProviderMetadata = value.to_string().parse().unwrap();
-        assert!(metadata.0.active_manifests().is_empty());
+        let metadata: PublishedMetadata = value.to_string().parse().unwrap();
+        assert!(metadata.0.verified_manifests().is_empty());
         value["manifests"] = json!([]);
-        assert!(value.to_string().parse::<EngineProviderMetadata>().is_ok());
+        assert!(value.to_string().parse::<PublishedMetadata>().is_ok());
         value["release_keys"] = json!([]);
-        assert!(value.to_string().parse::<EngineProviderMetadata>().is_ok());
+        assert!(value.to_string().parse::<PublishedMetadata>().is_ok());
     }
 
     #[test]
     fn rejects_invalid_configuration_and_ambiguous_key_statuses() {
-        use EngineProviderMetadataError as Error;
+        use PublishedMetadataError as Error;
         for (pointer, replacement, error) in [
             ("/version", json!(2), Error::Version),
             ("/provider_id", json!(" "), Error::ProviderId),
             ("/release_keys/0/jwk/kid", json!(""), Error::Key),
             ("/release_keys/0/jwk/crv", json!("P-384"), Error::Key),
-            ("/release_keys/0/jwk/x", json!("invalid"), Error::Key),
-            ("/manifests/0/manifest", json!("invalid"), Error::Manifest),
+            // Coordinates are decoded while parsing, so a non-base64url one is malformed.
+            ("/release_keys/0/jwk/x", json!("invalid"), Error::Malformed),
+            ("/release_keys/0/jwk/x", json!("AAAA"), Error::Key),
+            ("/manifests/0", json!("invalid"), Error::Manifest),
         ] {
             let mut value = fixture();
             *value.pointer_mut(pointer).unwrap() = replacement;
-            assert_eq!(
-                value.to_string().parse::<EngineProviderMetadata>(),
-                Err(error)
-            );
+            assert_eq!(value.to_string().parse::<PublishedMetadata>(), Err(error));
         }
         let mut value = fixture();
         let mut revoked = value["release_keys"][0].clone();
         revoked["status"] = "revoked".into();
         value["release_keys"].as_array_mut().unwrap().push(revoked);
         assert_eq!(
-            value.to_string().parse::<EngineProviderMetadata>(),
+            value.to_string().parse::<PublishedMetadata>(),
             Err(Error::DuplicateKey)
         );
         let mut value = fixture();
-        let mut revoked = value["manifests"][0].clone();
-        revoked["status"] = "revoked".into();
-        value["manifests"].as_array_mut().unwrap().push(revoked);
+        let duplicate = value["manifests"][0].clone();
+        value["manifests"].as_array_mut().unwrap().push(duplicate);
         assert_eq!(
-            value.to_string().parse::<EngineProviderMetadata>(),
+            value.to_string().parse::<PublishedMetadata>(),
             Err(Error::DuplicateManifest)
         );
-        assert_eq!(
-            "{}".parse::<EngineProviderMetadata>(),
-            Err(Error::Malformed)
-        );
+        assert_eq!("{}".parse::<PublishedMetadata>(), Err(Error::Malformed));
         assert_eq!(
             " ".repeat(MAX_ENGINE_METADATA_BYTES + 1)
-                .parse::<EngineProviderMetadata>(),
+                .parse::<PublishedMetadata>(),
             Err(Error::TooLarge)
         );
     }
 
     #[test]
     fn rejects_private_keys_unknown_signers_and_invalid_signatures() {
-        use EngineProviderMetadataError as Error;
+        use PublishedMetadataError as Error;
         let mut value = fixture();
         value["release_keys"][0]["jwk"]["d"] = "PRIVATE-KEY-MUST-NOT-BE-ECHOED".into();
         assert_eq!(
-            value.to_string().parse::<EngineProviderMetadata>(),
+            value.to_string().parse::<PublishedMetadata>(),
             Err(Error::PrivateKey)
         );
         let mut value = fixture();
         value["release_keys"][0]["jwk"]["kid"] = "another-key".into();
         assert_eq!(
-            value.to_string().parse::<EngineProviderMetadata>(),
+            value.to_string().parse::<PublishedMetadata>(),
             Err(Error::Manifest)
         );
         let mut value = fixture();
-        let mut manifest = value["manifests"][0]["manifest"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let mut manifest = value["manifests"][0].as_str().unwrap().to_owned();
         let start = manifest.rfind('.').unwrap() + 1;
         let replacement = if &manifest[start..=start] == "A" {
             "B"
@@ -224,9 +216,9 @@ mod tests {
             "A"
         };
         manifest.replace_range(start..=start, replacement);
-        value["manifests"][0]["manifest"] = manifest.into();
+        value["manifests"][0] = manifest.into();
         assert_eq!(
-            value.to_string().parse::<EngineProviderMetadata>(),
+            value.to_string().parse::<PublishedMetadata>(),
             Err(Error::Signature)
         );
     }
