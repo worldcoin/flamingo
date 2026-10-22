@@ -39,7 +39,7 @@ impl SigningKey {
     ///
     /// Propagates [`TokenError`] if the token cannot be encoded.
     pub fn sign_claims(&self, claims: &FlamingoClaims) -> Result<Vec<u8>, TokenError> {
-        FlamingoToken::sign(*claims, &self.private_key).map(|token| token.to_cwt())
+        FlamingoToken::sign(*claims, &self.private_key)?.to_cwt()
     }
 }
 

@@ -397,11 +397,14 @@ mod tests {
             TaktClaims::new(NOW, exp, exp, *assertion_key.verifying_key(), sec_flags).unwrap();
         let takt = TrustAnchorKeyToken::sign(takt_claims, &trust_anchor_key)
             .unwrap()
-            .to_cwt();
+            .to_cwt()
+            .unwrap();
         let meta = AuthenticatorMeta::new(UserPresence::PresentVerified, 0b01).unwrap();
         let aat_claims =
             AatClaims::new(NOW, AUD, NOW + 300, request.nonce, request.cdh(), meta).unwrap();
-        let aat = AuthenticatorAssertionToken::sign(aat_claims, &assertion_key).to_cwt();
+        let aat = AuthenticatorAssertionToken::sign(aat_claims, &assertion_key)
+            .to_cwt()
+            .unwrap();
         request.aat_inputs = Some(AatInputs {
             trust_anchor_key: trust_anchor_key.public().to_compressed_bytes().unwrap(),
             takt,
