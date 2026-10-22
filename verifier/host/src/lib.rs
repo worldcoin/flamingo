@@ -19,7 +19,6 @@ pub mod server;
 
 pub use app_state::AppState;
 pub use engine_provider::{
-    ENGINE_METADATA_PATH, EngineProviderMetadata, EngineProviderMetadataError,
-    MAX_ENGINE_METADATA_BYTES,
+    ENGINE_METADATA_PATH, MAX_ENGINE_METADATA_BYTES, PublishedMetadata, PublishedMetadataError,
 };
 pub use environment::{Environment, HostConfig};
