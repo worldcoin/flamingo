@@ -256,8 +256,8 @@ mod tests {
     use world_id_primitives::{
         FieldElement,
         authenticator_assertion::{
-            AuthenticatorAssertionToken, AuthenticatorMeta, Platform, SecFlags, SecLevel,
-            TrustAnchorKeyToken, UserPresence,
+            AatClaims, AuthenticatorAssertionToken, AuthenticatorMeta, Platform, SecFlags,
+            SecLevel, TaktClaims, TrustAnchorKeyToken, UserPresence,
         },
     };
 
@@ -391,22 +391,16 @@ mod tests {
         let assertion_key = p256::ecdsa::SigningKey::from_bytes(&[0x09; 32].into()).unwrap();
         let sec_flags =
             SecFlags::new(Platform::Ios.into(), SecLevel::HardwareKey.into(), 2006, 3).unwrap();
-        let takt =
-            TrustAnchorKeyToken::new(NOW, NOW + 3600, *assertion_key.verifying_key(), sec_flags)
-                .unwrap()
-                .sign(&trust_anchor_key)
-                .unwrap();
+        let exp = NOW + 3600;
+        let takt_claims =
+            TaktClaims::new(NOW, exp, exp, *assertion_key.verifying_key(), sec_flags).unwrap();
+        let takt = TrustAnchorKeyToken::sign(takt_claims, &trust_anchor_key)
+            .unwrap()
+            .to_cwt();
         let meta = AuthenticatorMeta::new(UserPresence::PresentVerified, 0b01).unwrap();
-        let aat = AuthenticatorAssertionToken::new(
-            NOW,
-            AUD,
-            NOW + 300,
-            request.nonce,
-            request.cdh(),
-            meta,
-        )
-        .unwrap()
-        .sign(&assertion_key);
+        let aat_claims =
+            AatClaims::new(NOW, AUD, NOW + 300, request.nonce, request.cdh(), meta).unwrap();
+        let aat = AuthenticatorAssertionToken::sign(aat_claims, &assertion_key).to_cwt();
         request.aat_inputs = Some(AatInputs {
             trust_anchor_key: trust_anchor_key.public().to_compressed_bytes().unwrap(),
             takt,
