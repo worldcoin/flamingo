@@ -105,7 +105,7 @@ impl EnclaveState {
             tracing::warn!(%error, "release manifest rejected");
             enclave_types::Error::ReleaseRejected
         })?;
-        if manifest.payload().engine_hash() != Some(self.engine_hash) {
+        if manifest.payload().engine_hash != self.engine_hash {
             tracing::warn!(
                 engine_hash = %hex::encode(self.engine_hash),
                 "release manifest names another Engine bundle"
