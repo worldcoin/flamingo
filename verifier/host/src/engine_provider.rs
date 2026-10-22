@@ -102,7 +102,7 @@ impl FromStr for EngineProviderMetadata {
                 return Err(Error::DuplicateManifest);
             }
             let manifest =
-                ReleaseManifest::from_compact(&entry.manifest).map_err(|_| Error::Manifest)?;
+                ReleaseManifest::from_jws(&entry.manifest).map_err(|_| Error::Manifest)?;
             let key = metadata
                 .release_keys
                 .iter()

@@ -5251,7 +5251,7 @@ dependencies = [
 [[package]]
 name = "world-id-flamingo"
 version = "0.16.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=497b34b04a1ef8c55f0a20294f9b39e8017cea2c#497b34b04a1ef8c55f0a20294f9b39e8017cea2c"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=53f493b88453eab0c179f356325ec54df60a2e47#53f493b88453eab0c179f356325ec54df60a2e47"
 dependencies = [
  "base64 0.22.1",
  "coset",
@@ -5267,7 +5267,7 @@ dependencies = [
 [[package]]
 name = "world-id-primitives"
 version = "0.16.0"
-source = "git+https://github.com/worldcoin/world-id-protocol?rev=497b34b04a1ef8c55f0a20294f9b39e8017cea2c#497b34b04a1ef8c55f0a20294f9b39e8017cea2c"
+source = "git+https://github.com/worldcoin/world-id-protocol?rev=53f493b88453eab0c179f356325ec54df60a2e47#53f493b88453eab0c179f356325ec54df60a2e47"
 dependencies = [
  "alloy-primitives",
  "ark-ff 0.6.0",

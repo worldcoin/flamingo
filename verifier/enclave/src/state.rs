@@ -101,7 +101,7 @@ impl EnclaveState {
     /// Returns [`enclave_types::Error::ReleaseRejected`] for a manifest that is malformed, breaks a
     /// WIP-201 rule, names another bundle, or differs from the one already loaded.
     pub fn load_release(&self, compact: &str) -> Result<(), enclave_types::Error> {
-        let manifest = ReleaseManifest::from_compact(compact).map_err(|error| {
+        let manifest = ReleaseManifest::from_jws(compact).map_err(|error| {
             tracing::warn!(%error, "release manifest rejected");
             enclave_types::Error::ReleaseRejected
         })?;
