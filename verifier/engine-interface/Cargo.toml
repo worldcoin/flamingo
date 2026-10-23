@@ -8,3 +8,6 @@ publish = false
 
 [dependencies]
 thiserror.workspace = true
+
+[dev-dependencies]
+world-id-flamingo.workspace = true
