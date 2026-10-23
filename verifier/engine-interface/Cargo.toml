@@ -1,0 +1,13 @@
+[package]
+name = "flamingo-engine-interface"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+world-id-flamingo.workspace = true
