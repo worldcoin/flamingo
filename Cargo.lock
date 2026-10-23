@@ -1658,6 +1658,7 @@ name = "flamingo-engine-interface"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.20",
+ "world-id-flamingo",
 ]
 
 [[package]]
