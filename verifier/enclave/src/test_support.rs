@@ -7,7 +7,7 @@ use flamingo_verifier_enclave_types as enclave_types;
 
 use crate::{
     attestation::Attestor,
-    biometric_engine::{BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores},
+    biometric_engine::{BiometricEngine, BiometricError},
     state::EnclaveState,
 };
 
@@ -94,22 +94,11 @@ pub struct UnusedBiometricEngine;
 
 #[async_trait::async_trait]
 impl BiometricEngine for UnusedBiometricEngine {
-    async fn deepface(
+    async fn evaluate(
         &self,
         _: Vec<u8>,
-        _: crate::biometric_engine::LiveCapture,
-        _: Vec<u8>,
         _: tokio::time::Instant,
-    ) -> Result<DeepFaceScores, BiometricError> {
-        panic!("biometric engine was called unexpectedly")
-    }
-
-    async fn graybadge(
-        &self,
-        _: crate::biometric_engine::LiveCapture,
-        _: Vec<u8>,
-        _: tokio::time::Instant,
-    ) -> Result<GrayBadgeScores, BiometricError> {
+    ) -> Result<flamingo_verifier_sealed_types::DebugReport, BiometricError> {
         panic!("biometric engine was called unexpectedly")
     }
 
@@ -168,21 +157,21 @@ pub fn manifest_with_slots(engine_hash: [u8; 32], version: &str, slots: &[u64]) 
         "pipelines": [
             {
                 "pipeline": 1,
-                "description": "credential image, live capture, challenge",
+                "description": "opaque test pipeline with larger request limit",
                 "response_slots": slots,
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES,
             },
             {
                 "pipeline": 2,
-                "description": "live capture, challenge",
+                "description": "opaque test pipeline with smaller request limit",
                 "response_slots": slots,
                 "max_request_bytes": TEST_MAX_REQUEST_BYTES / 2,
             },
         ],
         "match_strictness_levels": [
-            { "match_strictness": 1, "description": "lenient" },
-            { "match_strictness": 2, "description": "strict" },
-            { "match_strictness": 3, "description": "strictest" },
+            { "match_strictness": 1, "description": "opaque test policy 1" },
+            { "match_strictness": 2, "description": "opaque test policy 2" },
+            { "match_strictness": 3, "description": "opaque test policy 3" },
         ],
     });
     let header = r#"{"alg":"ES256","kid":"test","typ":"world-id-engine-manifest"}"#;

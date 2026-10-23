@@ -20,6 +20,7 @@ deny = [
     # Inference runs in the provisioned sandbox, never in a public broker artifact.
     { name = "biometric-engines" },
     { name = "biometric-engines-worker" },
+    { name = "flamingo-engine" },
     { name = "flamingo-verifier-worker" },
     { name = "face-engine" },
     { name = "ort" },
@@ -80,8 +81,8 @@ license-files = [{ path = "../../LICENSE", hash = 0x51549d2b }]
 unknown-registry = "deny"
 unknown-git = "deny"
 unused-allowed-source = "allow"
-# The sandbox library, its Minijail, the unreleased WIP-201 wire formats and Pontifex key
-# commitment domains are the only Git dependencies; the Engine protocol comes from crates.io.
+# The sandbox library and Minijail use Git dependencies. Protocol wire formats and Pontifex
+# are published crates; worker IPC is a local workspace crate.
 allow-git = [
     "https://github.com/google/minijail",
     "https://github.com/worldcoin/pontifex",

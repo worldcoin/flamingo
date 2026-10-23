@@ -2,18 +2,13 @@ use std::{sync::Arc, time::Duration};
 
 use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
 use flamingo_verifier_sealed_types::{
-    AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims, MatchResult,
-    Request, expected_claims,
+    AttestedStatement, DebugReport, FailureReason, FlamingoClaims, MatchResult, Request,
+    expected_claims,
 };
 use tokio::time::{Instant, sleep_until};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
 
-use crate::{
-    biometric_engine::BiometricError,
-    blocking,
-    pipeline::{self, Operation},
-    state::EnclaveState,
-};
+use crate::{biometric_engine::BiometricError, blocking, state::EnclaveState};
 
 /// Opens one request, runs it on the loaded release and seals the outcome, released at the
 /// pipeline's next response slot (WIP-201 §3.5.4).
@@ -88,8 +83,7 @@ pub async fn handler(
 /// A request that passed every check before inference.
 struct Prepared {
     claims: FlamingoClaims,
-    threshold: f64,
-    operation: Operation,
+    payload: Vec<u8>,
 }
 
 /// Checks the request against the release, verifies its AAT and records its (`aud`, `nonce`).
@@ -137,16 +131,14 @@ fn prepare(
         {
             return Err(FailureReason::UnsupportedMatchStrictness);
         }
-        let threshold = pipeline::threshold(payload.match_strictness)?;
         // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
         let claims = expected_claims(&request, &payload)?;
-        let operation = pipeline::operation(payload)?;
-        // Reserve last; a Busy result releases it because inference never started.
+        // Reserve before dispatch, including requests the Engine will reject.
+        // A Busy result releases the reservation because inference never started.
         state.replay().reserve(request.aud, request.nonce)?;
         Ok(Prepared {
             claims,
-            threshold,
-            operation,
+            payload: request.payload,
         })
     })();
     (slots, checked)
@@ -157,38 +149,8 @@ async fn run(
     prepared: Prepared,
     deadline: Instant,
 ) -> Result<MatchResult, enclave_types::Error> {
-    let scores = match prepared.operation {
-        Operation::DeepFace {
-            credential,
-            live,
-            challenge,
-        } => state
-            .engine()
-            .deepface(credential, live, challenge, deadline)
-            .await
-            .map(|scores| {
-                (
-                    vec![
-                        (scores.credential_live, ComparisonRole::OrbSelfie),
-                        (scores.credential_challenge, ComparisonRole::OrbChallenge),
-                        (scores.live_challenge, ComparisonRole::SelfieChallenge),
-                    ],
-                    scores.debug_report,
-                )
-            }),
-        Operation::GrayBadge { live, challenge } => state
-            .engine()
-            .graybadge(live, challenge, deadline)
-            .await
-            .map(|scores| {
-                (
-                    vec![(scores.live_challenge, ComparisonRole::SelfieChallenge)],
-                    scores.debug_report,
-                )
-            }),
-    };
-    let (scores, debug_report) = match scores {
-        Ok(scores) => scores,
+    let debug_report = match state.engine().evaluate(prepared.payload, deadline).await {
+        Ok(report) => report,
         Err(BiometricError::Busy) => {
             state
                 .replay()
@@ -201,17 +163,6 @@ async fn run(
         }
         Err(error) => return error.into_result(),
     };
-
-    // The token carries no score; every compared pair must clear the strictness level.
-    for (score, role) in scores {
-        if let Err(reason) = pipeline::check_score(score, prepared.threshold, role) {
-            return BiometricError::AnalysisRejected {
-                reason,
-                debug_report,
-            }
-            .into_result();
-        }
-    }
 
     sign(state, &prepared.claims, debug_report).await
 }
@@ -243,8 +194,7 @@ async fn sign(
 mod tests {
     use super::*;
     use crate::{
-        biometric_engine::{BiometricEngine, DeepFaceScores, GrayBadgeScores, LiveCapture},
-        pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE},
+        biometric_engine::{BiometricEngine, BiometricError},
         test_support::{
             TEST_MAX_REQUEST_BYTES, UnusedBiometricEngine, loaded_state, loaded_state_with_slots,
         },
@@ -262,11 +212,15 @@ mod tests {
         },
     };
 
+    // Mock Engine policies exercise forwarding; these are not biometric pipeline definitions.
+    const PIPELINE_FIRST: u16 = 1;
+    const PIPELINE_SECOND: u16 = 2;
     const AUD: u64 = 1_928_118;
     const NOW: u32 = 1_783_446_000;
 
     struct Engine {
-        third: f32,
+        rejection: Option<FailureReason>,
+        received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         delay: Duration,
         calls: Arc<AtomicUsize>,
         busy: std::sync::atomic::AtomicBool,
@@ -274,9 +228,10 @@ mod tests {
         queue: Arc<tokio::sync::Mutex<()>>,
     }
 
-    fn engine(third: f32) -> Engine {
+    fn engine(rejection: Option<FailureReason>) -> Engine {
         Engine {
-            third,
+            rejection,
+            received: Arc::default(),
             delay: Duration::ZERO,
             calls: Arc::default(),
             busy: std::sync::atomic::AtomicBool::new(false),
@@ -287,13 +242,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BiometricEngine for Engine {
-        async fn deepface(
+        async fn evaluate(
             &self,
-            credential: Vec<u8>,
-            live: LiveCapture,
-            challenge: Vec<u8>,
+            payload: Vec<u8>,
             deadline: Instant,
-        ) -> Result<DeepFaceScores, BiometricError> {
+        ) -> Result<DebugReport, BiometricError> {
             if self.busy.swap(false, Ordering::SeqCst) {
                 return Err(BiometricError::Busy);
             }
@@ -301,43 +254,24 @@ mod tests {
                 .await
                 .map_err(|_| BiometricError::Busy)?;
             self.calls.fetch_add(1, Ordering::SeqCst);
-            tokio::time::timeout_at(deadline, tokio::time::sleep(self.delay))
+            // The queue test pairs a slow first pipeline with a fast second pipeline.
+            let delay = if Payload::decode(&payload).unwrap().pipeline == PIPELINE_FIRST {
+                self.delay
+            } else {
+                Duration::ZERO
+            };
+            self.received.lock().unwrap().push(payload);
+            tokio::time::timeout_at(deadline, tokio::time::sleep(delay))
                 .await
                 .map_err(|_| BiometricError::EngineTimeout)?;
-            assert_eq!(&credential[..], b"orb");
-            let LiveCapture::Vanilla(image) = live else {
-                panic!("expected a vanilla capture")
-            };
-            assert_eq!(&image[..], b"live");
-            assert_eq!(&challenge[..], b"challenge");
-            Ok(DeepFaceScores {
-                credential_live: f64::from(0.99f32),
-                credential_challenge: f64::from(0.99f32),
-                live_challenge: f64::from(self.third),
-                debug_report: Some("{\"engine\":\"test\"}".to_owned()).into(),
-            })
-        }
-
-        async fn graybadge(
-            &self,
-            live: LiveCapture,
-            _: Vec<u8>,
-            deadline: Instant,
-        ) -> Result<GrayBadgeScores, BiometricError> {
-            if self.busy.swap(false, Ordering::SeqCst) {
-                return Err(BiometricError::Busy);
+            let debug_report = Some("{\"engine\":\"test\"}".to_owned()).into();
+            match self.rejection {
+                None => Ok(debug_report),
+                Some(reason) => Err(BiometricError::AnalysisRejected {
+                    reason,
+                    debug_report,
+                }),
             }
-            let _guard = tokio::time::timeout_at(deadline, self.queue.lock())
-                .await
-                .map_err(|_| BiometricError::Busy)?;
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let LiveCapture::LightGuard { .. } = live else {
-                panic!("expected a LightGuard capture")
-            };
-            Ok(GrayBadgeScores {
-                live_challenge: f64::from(self.third),
-                debug_report: Some("{\"engine\":\"test\"}".to_owned()).into(),
-            })
         }
 
         fn terminate(&self) {
@@ -352,9 +286,9 @@ mod tests {
         }
     }
 
-    fn deep_face(state: &EnclaveState) -> Payload {
+    fn first_pipeline_payload(state: &EnclaveState) -> Payload {
         Payload {
-            pipeline: PIPELINE_DEEPFACE,
+            pipeline: PIPELINE_FIRST,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![
@@ -367,15 +301,15 @@ mod tests {
         }
     }
 
-    fn gray_badge(state: &EnclaveState) -> Payload {
+    fn second_pipeline_payload(state: &EnclaveState) -> Payload {
         Payload {
-            pipeline: PIPELINE_GRAYBADGE,
+            pipeline: PIPELINE_SECOND,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![
-                entry(b"lit", b"illuminated"),
+                entry(b"selected", b"opaque-selected"),
                 entry(b"challenge", b""),
-                entry(b"dark", b"unilluminated"),
+                entry(b"partner", b"opaque-partner"),
             ],
             compare: vec![0, 1],
             release_hash: state.release().unwrap().release_hash(),
@@ -462,11 +396,11 @@ mod tests {
 
     #[tokio::test]
     async fn busy_request_can_retry_without_consuming_its_nonce() {
-        let passing = engine(0.95);
+        let passing = engine(None);
         passing.busy.store(true, Ordering::SeqCst);
         let calls = Arc::clone(&passing.calls);
         let state = loaded_state(passing);
-        let request = request(&deep_face(&state), 77);
+        let request = request(&first_pipeline_payload(&state), 77);
         let consumer = ChannelConsumer::from_unverified_public_key(
             CHANNEL_DOMAIN,
             &state.channel().public_key(),
@@ -494,10 +428,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_fresh_duplicates_run_once() {
-        let passing = engine(0.95);
+        let passing = engine(None);
         let calls = Arc::clone(&passing.calls);
         let state = loaded_state(passing);
-        let request = request(&deep_face(&state), 77);
+        let request = request(&first_pipeline_payload(&state), 77);
         let (a, b) = tokio::join!(
             exchange(Arc::clone(&state), &request),
             exchange(Arc::clone(&state), &request)
@@ -521,10 +455,16 @@ mod tests {
 
     #[tokio::test]
     async fn signs_claims_bound_to_the_request() {
-        let state = loaded_state(engine(0.95));
-        for (nonce, payload) in [(1, deep_face(&state)), (2, gray_badge(&state))] {
+        let mock = engine(None);
+        let received = Arc::clone(&mock.received);
+        let state = loaded_state(mock);
+        for (nonce, payload) in [
+            (1, first_pipeline_payload(&state)),
+            (2, second_pipeline_payload(&state)),
+        ] {
             let request = request(&payload, nonce);
             let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
+            assert_eq!(received.lock().unwrap().last().unwrap(), &request.payload);
             assert_eq!(claims, expected_claims(&request, &payload).unwrap());
             assert_eq!(
                 claims.engine_config_hash,
@@ -536,8 +476,8 @@ mod tests {
 
     #[tokio::test]
     async fn signs_the_verified_aat_values() {
-        let state = loaded_state(engine(0.95));
-        let request = with_aat(request(&deep_face(&state), 1));
+        let state = loaded_state(engine(None));
+        let request = with_aat(request(&first_pipeline_payload(&state), 1));
         let aat = request.verify_aat().unwrap();
         let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
         assert_eq!(claims.aat, aat);
@@ -547,8 +487,8 @@ mod tests {
     #[tokio::test]
     async fn an_aat_for_another_payload_rejects_before_inference() {
         let state = loaded_state(UnusedBiometricEngine);
-        let mut request = with_aat(request(&deep_face(&state), 1));
-        let mut other = deep_face(&state);
+        let mut request = with_aat(request(&first_pipeline_payload(&state), 1));
+        let mut other = first_pipeline_payload(&state);
         other.match_strictness = 3;
         request.payload = other.encode().unwrap();
         assert_eq!(
@@ -558,32 +498,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_comparison_must_clear_the_strictness_level() {
-        let state = loaded_state(engine(0.89));
-        assert_eq!(
-            exchange(Arc::clone(&state), &request(&deep_face(&state), 1)).await,
-            MatchResult::Failed {
-                reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
-                debug_report: Some("{\"engine\":\"test\"}".to_owned()).into(),
-            }
-        );
-
-        let state = loaded_state(engine(0.92));
-        let mut strict = deep_face(&state);
-        strict.match_strictness = 3;
-        assert!(matches!(
-            exchange(state, &request(&strict, 1)).await,
-            MatchResult::Failed {
-                reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
-                ..
-            }
-        ));
+    async fn worker_rejections_never_produce_a_token() {
+        for reason in [
+            FailureReason::MatchRejected,
+            FailureReason::BiometricRejected,
+            FailureReason::UnsupportedPipeline,
+            FailureReason::UnsupportedMatchStrictness,
+            FailureReason::MalformedInputs,
+        ] {
+            let state = loaded_state(engine(Some(reason)));
+            assert_eq!(
+                exchange(
+                    Arc::clone(&state),
+                    &request(&first_pipeline_payload(&state), 1)
+                )
+                .await,
+                MatchResult::Failed {
+                    reason,
+                    debug_report: Some("{\"engine\":\"test\"}".to_owned()).into()
+                }
+            );
+        }
     }
 
     #[tokio::test]
     async fn rejects_before_inference() {
         type Change = (fn(&mut Payload), FailureReason);
-        let changes: [Change; 4] = [
+        let changes: [Change; 3] = [
             (
                 |p| p.release_hash = [0; 32],
                 FailureReason::UnsupportedRelease,
@@ -593,14 +534,10 @@ mod tests {
                 FailureReason::UnsupportedMatchStrictness,
             ),
             (|p| p.pipeline = 9, FailureReason::UnsupportedPipeline),
-            (
-                |p| p.compare = vec![0, 1],
-                FailureReason::UnsupportedPipeline,
-            ),
         ];
         for (change, reason) in changes {
             let state = loaded_state(UnusedBiometricEngine);
-            let mut payload = deep_face(&state);
+            let mut payload = first_pipeline_payload(&state);
             change(&mut payload);
             assert_eq!(
                 exchange(state, &request(&payload, 1)).await,
@@ -619,7 +556,7 @@ mod tests {
     async fn enforces_the_pipeline_request_limit_after_opening() {
         let state = loaded_state(UnusedBiometricEngine);
         // Pipeline 2 allows half of pipeline 1, so this passes the pre-opening check only.
-        let mut payload = gray_badge(&state);
+        let mut payload = second_pipeline_payload(&state);
         payload.entries[1].data = vec![0; usize::try_from(TEST_MAX_REQUEST_BYTES / 2).unwrap()];
         assert_eq!(
             exchange(state, &request(&payload, 1)).await,
@@ -654,15 +591,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_processed_request_never_runs_again() {
-        let failing = engine(0.5);
+        let failing = engine(Some(FailureReason::MatchRejected));
         let calls = Arc::clone(&failing.calls);
         let state = loaded_state(failing);
-        let request = request(&deep_face(&state), 1);
+        let request = request(&first_pipeline_payload(&state), 1);
         // A failed comparison still consumes the nonce.
         assert!(matches!(
             exchange(Arc::clone(&state), &request).await,
             MatchResult::Failed {
-                reason: FailureReason::MatchBelowThreshold(_),
+                reason: FailureReason::MatchRejected,
                 ..
             }
         ));
@@ -675,17 +612,17 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         // Another `aud` or `nonce` is a new request; a new boot starts a new set.
-        let payload = deep_face(&state);
+        let payload = first_pipeline_payload(&state);
         let other_aud = Request::new(7u64.into(), 1u64.into(), &payload, None).unwrap();
         assert!(matches!(
             exchange(Arc::clone(&state), &other_aud).await,
             MatchResult::Failed {
-                reason: FailureReason::MatchBelowThreshold(_),
+                reason: FailureReason::MatchRejected,
                 ..
             }
         ));
         assert!(matches!(
-            exchange(loaded_state(engine(0.95)), &request).await,
+            exchange(loaded_state(engine(None)), &request).await,
             MatchResult::Success { .. }
         ));
     }
@@ -702,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn an_early_rejection_waits_for_the_first_slot() {
         let state = loaded_state_with_slots(UnusedBiometricEngine, SLOTS);
-        let mut payload = deep_face(&state);
+        let mut payload = first_pipeline_payload(&state);
         payload.match_strictness = 4;
         let (result, elapsed) = timed(state, &request(&payload, 1)).await;
         assert_eq!(result, rejected(FailureReason::UnsupportedMatchStrictness));
@@ -725,10 +662,14 @@ mod tests {
     async fn a_result_is_released_at_the_next_slot() {
         let slow = Engine {
             delay: Duration::from_millis(500),
-            ..engine(0.95)
+            ..engine(None)
         };
         let state = loaded_state_with_slots(slow, SLOTS);
-        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        let (result, elapsed) = timed(
+            Arc::clone(&state),
+            &request(&first_pipeline_payload(&state), 1),
+        )
+        .await;
         assert!(matches!(result, MatchResult::Success { .. }));
         assert!(elapsed >= Duration::from_millis(800), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(1600), "{elapsed:?}");
@@ -741,7 +682,7 @@ mod tests {
 
         let slow = Engine {
             delay: Duration::from_millis(800),
-            ..engine(0.95)
+            ..engine(None)
         };
         let calls = Arc::clone(&slow.calls);
         let terminated = Arc::clone(&slow.terminated);
@@ -763,7 +704,7 @@ mod tests {
                 parts[2]
             ))
             .unwrap();
-        let first = request(&deep_face(&state), 1);
+        let first = request(&first_pipeline_payload(&state), 1);
         let running = tokio::spawn({
             let state = Arc::clone(&state);
             async move { exchange(state, &first).await }
@@ -775,7 +716,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let queued = request(&gray_badge(&state), 2);
+        let queued = request(&second_pipeline_payload(&state), 2);
         let consumer = ChannelConsumer::from_unverified_public_key(
             CHANNEL_DOMAIN,
             &state.channel().public_key(),
@@ -805,11 +746,15 @@ mod tests {
     async fn an_engine_past_the_last_slot_fails_and_is_terminated() {
         let stuck = Engine {
             delay: Duration::from_secs(5),
-            ..engine(0.95)
+            ..engine(None)
         };
         let terminated = Arc::clone(&stuck.terminated);
         let state = loaded_state_with_slots(stuck, SLOTS);
-        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        let (result, elapsed) = timed(
+            Arc::clone(&state),
+            &request(&first_pipeline_payload(&state), 1),
+        )
+        .await;
         assert_eq!(result, rejected(FailureReason::EngineTimeout));
         assert!(elapsed >= Duration::from_millis(1600), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");

@@ -14,61 +14,11 @@ use tokio::{sync::Mutex, time::timeout_at};
 #[cfg(any(target_os = "linux", test))]
 use crate::blocking;
 
-/// Maximum encoded bytes per image, derived from the public API.
-pub const MAX_IMAGE_BYTES: usize = flamingo_verifier_api_types::MAX_ENTRY_BYTES;
-/// API image budget plus protobuf envelope overhead.
-pub const MAX_REQUEST_BYTES: usize = flamingo_verifier_api_types::MAX_TOTAL_ENTRY_BYTES + 1024;
 #[cfg(any(target_os = "linux", test))]
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Delay between an Engine overrun and the enclave exit that resets the worker.
 #[cfg(target_os = "linux")]
 const RESET_GRACE: Duration = Duration::from_secs(2);
-
-/// Which `LightGuard` frame is compared with the other images.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LightGuardMatchingFrame {
-    /// The illuminated frame.
-    Illuminated,
-    /// The unilluminated frame.
-    Unilluminated,
-}
-
-/// The live capture as the Engine reads it.
-pub enum LiveCapture {
-    /// One selfie.
-    Vanilla(Vec<u8>),
-    /// An illuminated and an unilluminated frame.
-    LightGuard {
-        /// The illuminated frame.
-        illuminated: Vec<u8>,
-        /// The unilluminated frame.
-        unilluminated: Vec<u8>,
-        /// The frame compared with the other images.
-        matching_frame: LightGuardMatchingFrame,
-    },
-}
-
-/// Normalized inference scores; policy and signed claims belong to the operation.
-#[derive(Clone, Debug)]
-pub struct DeepFaceScores {
-    /// Credential versus live image.
-    pub credential_live: f64,
-    /// Credential versus challenge image.
-    pub credential_challenge: f64,
-    /// Live versus challenge image.
-    pub live_challenge: f64,
-    /// Original bounded worker diagnostics.
-    pub debug_report: DebugReport,
-}
-
-/// Normalized credential-free inference score.
-#[derive(Debug)]
-pub struct GrayBadgeScores {
-    /// Live versus challenge image.
-    pub live_challenge: f64,
-    /// Original bounded worker diagnostics.
-    pub debug_report: DebugReport,
-}
 
 /// Separates image rejections from unavailable infrastructure.
 #[derive(Debug, PartialEq, Eq)]
@@ -121,31 +71,20 @@ impl BiometricError {
     }
 }
 
-/// Image-only operations; PCP verification, policy and signing stay in the enclave operations.
+/// Executes canonical Payload bytes; the worker owns pipeline and strictness policy.
 ///
-/// Implementations must respect the absolute response deadline: queue expiry returns `Busy`,
+/// Implementations respect the absolute response deadline: queue expiry returns `Busy`,
 /// while expiry after starting inference returns `EngineTimeout`.
 #[async_trait]
 pub trait BiometricEngine: Send + Sync {
-    /// Compares the credential, live and challenge images.
+    /// Returns a bounded report only after the Engine declares Pass.
     /// # Errors
-    /// Returns a structured image rejection or infrastructure failure.
-    async fn deepface(
+    /// Returns a structured rejection or infrastructure failure.
+    async fn evaluate(
         &self,
-        credential: Vec<u8>,
-        live: LiveCapture,
-        challenge: Vec<u8>,
+        payload: Vec<u8>,
         deadline: Instant,
-    ) -> Result<DeepFaceScores, BiometricError>;
-    /// Compares live and challenge images.
-    /// # Errors
-    /// Returns a structured image rejection or infrastructure failure.
-    async fn graybadge(
-        &self,
-        live: LiveCapture,
-        challenge: Vec<u8>,
-        deadline: Instant,
-    ) -> Result<GrayBadgeScores, BiometricError>;
+    ) -> Result<DebugReport, BiometricError>;
     /// Checks liveness without waiting for an active inference operation.
     fn check_health(&self) {}
     /// Terminates an Engine whose request overran its last response slot, so no state from that
@@ -189,33 +128,14 @@ impl<W: Send + 'static> Executor<W> {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "preserve the existing f32 cosine normalization"
-)]
-fn normalized(score: f64) -> f64 {
-    f64::from(f32::midpoint(1.0, score as f32))
-}
-
 #[cfg(target_os = "linux")]
 pub use sandboxed::SandboxBiometricEngine;
 
 #[cfg(target_os = "linux")]
 mod sandboxed {
-    use super::{
-        BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores, normalized,
-    };
-    use super::{Instant, LiveCapture};
+    use super::{BiometricEngine, BiometricError, DebugReport, Executor, Instant};
     use async_trait::async_trait;
-    use biometric_engines_protocol::{
-        face::{
-            DeepFaceRequest, FaceImage, GrayBadgeRequest, LightGuard, LightGuardMatchingFrame,
-            face_image::Source,
-        },
-        request::Operation,
-        response::Outcome,
-    };
+    use flamingo_engine_interface::ErrorCode;
     use flamingo_verifier_sandbox_client::{Rejection, SandboxClient};
     use flamingo_verifier_sealed_types::FailureReason;
 
@@ -232,125 +152,41 @@ mod sandboxed {
                 executor: Executor::new(worker),
             }
         }
-
-        /// Fatal worker failures exit the enclave inside the client and never return here.
-        async fn run(
-            &self,
-            operation: Operation,
-            deadline: Instant,
-        ) -> Result<Outcome, BiometricError> {
-            self.executor
-                .run(deadline, move |worker| worker.evaluate(operation))
-                .await?
-                .map_err(|rejection| match rejection {
-                    Rejection::AnalysisFailed(failure) => BiometricError::from(failure),
-                    Rejection::InvalidImages => {
-                        BiometricError::Rejected(FailureReason::MalformedInputs)
-                    }
-                })
-        }
-    }
-
-    fn live_source(capture: LiveCapture) -> Source {
-        match capture {
-            LiveCapture::Vanilla(image) => Source::VanillaSelfie(image),
-            LiveCapture::LightGuard {
-                illuminated,
-                unilluminated,
-                matching_frame,
-            } => Source::LightGuard(LightGuard {
-                illuminated,
-                unilluminated,
-                matching_frame: match matching_frame {
-                    super::LightGuardMatchingFrame::Illuminated => {
-                        LightGuardMatchingFrame::Illuminated as i32
-                    }
-                    super::LightGuardMatchingFrame::Unilluminated => {
-                        LightGuardMatchingFrame::Unilluminated as i32
-                    }
-                },
-            }),
-        }
-    }
-
-    const fn image(source: Source) -> FaceImage {
-        FaceImage {
-            source: Some(source),
-        }
     }
 
     #[async_trait]
     impl BiometricEngine for SandboxBiometricEngine {
-        async fn deepface(
+        async fn evaluate(
             &self,
-            credential: Vec<u8>,
-            live: LiveCapture,
-            challenge: Vec<u8>,
+            payload: Vec<u8>,
             deadline: Instant,
-        ) -> Result<DeepFaceScores, BiometricError> {
-            let Outcome::DeepFace(scores) = self
-                .run(
-                    Operation::DeepFace(DeepFaceRequest {
-                        credential: Some(image(Source::Orb(credential))),
-                        live: Some(image(live_source(live))),
-                        challenge: Some(image(Source::Rtms(challenge))),
-                    }),
-                    deadline,
-                )
+        ) -> Result<DebugReport, BiometricError> {
+            self.executor
+                .run(deadline, move |worker| worker.evaluate(&payload))
                 .await?
-            else {
-                unreachable!("client validates response operation")
-            };
-            Ok(DeepFaceScores {
-                credential_live: normalized(
-                    scores
-                        .similarity_credential_live
-                        .expect("client validates required scores"),
-                ),
-                credential_challenge: normalized(
-                    scores
-                        .similarity_credential_challenge
-                        .expect("client validates required scores"),
-                ),
-                live_challenge: normalized(
-                    scores
-                        .similarity_live_challenge
-                        .expect("client validates required scores"),
-                ),
-                debug_report: scores.debug_report.into(),
-            })
+                .map(DebugReport::from)
+                .map_err(|rejection| match rejection {
+                    Rejection::InvalidPayload => {
+                        BiometricError::Rejected(FailureReason::MalformedInputs)
+                    }
+                    Rejection::Engine { code, debug_report } => BiometricError::AnalysisRejected {
+                        reason: match code {
+                            ErrorCode::InvalidPayload => FailureReason::MalformedInputs,
+                            ErrorCode::UnsupportedPipeline => FailureReason::UnsupportedPipeline,
+                            ErrorCode::UnsupportedMatchStrictness => {
+                                FailureReason::UnsupportedMatchStrictness
+                            }
+                            ErrorCode::BiometricRejected => FailureReason::BiometricRejected,
+                            ErrorCode::MatchRejected => FailureReason::MatchRejected,
+                            ErrorCode::Internal => FailureReason::Internal,
+                        },
+                        debug_report: debug_report.into(),
+                    },
+                })
         }
 
-        async fn graybadge(
-            &self,
-            live: LiveCapture,
-            challenge: Vec<u8>,
-            deadline: Instant,
-        ) -> Result<GrayBadgeScores, BiometricError> {
-            let Outcome::GrayBadge(scores) = self
-                .run(
-                    Operation::GrayBadge(GrayBadgeRequest {
-                        live: Some(image(live_source(live))),
-                        challenge: Some(image(Source::Rtms(challenge))),
-                    }),
-                    deadline,
-                )
-                .await?
-            else {
-                unreachable!("client validates response operation")
-            };
-            Ok(GrayBadgeScores {
-                live_challenge: normalized(
-                    scores
-                        .similarity_live_challenge
-                        .expect("client validates required score"),
-                ),
-                debug_report: scores.debug_report.into(),
-            })
-        }
-
-        // The overrunning request still holds the worker, so only a new boot resets it. The grace
-        // period lets the sealed failure reach the client first.
+        // The overrunning request holds the worker. A new boot resets it; allow its sealed
+        // failure to reach the client before exiting.
         fn terminate(&self) {
             tokio::spawn(async {
                 tokio::time::sleep(super::RESET_GRACE).await;
@@ -362,43 +198,9 @@ mod sandboxed {
             });
         }
 
-        // An async mutex, so tabernaculum's std-mutex `check_alive_if_idle` does not apply.
         fn check_health(&self) {
             if let Ok(worker) = self.executor.worker.try_lock() {
                 worker.check_alive();
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod capture_tests {
-        use super::*;
-
-        #[test]
-        fn light_guard_preserves_both_frames_and_the_selected_matching_frame() {
-            for (matching_frame, expected) in [
-                (
-                    super::super::LightGuardMatchingFrame::Illuminated,
-                    LightGuardMatchingFrame::Illuminated,
-                ),
-                (
-                    super::super::LightGuardMatchingFrame::Unilluminated,
-                    LightGuardMatchingFrame::Unilluminated,
-                ),
-            ] {
-                let illuminated = vec![1, 2, 3];
-                let pointer = illuminated.as_ptr();
-                let Source::LightGuard(pair) = live_source(LiveCapture::LightGuard {
-                    illuminated,
-                    unilluminated: vec![4, 5],
-                    matching_frame,
-                }) else {
-                    panic!("must preserve LightGuard source")
-                };
-                assert_eq!(pair.illuminated, vec![1, 2, 3]);
-                assert_eq!(pair.illuminated.as_ptr(), pointer);
-                assert_eq!(pair.unilluminated, vec![4, 5]);
-                assert_eq!(pair.matching_frame, expected as i32);
             }
         }
     }
@@ -428,18 +230,6 @@ mod tests {
                 debug_report: DebugReport::NotProduced
             })
         );
-    }
-
-    #[test]
-    fn preserves_existing_score_normalization() {
-        for (raw, expected) in [
-            (-1.0, 0.0),
-            (0.0, 0.5),
-            (1.0, 1.0),
-            (0.8, f64::from(0.9f32)),
-        ] {
-            assert_eq!(normalized(raw).to_bits(), expected.to_bits());
-        }
     }
 
     #[tokio::test]

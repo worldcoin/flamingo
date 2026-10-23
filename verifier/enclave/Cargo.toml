@@ -17,7 +17,7 @@ flamingo-verifier-api-types.workspace = true
 flamingo-verifier-enclave-types.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 eddsa-babyjubjub.workspace = true
-biometric-engines-protocol.workspace = true
+flamingo-engine-interface.workspace = true
 hex.workspace = true
 pontifex = { workspace = true, features = ["nsm", "server", "channel"] }
 rand.workspace = true

@@ -96,6 +96,10 @@ pub enum FailureReason {
         /// Byte limit, when the constraint is a size limit.
         limit_bytes: Option<u64>,
     },
+    /// The Engine rejected image processing or fraud validation.
+    BiometricRejected,
+    /// The Engine rejected the match under its strictness policy.
+    MatchRejected,
     /// A named comparison did not meet policy.
     MatchBelowThreshold(ComparisonRole),
     /// Image analysis rejection with semantic location.

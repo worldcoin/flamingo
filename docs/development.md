@@ -2,7 +2,7 @@
 
 ## Setup and checks
 
-Use the Rust toolchain in [`rust-toolchain.toml`](../rust-toolchain.toml). Git credentials must allow access to the private `worldcoin/biometric-engines` dependency. The Nix development shell supplies Rust, Clang, pkg-config, jq, and Linux sandbox dependencies:
+Use the Rust toolchain in [`rust-toolchain.toml`](../rust-toolchain.toml). The Nix development shell supplies Rust, Clang, pkg-config, jq, and Linux sandbox dependencies:
 
 ```bash
 nix develop
@@ -16,16 +16,16 @@ Install `cargo-deny` separately. Minijail process tests live in [tabernaculum](h
 
 ## Build images
 
-Build on x86_64 Linux with Nix, jq, and curl. Nitro hardware is only needed to run the enclave. Git must have access to `biometric-engines`; set `HUGGING_FACE_TOKEN` to fetch private models that are not already in the Nix store.
+Build on x86_64 Linux with Nix, jq, and curl. Nitro hardware is only needed to run the enclave. The public verifier build excludes the biometric implementation and models; those are packaged separately in biometric-engines and sideloaded by the provisioner.
 
 ```bash
 scripts/build-enclaves.sh --workload verifier
 jq . target/eif/verifier-pcr.json
 ```
 
-The script builds a reproducible OCI image and writes `target/eif/verifier-enclave.eif` and `target/eif/verifier-pcr.json`. Both images use the same root filesystem. Expect about 90 minutes for a cold build.
+The script builds a reproducible OCI image and writes `target/eif/verifier-enclave.eif` and `target/eif/verifier-pcr.json`. Both images use the same root filesystem.
 
-To build and inspect only the OCI image after fetching the models:
+To build and inspect only the public OCI image:
 
 ```bash
 nix build --no-update-lock-file .#verifier-oci
@@ -59,7 +59,7 @@ docker version
 
 Use the Rust provisioner in [flamingo-deploy](https://github.com/worldcoin/flamingo-deploy)
 to launch the EIF, sideload its worker, load the matching WIP-201 manifest, and check enclave
-health before publishing readiness. The provisioner receives `RELEASE_MANIFEST_PATH`; the API
+health before publishing readiness. The provisioner receives the compact JWS as `RELEASE_MANIFEST`; the API
 host can start independently. Use a normal enclave, since the client rejects debug measurements.
 Set `ENCLAVE_CID` to the provisioned enclave's CID; its vsock port is `1000`.
 
@@ -95,13 +95,22 @@ curl --fail http://localhost:8000/ready
 
 The enclave binary, `verifier-enclave`, requires the Nitro Secure Module and its hardware RNG. Run it through the EIF.
 
-Create `client.json` using the [client configuration](api.md#client-configuration), then supply the three images:
+Create `client.json` using the [client configuration](api.md#client-configuration), pinning PCR0–2 from the verified server release. Obtain the selected engine release's `world-id-engine.json` from the signing workflow and independently enroll its provider JWK as `trusted-provider-dev.jwk.json`. Check that public key against the trusted KMS/provider identity; accepting a key merely because it accompanies a manifest does not establish trust. Then supply the reviewed release hash and the three images:
 
 ```bash
-VERIFIER_CONFIG=./client.json cargo run --locked --bin flamingo-verifier-e2e -- \
-  credential.png live.png challenge.png
+VERIFIER_CONFIG=./client.json \
+PROVIDER_METADATA=./signed/world-id-engine.json \
+PROVIDER_KEY=./trusted-provider-dev.jwk.json \
+EXPECTED_RELEASE_HASH="<reviewed-64-character-release-hash>" \
+  cargo run --locked --bin flamingo-verifier-e2e -- credential.png live.png challenge.png
 ```
 
-The harness opens the WebSocket session — one assignment text frame, then one sealed match binary frame over the same socket — submits an encrypted DeepFace request, and verifies the Flamingo Token and its claims. It uses the first Engine the host serves and match strictness `2`; `MATCH_STRICTNESS` overrides it.
+For cluster testing, an authorized `kubectl -n flamingo-verifier port-forward deployment/flamingo-verifier 8000:8000` exposes the internal API locally. Set `host_url` to `http://127.0.0.1:8000`; the client still verifies Nitro attestation and encrypts the biometric request. This tests the enclave path, not the external attested-proxy/gateway admission layer, whose authenticated handshake needs a separate client test.
 
-`MATCH_OPERATION=gray_badge` runs the credential-free operation instead and takes only `<live-image> <challenge-image>`. `LIGHT_GUARD_UNILLUMINATED_IMAGE` adds the second frame and `LIGHT_GUARD_MATCHING_FRAME` selects `illuminated` (default) or `unilluminated`.
+The harness verifies the selected manifest under the independently trusted, active provider key, requires that exact release to be offered by the host, and rejects measurement bypass. It opens one WebSocket session, verifies the Nitro assignment against the configured PCR0–2, seals the DeepFace request to the attested channel key, and verifies the returned Flamingo Token, signing-key attestation and claims. The prototype release defines only match strictness `2`, which is the harness default. Any override must be declared by the selected manifest.
+
+For a known rejection fixture, set `EXPECTED_OUTCOME=reject` and an exact serialized `EXPECTED_FAILURE`, for example `EXPECTED_FAILURE='"biometric_rejected"'`. Only that sealed rejection counts as success; transport, attestation, signature, internal and timeout failures fail the run. The default outcome is a successful signed match. Also verify that substituting an untrusted provider key, another release hash or incorrect PCRs fails before a successful match. No debug report or biometric data is printed.
+
+`MATCH_OPERATION=gray_badge` runs the credential-free operation and takes only `<live-image> <challenge-image>`. Without `LIGHT_GUARD_UNILLUMINATED_IMAGE`, the harness selects `deepface_vanilla` (1) or `graybadge_vanilla` (2). Setting that variable to the partner image path selects `deepface_lightguard` (3) or `graybadge_lightguard` (4); the positional `<live-image>` is then the illuminated image. `LIGHT_GUARD_MATCHING_FRAME=illuminated` (default) compares that image, while `unilluminated` compares the partner instead. Both images remain in the payload with explicit frame metadata, and the other image is the sole uncompared entry. A matching-frame setting without the partner path is rejected.
+
+The optional `qualify-worker` example uses the same LightGuard variables. Run it with `RUNTIME_ROOT ADDRESS_SPACE_BYTES MAX_THREADS CREDENTIAL LIVE CHALLENGE` to require Pass from both vanilla pipelines, or supply the partner path and matching-frame choice to require Pass from both LightGuard pipelines. Run each frame choice separately with approved fixtures. This command executes a real worker under Minijail; its unit tests check only caller encoding and do not establish biometric or enclave qualification.

@@ -1,8 +1,8 @@
-//! Typed face client for the sandboxed biometric worker.
+//! Bounded verdict client for the sandboxed Flamingo Engine.
 //!
-//! Launch, jail, seccomp policy and framed IPC come from `tabernaculum`; this crate owns the
-//! face request validation, encoding and response checks.
+//! Tabernaculum owns process isolation and framed transport; this crate checks readiness,
+//! request correlation and verdicts without interpreting the canonical Payload.
 mod client;
 #[cfg(target_os = "linux")]
 pub use client::SandboxClient;
-pub use client::{FaceLimits, Rejection, SandboxClientError};
+pub use client::{EngineLimits, Rejection, SandboxClientError};
