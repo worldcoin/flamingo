@@ -80,7 +80,11 @@ pub trait BiometricEngine: Send + Sync {
     /// Returns a bounded report only after the Engine declares Pass.
     /// # Errors
     /// Returns a structured rejection or infrastructure failure.
-    async fn evaluate(&self, payload: Vec<u8>, deadline: Instant) -> Result<DebugReport, BiometricError>;
+    async fn evaluate(
+        &self,
+        payload: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<DebugReport, BiometricError>;
     /// Checks liveness without waiting for an active inference operation.
     fn check_health(&self) {}
     /// Terminates an Engine whose request overran its last response slot, so no state from that
@@ -152,7 +156,11 @@ mod sandboxed {
 
     #[async_trait]
     impl BiometricEngine for SandboxBiometricEngine {
-        async fn evaluate(&self, payload: Vec<u8>, deadline: Instant) -> Result<DebugReport, BiometricError> {
+        async fn evaluate(
+            &self,
+            payload: Vec<u8>,
+            deadline: Instant,
+        ) -> Result<DebugReport, BiometricError> {
             self.executor
                 .run(deadline, move |worker| worker.evaluate(&payload))
                 .await?

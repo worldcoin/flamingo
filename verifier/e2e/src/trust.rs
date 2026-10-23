@@ -2,7 +2,11 @@ use std::{env, fs::File, io::Read};
 
 use anyhow::{Context, Result, ensure};
 use flamingo_verifier_client::Config;
-use world_id_flamingo::manifest::{EngineMetadata, ReleaseKeyJwk, ReleaseManifest, ReleaseStatus};
+use world_id_flamingo::{
+    EngineProviderMetadata, ReleaseManifest,
+    engine_provider::ReleaseStatus,
+    release_manifest::{ReleaseKeyJwk, verifying_key},
+};
 
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 
@@ -41,31 +45,25 @@ fn verify_release(
         .map_err(|_| anyhow::anyhow!("EXPECTED_RELEASE_HASH must be exactly 32 bytes"))?;
     let trusted_key: ReleaseKeyJwk =
         serde_json::from_slice(trusted_key).context("invalid trusted provider JWK")?;
-    trusted_key
-        .verifying_key()
-        .context("invalid trusted provider key")?;
-    let metadata = EngineMetadata::parse(metadata).context("invalid provider metadata")?;
+    verifying_key(&trusted_key).context("invalid trusted provider key")?;
+    let metadata = EngineProviderMetadata::parse(metadata).context("invalid provider metadata")?;
     let keys: Vec<_> = metadata
         .release_keys
         .iter()
-        .filter(|key| key.jwk.kid == trusted_key.kid)
+        .filter(|key| key.jwk.prm.kid == trusted_key.prm.kid)
         .collect();
     ensure!(
         keys.len() == 1 && keys[0].status == ReleaseStatus::Active && keys[0].jwk == trusted_key,
         "provider metadata must contain exactly the pinned, active release key"
     );
     let mut selected = None;
-    for entry in metadata.manifests {
-        let manifest = ReleaseManifest::parse(&entry.manifest)
-            .context("malformed manifest in provider metadata")?;
+    for jws in metadata.manifests {
+        let manifest =
+            ReleaseManifest::from_jws(&jws).context("malformed manifest in provider metadata")?;
         if manifest.release_hash() == expected_hash {
             ensure!(
                 selected.is_none(),
                 "duplicate selected release in provider metadata"
-            );
-            ensure!(
-                entry.status == ReleaseStatus::Active,
-                "selected release is not active"
             );
             manifest
                 .verify(&trusted_key)
@@ -106,7 +104,7 @@ mod tests {
         let signing = SigningKey::from_bytes((&[7_u8; 32]).into()).unwrap();
         let point = signing.verifying_key().to_encoded_point(false);
         let jwk = json!({"kty":"EC", "crv":"P-256", "kid":"test-key", "x": URL_SAFE_NO_PAD.encode(point.x().unwrap()), "y": URL_SAFE_NO_PAD.encode(point.y().unwrap())});
-        let payload = json!({"engine_hash": "a".repeat(64), "version": "test", "pipelines":[{"pipeline":1, "description":"test", "response_slots":{"min":16000,"max":16000,"count":1},"max_request_bytes":7352320}],"match_strictness_levels":[{"match_strictness":2,"description":"test"}]});
+        let payload = json!({"engine_hash": "a".repeat(64), "version": "test", "pipelines":[{"pipeline":1, "description":"test", "response_slots":[16000],"max_request_bytes":7352320}],"match_strictness_levels":[{"match_strictness":2,"description":"test"}]});
         let header = json!({"alg":"ES256", "kid":"test-key", "typ":"world-id-engine-manifest"});
         let input = format!(
             "{}.{}",
@@ -115,8 +113,8 @@ mod tests {
         );
         let signature: Signature = signing.sign(input.as_bytes());
         let compact = format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
-        let hash = hex::encode(ReleaseManifest::parse(&compact).unwrap().release_hash());
-        let metadata = json!({"version":1,"provider_id":"test","release_keys":[{"jwk":jwk,"status":"active"}],"manifests":[{"manifest":compact,"status":"active"}]});
+        let hash = hex::encode(ReleaseManifest::from_jws(&compact).unwrap().release_hash());
+        let metadata = json!({"version":1,"provider_id":"test","release_keys":[{"jwk":jwk,"status":"active"}],"manifests":[compact]});
         (metadata, jwk, hash)
     }
 
@@ -149,19 +147,15 @@ mod tests {
         metadata["release_keys"][0]["jwk"]["x"] = json!(URL_SAFE_NO_PAD.encode([0_u8; 32]));
         assert!(verify(&metadata, &key, &hash).is_err());
         let (mut metadata, key, hash) = fixture();
-        let compact = metadata["manifests"][0]["manifest"].as_str().unwrap();
+        let compact = metadata["manifests"][0].as_str().unwrap();
         let input = compact.rsplit_once('.').unwrap().0;
-        metadata["manifests"][0]["manifest"] =
-            json!(format!("{input}.{}", URL_SAFE_NO_PAD.encode([0_u8; 64])));
+        metadata["manifests"][0] = json!(format!("{input}.{}", URL_SAFE_NO_PAD.encode([0_u8; 64])));
         assert!(verify(&metadata, &key, &hash).is_err());
     }
 
     #[test]
-    fn rejects_retired_revoked_and_ambiguous_releases_or_keys() {
+    fn rejects_inactive_keys_and_ambiguous_releases_or_keys() {
         for status in ["retired", "revoked"] {
-            let (mut metadata, key, hash) = fixture();
-            metadata["manifests"][0]["status"] = json!(status);
-            assert!(verify(&metadata, &key, &hash).is_err());
             let (mut metadata, key, hash) = fixture();
             metadata["release_keys"][0]["status"] = json!(status);
             assert!(verify(&metadata, &key, &hash).is_err());

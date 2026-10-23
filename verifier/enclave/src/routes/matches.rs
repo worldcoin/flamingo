@@ -152,7 +152,9 @@ async fn run(
     let debug_report = match state.engine().evaluate(prepared.payload, deadline).await {
         Ok(report) => report,
         Err(BiometricError::Busy) => {
-            state.replay().release(prepared.claims.aud, prepared.claims.nonce);
+            state
+                .replay()
+                .release(prepared.claims.aud, prepared.claims.nonce);
             return BiometricError::Busy.into_result();
         }
         Err(BiometricError::EngineTimeout) => {
@@ -240,7 +242,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BiometricEngine for Engine {
-        async fn evaluate(&self, payload: Vec<u8>, deadline: Instant) -> Result<DebugReport, BiometricError> {
+        async fn evaluate(
+            &self,
+            payload: Vec<u8>,
+            deadline: Instant,
+        ) -> Result<DebugReport, BiometricError> {
             if self.busy.swap(false, Ordering::SeqCst) {
                 return Err(BiometricError::Busy);
             }
@@ -248,8 +254,14 @@ mod tests {
                 .await
                 .map_err(|_| BiometricError::Busy)?;
             self.calls.fetch_add(1, Ordering::SeqCst);
+            // The queue test pairs a slow first pipeline with a fast second pipeline.
+            let delay = if Payload::decode(&payload).unwrap().pipeline == PIPELINE_FIRST {
+                self.delay
+            } else {
+                Duration::ZERO
+            };
             self.received.lock().unwrap().push(payload);
-            tokio::time::timeout_at(deadline, tokio::time::sleep(self.delay))
+            tokio::time::timeout_at(deadline, tokio::time::sleep(delay))
                 .await
                 .map_err(|_| BiometricError::EngineTimeout)?;
             let debug_report = Some("{\"engine\":\"test\"}".to_owned()).into();
@@ -388,7 +400,7 @@ mod tests {
         passing.busy.store(true, Ordering::SeqCst);
         let calls = Arc::clone(&passing.calls);
         let state = loaded_state(passing);
-        let request = request(&deep_face(&state), 77);
+        let request = request(&first_pipeline_payload(&state), 77);
         let consumer = ChannelConsumer::from_unverified_public_key(
             CHANNEL_DOMAIN,
             &state.channel().public_key(),
@@ -419,7 +431,7 @@ mod tests {
         let passing = engine(None);
         let calls = Arc::clone(&passing.calls);
         let state = loaded_state(passing);
-        let request = request(&deep_face(&state), 77);
+        let request = request(&first_pipeline_payload(&state), 77);
         let (a, b) = tokio::join!(
             exchange(Arc::clone(&state), &request),
             exchange(Arc::clone(&state), &request)
@@ -692,7 +704,7 @@ mod tests {
                 parts[2]
             ))
             .unwrap();
-        let first = request(&deep_face(&state), 1);
+        let first = request(&first_pipeline_payload(&state), 1);
         let running = tokio::spawn({
             let state = Arc::clone(&state);
             async move { exchange(state, &first).await }
@@ -704,7 +716,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let queued = request(&gray_badge(&state), 2);
+        let queued = request(&second_pipeline_payload(&state), 2);
         let consumer = ChannelConsumer::from_unverified_public_key(
             CHANNEL_DOMAIN,
             &state.channel().public_key(),

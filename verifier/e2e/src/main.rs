@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         .pipeline(payload.pipeline)
         .context("selected release does not define this pipeline")?;
     ensure!(
-        release.defines_strictness(match_strictness),
+        release.match_strictness_level(match_strictness).is_some(),
         "selected release does not define this match strictness"
     );
     let config = load_config()?;
