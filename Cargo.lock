@@ -1706,19 +1706,24 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "biometric-engines-protocol",
+ "bytes",
  "flamingo-verifier-api-types",
  "flamingo-verifier-enclave-types",
  "flamingo-verifier-sandbox-client",
  "flamingo-verifier-sealed-types",
  "hex",
+ "http",
+ "http-body-util",
  "p256",
  "pontifex",
  "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sha3 0.10.9",
  "tabernaculum",
  "taceo-eddsa-babyjubjub",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1986,6 +1991,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap 2.14.1",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "half"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2184,6 +2208,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -2193,6 +2218,23 @@ dependencies = [
  "smallvec",
  "tokio",
  "want",
+]
+
+[[package]]
+name = "hyper-rustls"
+version = "0.27.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfa8e654703247911e29c23fbeaa261834bd9bb74efba2f9acddc37bfb127f53"
+dependencies = [
+ "http",
+ "hyper",
+ "hyper-util",
+ "log",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -3128,17 +3170,23 @@ dependencies = [
  "ciborium",
  "const-fnv1a-hash",
  "coset",
+ "futures-util",
  "getrandom 0.4.3",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "p384",
  "quantum-box",
  "ring",
  "rmp-serde",
+ "rustls",
  "serde",
  "serde_bytes",
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
  "tokio-vsock",
+ "tower-service",
  "tracing",
  "web-time",
  "webpki",
@@ -3703,6 +3751,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4556,6 +4605,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "libc",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-vsock"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5285,8 +5348,7 @@ dependencies = [
 [[package]]
 name = "world-id-flamingo"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a1c83e095b0e204fffbefc89ffce0ecf5a1415139ebe1d0b3646ee67c8df2ef"
+source = "git+https://github.com/worldcoin/world-id-protocol?branch=kempy%2Fflamingo-billing#724827294b34478d37b67193f240a9e142746a18"
 dependencies = [
  "base64 0.22.1",
  "coset",
@@ -5304,8 +5366,7 @@ dependencies = [
 [[package]]
 name = "world-id-primitives"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edbad3dc3bf1609122ac8995adeb06b455978bdcf99fc8860225a55baac0f6c8"
+source = "git+https://github.com/worldcoin/world-id-protocol?branch=kempy%2Fflamingo-billing#724827294b34478d37b67193f240a9e142746a18"
 dependencies = [
  "alloy-primitives",
  "ark-ff 0.6.0",

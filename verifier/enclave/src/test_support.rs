@@ -7,6 +7,7 @@ use flamingo_verifier_enclave_types as enclave_types;
 
 use crate::{
     attestation::Attestor,
+    billing_chain::BillingReader,
     biometric_engine::{BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores},
     state::EnclaveState,
 };
@@ -150,6 +151,21 @@ pub fn loaded_state_with_slots(
     state
         .load_release(&manifest_with_slots(TEST_ENGINE_HASH, "1.0.0", slots))
         .expect("the test manifest should load");
+    Arc::new(state)
+}
+
+/// [`loaded_state`] that checks every request's billing against `reader`.
+pub fn billed_state(
+    engine: impl BiometricEngine + 'static,
+    reader: impl BillingReader + 'static,
+) -> Arc<EnclaveState> {
+    let mut state =
+        EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine), TEST_ENGINE_HASH)
+            .expect("boot state should generate");
+    state
+        .load_release(&manifest(TEST_ENGINE_HASH, "1.0.0"))
+        .expect("the test manifest should load");
+    state.set_billing_chain(Box::new(reader));
     Arc::new(state)
 }
 

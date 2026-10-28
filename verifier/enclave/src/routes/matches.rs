@@ -9,6 +9,7 @@ use tokio::time::{Instant, sleep_until};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
 
 use crate::{
+    billing_chain,
     biometric_engine::BiometricError,
     blocking,
     pipeline::{self, Operation},
@@ -154,9 +155,32 @@ fn prepare(
 
 async fn run(
     state: Arc<EnclaveState>,
-    prepared: Prepared,
+    mut prepared: Prepared,
     deadline: Instant,
 ) -> Result<MatchResult, enclave_types::Error> {
+    // WIP-107 §4.7: billing is checked before the Engine runs, within `BILLING_BUDGET`, and the
+    // token signs the nullifier the check returns. Like `Busy`, only an unreadable chain releases
+    // the nonce for a retry; every other rejection is final for this request.
+    let (aud, nonce) = (prepared.claims.aud, prepared.claims.nonce);
+    match billing_chain::check(
+        state.billing_chain(),
+        prepared.claims.billing_nullifier,
+        aud,
+    )
+    .await
+    {
+        Ok(billing_nullifier) => prepared.claims.billing_nullifier = billing_nullifier,
+        Err(reason) => {
+            if reason == FailureReason::BillingUnavailable {
+                state.replay().release(aud, nonce);
+            }
+            return Ok(MatchResult::Failed {
+                reason,
+                debug_report: DebugReport::NotProduced,
+            });
+        }
+    }
+
     let scores = match prepared.operation {
         Operation::DeepFace {
             credential,
@@ -246,11 +270,14 @@ mod tests {
         biometric_engine::{BiometricEngine, DeepFaceScores, GrayBadgeScores, LiveCapture},
         pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE},
         test_support::{
-            TEST_MAX_REQUEST_BYTES, UnusedBiometricEngine, loaded_state, loaded_state_with_slots,
+            TEST_MAX_REQUEST_BYTES, UnusedBiometricEngine, billed_state, loaded_state,
+            loaded_state_with_slots,
         },
     };
     use eddsa_babyjubjub::EdDSAPrivateKey;
-    use flamingo_verifier_sealed_types::{AatInputs, CHANNEL_DOMAIN, Entry, Payload};
+    use flamingo_verifier_sealed_types::{
+        AatInputs, BillingFailure, CHANNEL_DOMAIN, Entry, Payload,
+    };
     use pontifex::ChannelConsumer;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use world_id_flamingo::{FlamingoToken, engine_config_hash};
@@ -824,6 +851,169 @@ mod tests {
             )
             .await,
             Err(enclave_types::Error::NotReady)
+        );
+    }
+
+    const PERIOD: u64 = 1_782_820_800;
+    const NULLIFIER: u64 = 7;
+
+    /// The chain state of one registered nullifier, a failing provider, or a slow one.
+    struct Chain {
+        config: billing_chain::BillingChainConfig,
+        registration: Option<billing_chain::Registration>,
+        available: Arc<std::sync::atomic::AtomicBool>,
+        delay: Duration,
+    }
+
+    /// A chain where `NULLIFIER` is registered for `rp_id` in `period_start`, if given; the
+    /// active period is `PERIOD`.
+    fn chain(registration: Option<(u64, u64)>) -> Chain {
+        Chain {
+            config: billing_chain::BillingChainConfig {
+                rpc_url: "https://rpc.example.org".parse().unwrap(),
+                proxy_port: 8001,
+                chain_id: 480,
+                billing_contract: [0xbb; 20],
+            },
+            registration: registration.map(|(rp_id, period_start)| billing_chain::Registration {
+                rp_id,
+                period_start,
+                registered_at: PERIOD + 60,
+            }),
+            available: Arc::new(true.into()),
+            delay: Duration::ZERO,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl billing_chain::BillingReader for Chain {
+        fn config(&self) -> &billing_chain::BillingChainConfig {
+            &self.config
+        }
+
+        async fn snapshot(
+            &self,
+            billing_nullifier: FieldElement,
+        ) -> Result<billing_chain::Snapshot, billing_chain::ChainError> {
+            tokio::time::sleep(self.delay).await;
+            if !self.available.load(Ordering::SeqCst) {
+                return Err(billing_chain::ChainError::Timeout);
+            }
+            Ok(billing_chain::Snapshot {
+                timestamp: PERIOD + 3600,
+                active_periods: (PERIOD, 0),
+                registration: self
+                    .registration
+                    .filter(|_| billing_nullifier == FieldElement::from(NULLIFIER)),
+            })
+        }
+    }
+
+    fn billed(payload: &Payload, nonce: u64, billing_nullifier: u64) -> Request {
+        Request {
+            billing_nullifier: billing_nullifier.into(),
+            ..request(payload, nonce)
+        }
+    }
+
+    #[tokio::test]
+    async fn signs_the_checked_billing_nullifier() {
+        let state = billed_state(engine(0.95), chain(Some((AUD, PERIOD))));
+        let payload = deep_face(&state);
+        let sent = billed(&payload, 1, NULLIFIER);
+        let claims = verify(&state, exchange(Arc::clone(&state), &sent).await);
+        assert_eq!(claims.billing_nullifier, FieldElement::from(NULLIFIER));
+        // The requester checks the token against the claims its own request implies.
+        assert_eq!(claims, expected_claims(&sent, &payload).unwrap());
+
+        // A Verifier that bills no RP signs 0, whatever the request carries.
+        let unbilled = loaded_state(engine(0.95));
+        let sent = billed(&deep_face(&unbilled), 1, NULLIFIER);
+        let claims = verify(&unbilled, exchange(Arc::clone(&unbilled), &sent).await);
+        assert_eq!(claims.billing_nullifier, FieldElement::ZERO);
+    }
+
+    #[tokio::test]
+    async fn rejects_unpaid_billing_before_inference() {
+        let next_period = PERIOD + 2_678_400;
+        let not_registered = FailureReason::BillingRejected(BillingFailure::NotRegistered);
+        let cases = [
+            (
+                chain(Some((AUD, PERIOD))),
+                0,
+                FailureReason::BillingRequired,
+            ),
+            (chain(None), NULLIFIER, not_registered),
+            (chain(Some((AUD, PERIOD))), NULLIFIER + 1, not_registered),
+            // Paid for by another RP.
+            (chain(Some((AUD + 1, PERIOD))), NULLIFIER, not_registered),
+            (
+                chain(Some((AUD, next_period))),
+                NULLIFIER,
+                FailureReason::BillingRejected(BillingFailure::PeriodInactive),
+            ),
+            (
+                Chain {
+                    available: Arc::new(false.into()),
+                    ..chain(Some((AUD, PERIOD)))
+                },
+                NULLIFIER,
+                FailureReason::BillingUnavailable,
+            ),
+        ];
+        for (chain, billing_nullifier, reason) in cases {
+            let state = billed_state(UnusedBiometricEngine, chain);
+            let sent = billed(&deep_face(&state), 1, billing_nullifier);
+            assert_eq!(exchange(state, &sent).await, rejected(reason));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_provider_rejects_without_costing_the_engine_its_deadline() {
+        let slow = Chain {
+            delay: billing_chain::BILLING_BUDGET * 2,
+            ..chain(Some((AUD, PERIOD)))
+        };
+        // Without the budget, the registration would arrive after the Engine's deadline and the
+        // Engine would run late; `UnusedBiometricEngine` fails the test if it runs at all.
+        let state = billed_state(UnusedBiometricEngine, slow);
+        let sent = billed(&deep_face(&state), 1, NULLIFIER);
+        assert_eq!(
+            exchange(Arc::clone(&state), &sent).await,
+            rejected(FailureReason::BillingUnavailable)
+        );
+        assert!(!state.engine_overran());
+    }
+
+    #[tokio::test]
+    async fn only_an_unreadable_chain_releases_the_nonce() {
+        let chain = chain(Some((AUD, PERIOD)));
+        let available = Arc::clone(&chain.available);
+        available.store(false, Ordering::SeqCst);
+        let state = billed_state(engine(0.95), chain);
+        let sent = billed(&deep_face(&state), 1, NULLIFIER);
+        assert_eq!(
+            exchange(Arc::clone(&state), &sent).await,
+            rejected(FailureReason::BillingUnavailable)
+        );
+        // The provider recovers; the same request now passes, once.
+        available.store(true, Ordering::SeqCst);
+        let claims = verify(&state, exchange(Arc::clone(&state), &sent).await);
+        assert_eq!(claims.billing_nullifier, FieldElement::from(NULLIFIER));
+        assert_eq!(
+            exchange(Arc::clone(&state), &sent).await,
+            rejected(FailureReason::Replayed)
+        );
+
+        // A registration that does not check out consumes the nonce.
+        let unpaid = billed(&deep_face(&state), 2, NULLIFIER + 1);
+        let not_registered = rejected(FailureReason::BillingRejected(
+            BillingFailure::NotRegistered,
+        ));
+        assert_eq!(exchange(Arc::clone(&state), &unpaid).await, not_registered);
+        assert_eq!(
+            exchange(state, &unpaid).await,
+            rejected(FailureReason::Replayed)
         );
     }
 }

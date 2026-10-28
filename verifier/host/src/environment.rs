@@ -68,6 +68,38 @@ pub struct HostConfig {
     /// Maximum WebSocket sessions served at once, per host process.
     #[arg(long = "ws-max-connections", env = "WS_MAX_CONNECTIONS", default_value_t = default_ws_max_connections())]
     pub ws_max_connections: NonZeroUsize,
+
+    /// vsock port on which the enclave dials its billing RPC provider (WIP-107 §4.8). Set with
+    /// `RPC_UPSTREAM_HOST` to forward it; it must match the image's `BILLING_RPC_PROXY_PORT`.
+    #[arg(
+        long = "rpc-proxy-port",
+        env = "RPC_PROXY_PORT",
+        requires = "rpc_upstream_host"
+    )]
+    pub rpc_proxy_port: Option<u32>,
+
+    /// Host the RPC proxy forwards to. TLS terminates in the enclave, so this only routes bytes.
+    #[arg(
+        long = "rpc-upstream-host",
+        env = "RPC_UPSTREAM_HOST",
+        requires = "rpc_proxy_port"
+    )]
+    pub rpc_upstream_host: Option<String>,
+
+    /// TCP port the RPC proxy forwards to.
+    #[arg(long = "rpc-upstream-port", env = "RPC_UPSTREAM_PORT", default_value_t = default_rpc_upstream_port())]
+    pub rpc_upstream_port: NonZeroU16,
+}
+
+impl HostConfig {
+    /// The outbound proxy for the enclave's billing RPC reads, admitting only the enclave.
+    #[must_use]
+    pub fn rpc_proxy(&self) -> Option<pontifex::proxy::Config> {
+        let (port, host) = (self.rpc_proxy_port?, self.rpc_upstream_host.clone()?);
+        let mut config = pontifex::proxy::Config::new(port, host, self.rpc_upstream_port.get());
+        config.allowed_cid = Some(self.enclave_cid);
+        Some(config)
+    }
 }
 
 impl Default for HostConfig {
@@ -80,6 +112,9 @@ impl Default for HostConfig {
             port: default_port(),
             ws_idle_timeout: default_ws_idle_timeout(),
             ws_max_connections: default_ws_max_connections(),
+            rpc_proxy_port: None,
+            rpc_upstream_host: None,
+            rpc_upstream_port: default_rpc_upstream_port(),
         }
     }
 }
@@ -110,6 +145,10 @@ impl clap::builder::TypedValueParser for PublishedMetadataParser {
                 clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
             })
     }
+}
+
+const fn default_rpc_upstream_port() -> NonZeroU16 {
+    NonZeroU16::new(443).expect("default RPC port is nonzero")
 }
 
 const fn default_port() -> NonZeroU16 {

@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, anyhow};
 use flamingo_verifier_enclave::{
     attestation::{self, NsmAttestor},
+    billing_chain::{BillingChain, BillingChainConfig, BillingReader as _},
     biometric_engine::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, SandboxBiometricEngine},
     rng, server,
     state::EnclaveState,
@@ -43,6 +44,8 @@ pub(super) fn run() -> anyhow::Result<()> {
     }));
 
     rng::verify_nsm_hwrng_current().context("Nitro hardware RNG is not configured")?;
+    // Measured EIF environment, so the host cannot pick the chain, contract or provider.
+    let billing = BillingChainConfig::from_env()?;
     let boot = enclave::accept(&BootstrapConfig::default(), Path::new(STAGING_DIR))
         .context("worker artifact provisioning failed")?;
     let runtime = boot.runtime();
@@ -77,7 +80,26 @@ pub(super) fn run() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("failed to start enclave executor")?
-        .block_on(serve(boot, worker, engine_hash))
+        .block_on(serve(boot, worker, engine_hash, billing))
+}
+
+/// Connects the Billing Contract reader and checks the provider serves the configured chain.
+///
+/// A provider on another chain is a misconfiguration and stops the boot. An unreachable one does
+/// not: WIP-107 §4.8 keeps provider failures out of process liveness.
+async fn billing_chain(config: BillingChainConfig) -> anyhow::Result<BillingChain> {
+    let chain = BillingChain::new(config);
+    let expected = chain.config().chain_id;
+    match chain.chain_id().await {
+        Ok(chain_id) if chain_id == expected => {
+            tracing::info!(chain_id, "billing chain reachable");
+        }
+        Ok(chain_id) => {
+            anyhow::bail!("billing RPC serves chain {chain_id}, configured for {expected}")
+        }
+        Err(error) => tracing::warn!(%error, "billing chain unreachable at boot"),
+    }
+    Ok(chain)
 }
 
 /// `SHA-256` of a file, read without moving its offset.
@@ -110,6 +132,7 @@ async fn serve(
     boot: Bootstrap,
     worker: SandboxClient,
     engine_hash: [u8; 32],
+    billing: Option<BillingChainConfig>,
 ) -> anyhow::Result<()> {
     worker.check_alive();
     let engine = Box::new(SandboxBiometricEngine::new(worker));
@@ -119,6 +142,9 @@ async fn serve(
         .context("Nitro Secure Module is unavailable")?;
     let mut state = EnclaveState::generate(Arc::new(NsmAttestor), engine, engine_hash)
         .map_err(|error| anyhow!("failed to generate and attest the boot keys: {error:?}"))?;
+    if let Some(config) = billing {
+        state.set_billing_chain(Box::new(billing_chain(config).await?));
+    }
     let (encryption_refresh, signing_refresh) = state.start_attestation_refresh();
     let state = Arc::new(state);
 

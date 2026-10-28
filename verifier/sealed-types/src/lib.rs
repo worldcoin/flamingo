@@ -23,8 +23,8 @@ pub const MAX_ATTESTATION_AGE: std::time::Duration =
     std::time::Duration::from_secs(world_id_flamingo::MAX_ATTESTATION_AGE);
 
 pub use errors::{
-    ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole, InputFailureReason,
-    ValidationTarget,
+    BillingFailure, ComparisonRole, Error, FailureReason, ImageFailureReason, ImageRole,
+    InputFailureReason, ValidationTarget,
 };
 pub use messages::*;
 pub use response::*;
