@@ -1551,7 +1551,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3694,7 +3694,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4373,7 +4373,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5284,9 +5284,9 @@ dependencies = [
 
 [[package]]
 name = "world-id-flamingo"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10d3ece3ee84355fb10c155d5f7a7e80cc42bb47113ffbc4676c82dda5e4ea89"
+checksum = "4a1c83e095b0e204fffbefc89ffce0ecf5a1415139ebe1d0b3646ee67c8df2ef"
 dependencies = [
  "base64 0.22.1",
  "coset",
@@ -5303,9 +5303,9 @@ dependencies = [
 
 [[package]]
 name = "world-id-primitives"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a252c542f969b5a49b52d21e2899e8192a7bae5e64e612c9961aa6bb74e739d0"
+checksum = "edbad3dc3bf1609122ac8995adeb06b455978bdcf99fc8860225a55baac0f6c8"
 dependencies = [
  "alloy-primitives",
  "ark-ff 0.6.0",
