@@ -64,6 +64,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 webpki-roots = "1.0.10"
-world-id-flamingo = "0.17.0"
-world-id-primitives = { version = "0.17.0", default-features = false }
+world-id-flamingo = "0.18.0"
+world-id-primitives = { version = "0.18.0", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
