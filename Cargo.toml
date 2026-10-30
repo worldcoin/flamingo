@@ -3,6 +3,7 @@ members = [
     "verifier/api-types",
     "verifier/client",
     "verifier/e2e",
+    "verifier/engine-interface",
     "verifier/enclave-types",
     "verifier/sealed-types",
     "verifier/enclave",
@@ -21,6 +22,7 @@ repository = "https://github.com/worldcoin/flamingo"
 publish = false
 
 [workspace.dependencies]
+flamingo-engine-interface = { path = "verifier/engine-interface" }
 biometric-engines-protocol = "0.1.0"
 anyhow = "1.0"
 ark-babyjubjub = { package = "taceo-ark-babyjubjub", version = "0.6" }
