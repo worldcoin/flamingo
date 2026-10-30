@@ -6,6 +6,10 @@
 //! u64 ID followed by payload bytes. Responses are that ID, one verdict byte (0 = Pass,
 //! 1..=6 = ErrorCode), a report-presence byte (0/1), then optional UTF-8 report bytes.
 //! Version or framing failures are terminal. Ordinary engine rejections are responses.
+//!
+//! The verdict and error code bytes are fixed by [`PROTOCOL_VERSION`]. Decoders reject any value
+//! they do not know, so adding or changing a code requires a version bump and deploying the
+//! verifier and engine together.
 
 pub mod framing;
 
@@ -41,11 +45,38 @@ pub enum ErrorCode {
     Internal = 6,
 }
 
+impl TryFrom<u8> for ErrorCode {
+    type Error = CodecError;
+
+    fn try_from(byte: u8) -> Result<Self, CodecError> {
+        match byte {
+            1 => Ok(Self::InvalidPayload),
+            2 => Ok(Self::UnsupportedPipeline),
+            3 => Ok(Self::UnsupportedMatchStrictness),
+            4 => Ok(Self::BiometricRejected),
+            5 => Ok(Self::MatchRejected),
+            6 => Ok(Self::Internal),
+            _ => Err(CodecError::Malformed),
+        }
+    }
+}
+
 /// Only Pass allows the verifier to issue a Flamingo token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Pass,
     Error(ErrorCode),
+}
+
+impl Verdict {
+    /// Whether the engine instance must be retired after this verdict.
+    ///
+    /// Both sides apply this: the engine exits after sending it and the verifier discards the
+    /// response, never producing a verdict from it. Every other error leaves the engine usable.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        self == Self::Error(ErrorCode::Internal)
+    }
 }
 
 /// One response. Debug deliberately hides report contents.
@@ -143,13 +174,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {
     let request_id = request_id(&header[..8])?;
     let verdict = match header[8] {
         0 => Verdict::Pass,
-        1 => Verdict::Error(ErrorCode::InvalidPayload),
-        2 => Verdict::Error(ErrorCode::UnsupportedPipeline),
-        3 => Verdict::Error(ErrorCode::UnsupportedMatchStrictness),
-        4 => Verdict::Error(ErrorCode::BiometricRejected),
-        5 => Verdict::Error(ErrorCode::MatchRejected),
-        6 => Verdict::Error(ErrorCode::Internal),
-        _ => return Err(CodecError::Malformed),
+        code => Verdict::Error(ErrorCode::try_from(code)?),
     };
     let debug_report = match header[9] {
         0 if report.is_empty() => None,
@@ -279,11 +304,36 @@ mod tests {
             decode_response(&vec![0; MAX_RESPONSE_BYTES + 1]),
             Err(CodecError::TooLarge)
         );
-        assert!(encode_response(&Response {
-            request_id: 0,
-            ..response
-        })
-        .is_err());
+        assert!(
+            encode_response(&Response {
+                request_id: 0,
+                ..response
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn error_codes_match_their_wire_bytes() {
+        for byte in 0..=u8::MAX {
+            match ErrorCode::try_from(byte) {
+                Ok(code) => assert_eq!(code as u8, byte),
+                Err(error) => {
+                    assert_eq!(error, CodecError::Malformed);
+                    assert!(!(1..=6).contains(&byte));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_internal_errors_are_terminal() {
+        assert!(!Verdict::Pass.is_terminal());
+        for byte in 1..=5 {
+            let code = ErrorCode::try_from(byte).unwrap();
+            assert!(!Verdict::Error(code).is_terminal());
+        }
+        assert!(Verdict::Error(ErrorCode::Internal).is_terminal());
     }
 
     #[test]

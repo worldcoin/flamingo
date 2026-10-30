@@ -1,5 +1,5 @@
 //! Protocol-owned payload bytes cross IPC without changing their canonical encoding.
-use flamingo_engine_interface::{decode_request, encode_request, framing, MAX_REQUEST_BYTES};
+use flamingo_engine_interface::{MAX_REQUEST_BYTES, decode_request, encode_request, framing};
 use world_id_flamingo::{Entry, Payload};
 
 #[test]
