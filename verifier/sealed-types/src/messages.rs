@@ -11,6 +11,9 @@ use crate::{DebugReport, FailureReason};
 /// The claims a Flamingo Token for `request` with the decoded `payload` must carry, after
 /// verifying its AAT.
 ///
+/// They assume the Verifier bills the RP; one that does not signs `billing_nullifier = 0`
+/// instead (WIP-107 §4.7).
+///
 /// # Errors
 /// Fails when the AAT does not verify.
 pub fn expected_claims(
@@ -27,6 +30,7 @@ pub fn expected_claims(
             payload.pipeline,
             payload.match_strictness,
         ),
+        billing_nullifier: request.billing_nullifier,
     })
 }
 

@@ -43,6 +43,7 @@ flamingo-verifier-sandbox-client = { path = "verifier/sandbox-client" }
 futures-util = "0.3"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hex-literal = "1.1"
+http = "1"
 http-body-util = "0.1"
 p384 = { version = "0.13", default-features = false, features = ["ecdsa", "sha384"] }
 pontifex = { version = "3.1.0", default-features = false }
@@ -69,3 +70,9 @@ webpki-roots = "1.0.10"
 world-id-flamingo = "0.18.0"
 world-id-primitives = { version = "0.18.0", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+# WIP-107 `billing_nullifier` and the `SIGN2` Flamingo Token digest, from
+# worldcoin/world-id-protocol#1149. Replace with a release once it ships.
+[patch.crates-io]
+world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", branch = "kempy/flamingo-billing" }
+world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", branch = "kempy/flamingo-billing" }

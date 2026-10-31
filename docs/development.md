@@ -78,6 +78,9 @@ The host reads every setting from an environment variable and an equivalent CLI 
 | `--port` | `PORT` | `8000` | API listen port. |
 | `--ws-idle-timeout-secs` | `WS_IDLE_TIMEOUT_SECS` | `30` | Idle deadline for each WebSocket session phase. |
 | `--ws-max-connections` | `WS_MAX_CONNECTIONS` | `100` | Concurrent WebSocket sessions per host process. |
+| `--rpc-proxy-port` | `RPC_PROXY_PORT` | unset | vsock port forwarded to the billing RPC provider; requires `RPC_UPSTREAM_HOST`. |
+| `--rpc-upstream-host` | `RPC_UPSTREAM_HOST` | unset | Host the billing RPC proxy forwards to. |
+| `--rpc-upstream-port` | `RPC_UPSTREAM_PORT` | `443` | TCP port the billing RPC proxy forwards to. |
 
 `PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The API host publishes configured provider metadata but does not provision enclave manifests. The enclave accepts only a manifest whose `engine_hash` matches the SHA-256 of its worker executable and reports not ready until the provisioner has loaded it.
 

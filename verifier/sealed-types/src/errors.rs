@@ -111,8 +111,24 @@ pub enum FailureReason {
     MatchingFailed(ComparisonRole),
     /// The Engine had not finished by the pipeline's last response slot.
     EngineTimeout,
+    /// The Verifier bills the RP, and the request carries no `billing_nullifier`.
+    BillingRequired,
+    /// The `billing_nullifier` failed a WIP-107 §4.7 check.
+    BillingRejected(BillingFailure),
+    /// The Verifier could not read billing state in time, so it rejects the request (fail closed).
+    BillingUnavailable,
     /// Backend infrastructure failed, distinct from biological rejection.
     Internal,
+}
+
+/// Which WIP-107 §4.7 billing check failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingFailure {
+    /// `billing_nullifier` is not registered for the request's `aud`.
+    NotRegistered,
+    /// `billing_nullifier` is registered for a billing period that is not active.
+    PeriodInactive,
 }
 
 impl From<world_id_flamingo::RequestError> for FailureReason {

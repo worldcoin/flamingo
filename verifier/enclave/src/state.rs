@@ -14,6 +14,7 @@ use world_id_flamingo::ReleaseManifest;
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
+    billing_chain::BillingReader,
     biometric_engine::BiometricEngine,
     keys::SigningKey,
     replay::ReplayGuard,
@@ -38,6 +39,8 @@ pub struct EnclaveState {
     replay: ReplayGuard,
     /// Set once the Engine overran a pipeline's last response slot.
     engine_overran: AtomicBool,
+    /// WIP-107 Billing Contract reads, when this image is configured for billing.
+    billing_chain: Option<Box<dyn BillingReader>>,
 }
 
 impl EnclaveState {
@@ -89,7 +92,19 @@ impl EnclaveState {
             release: OnceLock::new(),
             replay: ReplayGuard::default(),
             engine_overran: AtomicBool::new(false),
+            billing_chain: None,
         })
+    }
+
+    /// Checks every request's billing against `chain`.
+    pub fn set_billing_chain(&mut self, chain: Box<dyn BillingReader>) {
+        self.billing_chain = Some(chain);
+    }
+
+    /// The Billing Contract reader, if this image is configured for billing.
+    #[must_use]
+    pub fn billing_chain(&self) -> Option<&dyn BillingReader> {
+        self.billing_chain.as_deref()
     }
 
     /// Loads the release manifest of this boot's Engine bundle (WIP-201 §3.5.2).

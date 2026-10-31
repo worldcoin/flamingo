@@ -9,6 +9,7 @@ use flamingo_verifier_sealed_types::{
 };
 use pontifex::ChannelConsumer;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
+use world_id_primitives::FieldElement;
 
 use crate::config::Config;
 use crate::error::Error;
@@ -94,11 +95,19 @@ pub fn ensure_claims_match(
     expected: &FlamingoClaims,
     result: &VerifiedMatchResult,
 ) -> Result<(), Error> {
-    match result {
-        VerifiedMatchResult::Success { verified, .. } if verified.claims != *expected => {
-            Err(Error::StatementInvalid)
-        }
-        _ => Ok(()),
+    let VerifiedMatchResult::Success { verified, .. } = result else {
+        return Ok(());
+    };
+    // A Verifier that does not bill the RP signs `billing_nullifier = 0`, whatever the request
+    // carried (WIP-107 §4.7); any other value must be the one sent.
+    let unbilled = FlamingoClaims {
+        billing_nullifier: FieldElement::ZERO,
+        ..*expected
+    };
+    if verified.claims == *expected || verified.claims == unbilled {
+        Ok(())
+    } else {
+        Err(Error::StatementInvalid)
     }
 }
 
@@ -269,8 +278,14 @@ mod tests {
             nonce: 2u64.into(),
             aat: None,
             engine_config_hash: 3u64.into(),
+            billing_nullifier: 5u64.into(),
         };
         assert!(ensure_claims_match(&expected, &success(&expected)).is_ok());
+        let unbilled = FlamingoClaims {
+            billing_nullifier: FieldElement::ZERO,
+            ..expected
+        };
+        assert!(ensure_claims_match(&expected, &success(&unbilled)).is_ok());
         for changed in [
             FlamingoClaims {
                 nonce: 3u64.into(),
@@ -282,6 +297,10 @@ mod tests {
             },
             FlamingoClaims {
                 compared_entry_hashes: [3u64.into(); 4],
+                ..expected
+            },
+            FlamingoClaims {
+                billing_nullifier: 6u64.into(),
                 ..expected
             },
         ] {

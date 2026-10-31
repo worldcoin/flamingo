@@ -10,6 +10,8 @@
 
 /// Nitro Secure Module attestation.
 pub mod attestation;
+/// WIP-107 Billing Contract reads over the host's outbound proxy.
+pub mod billing_chain;
 /// Inference operations implemented by the sandboxed biometric worker.
 pub mod biometric_engine;
 /// Boot-scoped key material.

@@ -18,6 +18,22 @@ The enclave runs each (`aud`, `nonce`) once per boot. It keeps up to 262,144 of 
 
 The current engine still returns similarity scores, so the enclave's [interim adapter](../verifier/enclave/src/pipeline.rs) maps pipelines to engine operations and strictness levels to thresholds. Every compared pair must clear the level's threshold.
 
+## Billing
+
+For [WIP-107](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-107.md) billing, the enclave checks a request's billing nullifier against the Billing Contract before the Engine runs, and signs the checked nullifier into the token's `billing_nullifier` claim. The check shows that the RP paid for that nullifier in an active period. It cannot show that the nullifier is the requester's: that is the Proof of Embedding Similarity's job (WIP-202), which binds the signed nullifier to the World ID it proves for.
+
+An enclave configured for billing bills every RP, since the Billing Contract has no `isBilledRp` yet:
+
+1. `billing_nullifier` must be nonzero.
+2. At the block `REGISTRATION_CONFIRMATIONS` (12) below the provider's latest, `registrationOf(billing_nullifier)` must return the request's `aud` and a `periodStart` that `getActivePeriods(block.timestamp)` reports as active. Both calls are pinned to that block's hash and require it to be canonical.
+3. All reads of one request share a two-second budget, and at most 32 requests read at once. A provider that cannot be read in time rejects the request (`billing_unavailable`) and releases its nonce for a retry. Every other billing rejection consumes the nonce.
+
+Billed pipelines' last response slot must leave the Engine its runtime plus that budget. An enclave without billing configuration signs `billing_nullifier = 0`, whatever the request carries. The Verifier does not verify the RP's signature: only `register` consumes capacity, and the RP checks its own `nonce`.
+
+The enclave reads the Billing Contract through an approved JSON-RPC provider. Its HTTPS client dials the host on vsock, and the host's Pontifex proxy (`RPC_PROXY_PORT`, `RPC_UPSTREAM_HOST`) forwards the bytes to the provider and admits only the enclave's CID. TLS terminates in the enclave against the webpki roots, so the host relays only ciphertext. The provider is trusted for state and the block's time.
+
+The image enables billing reads when its environment sets all of `BILLING_RPC_URL` (HTTPS, HTTP/2), `BILLING_RPC_PROXY_PORT`, `BILLING_CHAIN_ID` and `BILLING_CONTRACT`. The environment is part of the EIF and its PCRs, so the host cannot choose the chain, contract or provider. Don't put a secret API key in the URL, because the EIF is public. At boot, the enclave checks that the provider reports `BILLING_CHAIN_ID`: a different chain stops the boot, and an unreachable provider only logs a warning. Each read has a two-second timeout and no retries.
+
 ## Repository layout
 
 All crates share the root [Cargo workspace](../Cargo.toml) and lockfile.
