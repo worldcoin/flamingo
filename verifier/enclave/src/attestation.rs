@@ -100,18 +100,24 @@ impl VerifierClock {
         }
     }
 
-    /// Syncs the clock to the `timestamp` of a new attestation.
+    /// Syncs the clock to the `timestamp` of a new attestation. Never moves it backwards:
+    /// concurrent refreshes of the two keys may sync out of order.
     pub fn sync(&self, timestamp_millis: u64) {
-        *self.anchor.lock().unwrap_or_else(PoisonError::into_inner) =
-            (timestamp_millis, Instant::now());
+        let mut anchor = self.anchor.lock().unwrap_or_else(PoisonError::into_inner);
+        if timestamp_millis >= Self::millis(*anchor) {
+            *anchor = (timestamp_millis, Instant::now());
+        }
     }
 
     /// The Verifier's time, in Unix seconds.
     #[must_use]
     pub fn now(&self) -> u64 {
-        let (timestamp_millis, at) = *self.anchor.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::millis(*self.anchor.lock().unwrap_or_else(PoisonError::into_inner)) / 1000
+    }
+
+    fn millis((timestamp_millis, at): (u64, Instant)) -> u64 {
         let elapsed = u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        timestamp_millis.saturating_add(elapsed) / 1000
+        timestamp_millis.saturating_add(elapsed)
     }
 }
 
@@ -531,7 +537,15 @@ mod tests {
         assert_eq!(clock.now(), u64::from(TEST_NOW));
         tokio::time::advance(Duration::from_secs(90)).await;
         assert_eq!(clock.now(), u64::from(TEST_NOW) + 90);
+        clock.sync(u64::from(TEST_NOW) * 1000 + 120_000);
+        assert_eq!(clock.now(), u64::from(TEST_NOW) + 120);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_older_attestation_never_moves_the_clock_back() {
+        let clock = VerifierClock::new(u64::from(TEST_NOW) * 1000);
+        tokio::time::advance(Duration::from_secs(90)).await;
         clock.sync(u64::from(TEST_NOW) * 1000 + 30_000);
-        assert_eq!(clock.now(), u64::from(TEST_NOW) + 30);
+        assert_eq!(clock.now(), u64::from(TEST_NOW) + 90);
     }
 }
