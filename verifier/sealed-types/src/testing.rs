@@ -18,9 +18,9 @@ pub fn manifest(engine_hash: [u8; 48], version: u64) -> String {
     manifest_with_slots(engine_hash, version, TEST_SLOTS)
 }
 
-/// A release manifest with two pipelines whose response slots are `slots`:
-/// - pipeline 1 checks one live frame;
-/// - pipeline 2 checks the two frames of a `LightGuard` capture.
+/// A release manifest with four pipelines whose response slots are `slots`:
+/// - pipelines 1 and 2 check one live frame;
+/// - pipelines 3 and 4 check the two frames of a `LightGuard` capture.
 ///
 /// Levels 1 to 3 are defined.
 #[must_use]
@@ -33,7 +33,9 @@ pub fn manifest_with_slots(engine_hash: [u8; 48], version: u64, slots: &[u64]) -
         "match_strictness_levels": [1, 2, 3],
         "pipelines": [
             { "pipeline_id": 1, "inputs": [live_frame], "response_slots": slots },
-            { "pipeline_id": 2, "inputs": [live_frame, live_frame], "response_slots": slots },
+            { "pipeline_id": 2, "inputs": [live_frame], "response_slots": slots },
+            { "pipeline_id": 3, "inputs": [live_frame, live_frame], "response_slots": slots },
+            { "pipeline_id": 4, "inputs": [live_frame, live_frame], "response_slots": slots },
         ],
     });
     with_payload(&payload)

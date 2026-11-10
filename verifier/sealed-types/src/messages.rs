@@ -153,8 +153,8 @@ mod tests {
             expected_claims(&request, &payload, &release, NOW),
             Err(FailureReason::UnsupportedPipeline)
         );
-        // Pipeline 2 checks two inputs.
-        payload.pipeline_id = 2;
+        // Pipeline 3 checks two inputs.
+        payload.pipeline_id = 3;
         assert_eq!(
             expected_claims(&request, &payload, &release, NOW),
             Err(FailureReason::UnsupportedPipeline)

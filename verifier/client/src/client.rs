@@ -33,18 +33,29 @@ pub fn verify_assignment(
     let (consumer, attestation) =
         ChannelConsumer::from_attestation(CHANNEL_DOMAIN, verifier, &document, &public_key)
             .map_err(Error::Channel)?;
-    let release = ReleaseManifest::from_jws(&response.release_manifest)
-        .map_err(|_| Error::MalformedAssignment)?;
-    let user_data = attestation.document().user_data.as_ref();
-    if user_data.map(|data| data.as_slice()) != Some(release.release_hash().as_slice()) {
-        return Err(Error::ReleaseNotAttested);
-    }
+    let release = attested_release(
+        &response.release_manifest,
+        attestation
+            .document()
+            .user_data
+            .as_ref()
+            .map(|data| data.as_slice()),
+    )?;
 
     Ok(VerifiedAssignment {
         attestation,
         consumer,
         release,
     })
+}
+
+/// The release manifest `jws`, if the channel attestation's `user_data` is its `release_hash`.
+fn attested_release(jws: &str, user_data: Option<&[u8]>) -> Result<ReleaseManifest, Error> {
+    let release = ReleaseManifest::from_jws(jws).map_err(|_| Error::MalformedAssignment)?;
+    if user_data != Some(release.release_hash().as_slice()) {
+        return Err(Error::ReleaseNotAttested);
+    }
+    Ok(release)
 }
 
 /// Opens a sealed match response and verifies the statement it carries, if any.
@@ -262,7 +273,10 @@ pub enum VerifiedMatchResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, FlamingoClaims, VerifiedMatch, VerifiedMatchResult, ensure_claims_match};
+    use super::{
+        Error, FlamingoClaims, VerifiedMatch, VerifiedMatchResult, attested_release,
+        ensure_claims_match,
+    };
     use flamingo_verifier_sealed_types::{AttestedStatement, DebugReport};
     use world_id_primitives::FieldElement;
 
@@ -277,6 +291,34 @@ mod tests {
             }),
             debug_report: DebugReport::NotProduced,
         }
+    }
+
+    #[test]
+    fn the_release_must_be_the_attested_one() {
+        use flamingo_verifier_sealed_types::{ReleaseManifest, testing};
+        let jws = testing::manifest(testing::TEST_ENGINE_HASH, 1);
+        let release_hash = ReleaseManifest::from_jws(&jws).unwrap().release_hash();
+        assert_eq!(
+            attested_release(&jws, Some(&release_hash))
+                .unwrap()
+                .release_hash(),
+            release_hash
+        );
+        let other = testing::manifest(testing::TEST_ENGINE_HASH, 2);
+        for (jws, user_data) in [
+            (&jws, None),
+            (&jws, Some(&[0u8; 32][..])),
+            (&other, Some(&release_hash[..])),
+        ] {
+            assert!(matches!(
+                attested_release(jws, user_data),
+                Err(Error::ReleaseNotAttested)
+            ));
+        }
+        assert!(matches!(
+            attested_release("not.a.jws", Some(&release_hash)),
+            Err(Error::MalformedAssignment)
+        ));
     }
 
     #[test]

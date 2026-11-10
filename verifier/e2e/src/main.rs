@@ -12,6 +12,8 @@ use world_id_primitives::FieldElement;
 /// The enclave's interim pipelines; see `verifier/enclave/src/pipeline.rs`.
 const PIPELINE_DEEPFACE: u16 = 1;
 const PIPELINE_GRAYBADGE: u16 = 2;
+const PIPELINE_DEEPFACE_LIGHTGUARD: u16 = 3;
+const PIPELINE_GRAYBADGE_LIGHTGUARD: u16 = 4;
 const DEFAULT_MATCH_STRICTNESS: u8 = 2;
 
 #[tokio::main]
@@ -62,6 +64,12 @@ async fn main() -> Result<()> {
     entries.push(entry(read_image(&image_paths.challenge, "challenge")?, b""));
     let compare = (0..u8::try_from(entries.len())?).collect();
     // The pipeline checks the compared live frame and, for LightGuard, its partner frame.
+    let pipeline_id = match (gray_badge, partner.is_some()) {
+        (false, false) => PIPELINE_DEEPFACE,
+        (true, false) => PIPELINE_GRAYBADGE,
+        (false, true) => PIPELINE_DEEPFACE_LIGHTGUARD,
+        (true, true) => PIPELINE_GRAYBADGE_LIGHTGUARD,
+    };
     let mut pipeline_inputs = vec![live_index];
     if let Some(partner) = partner {
         pipeline_inputs.push(u8::try_from(entries.len())?);
@@ -80,11 +88,7 @@ async fn main() -> Result<()> {
         .await
         .context("enclave assignment did not verify")?;
     let payload = Payload {
-        pipeline_id: if gray_badge {
-            PIPELINE_GRAYBADGE
-        } else {
-            PIPELINE_DEEPFACE
-        },
+        pipeline_id,
         match_strictness,
         hints: Vec::new(),
         entries,

@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use flamingo_verifier_api_types::MAX_MATCH_PLAINTEXT_BYTES;
 use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
 use flamingo_verifier_sealed_types::{
     AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims,
@@ -105,7 +106,7 @@ fn prepare(
         .max()
         .unwrap_or_default();
     let unresolved = ResponseSlots(vec![latest_first_slot]);
-    let max_bytes = u64::try_from(MAX_MATCH_BODY_BYTES).unwrap_or(u64::MAX);
+    let max_bytes = u64::try_from(MAX_MATCH_PLAINTEXT_BYTES).unwrap_or(u64::MAX);
     let request = match Request::decode(plaintext, max_bytes) {
         Ok(request) => request,
         Err(error) => return (unresolved, Err(error.into())),
@@ -236,7 +237,7 @@ mod tests {
     use super::*;
     use crate::{
         biometric_engine::{BiometricEngine, DeepFaceScores, GrayBadgeScores, LiveCapture},
-        pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE},
+        pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE_LIGHTGUARD},
         test_support::{TEST_NOW, UnusedBiometricEngine, loaded_state, loaded_state_with_slots},
     };
     use eddsa_babyjubjub::EdDSAPrivateKey;
@@ -360,7 +361,7 @@ mod tests {
 
     fn gray_badge() -> Payload {
         Payload {
-            pipeline_id: PIPELINE_GRAYBADGE,
+            pipeline_id: PIPELINE_GRAYBADGE_LIGHTGUARD,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![
@@ -782,7 +783,7 @@ mod tests {
         let encoded = manifest.split('.').nth(1).unwrap();
         let mut payload: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
-        payload["pipelines"][1]["response_slots"] = serde_json::json!([200]);
+        payload["pipelines"][3]["response_slots"] = serde_json::json!([200]);
         state.load_release(&with_payload(&payload)).unwrap();
         let first = request(&deep_face(), 1);
         let running = tokio::spawn({

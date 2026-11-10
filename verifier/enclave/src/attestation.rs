@@ -138,6 +138,8 @@ struct Binding {
     attestor: Arc<dyn Attestor>,
     clock: Arc<VerifierClock>,
     public_key: Vec<u8>,
+    /// Held across every attestation, so documents are cached in the order their `user_data`
+    /// was set: a refresh that started earlier never overwrites a newer document.
     user_data: Mutex<Option<Vec<u8>>>,
     cached: Mutex<CachedAttestation>,
 }
@@ -148,11 +150,13 @@ impl Binding {
         let user_data = self
             .user_data
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let attestation = self
-            .attestor
-            .attest(&self.public_key, user_data.as_deref())?;
+            .unwrap_or_else(PoisonError::into_inner);
+        self.attest_with(user_data.as_deref())
+    }
+
+    /// Attests with `user_data` and caches the document. Call with the `user_data` lock held.
+    fn attest_with(&self, user_data: Option<&[u8]>) -> Result<(), enclave_types::Error> {
+        let attestation = self.attestor.attest(&self.public_key, user_data)?;
         self.clock.sync(attestation.timestamp_millis);
         *self.cached.lock().unwrap_or_else(PoisonError::into_inner) = CachedAttestation {
             document: attestation.document,
@@ -243,19 +247,15 @@ impl AttestedKey {
     ///
     /// Propagates the [`Attestor`] failure; the previous `user_data` and document then stay.
     pub fn set_user_data(&self, user_data: Vec<u8>) -> Result<(), enclave_types::Error> {
-        let previous = self
+        let mut current = self
             .binding
             .user_data
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(user_data);
-        self.binding.attest().inspect_err(|_| {
-            *self
-                .binding
-                .user_data
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = previous;
-        })
+            .unwrap_or_else(PoisonError::into_inner);
+        self.binding.attest_with(Some(&user_data))?;
+        *current = Some(user_data);
+        drop(current);
+        Ok(())
     }
 
     /// Starts the background refresh task.
@@ -375,7 +375,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{AttestedKey, Attestor, MAX_SERVABLE_AGE, VerifierClock};
+    use super::{AttestationDoc, AttestedKey, Attestor, MAX_SERVABLE_AGE, VerifierClock};
     use crate::test_support::{
         CountingAttestor, EchoAttestor, FailsAfterSuccessesAttestor, TEST_NOW,
     };
@@ -449,6 +449,80 @@ mod tests {
         assert_eq!(cached.document(), b"a-public-key");
         cached.set_user_data(b"release".to_vec()).unwrap();
         assert_eq!(cached.document(), b"a-public-key|release");
+    }
+
+    /// Blocks its first refresh (the second call) until released, so a test can set `user_data`
+    /// while that refresh is in flight.
+    struct GatedAttestor {
+        calls: std::sync::atomic::AtomicUsize,
+        refresh_started: std::sync::Barrier,
+        release_refresh: std::sync::Barrier,
+    }
+
+    impl Attestor for GatedAttestor {
+        fn attest(
+            &self,
+            public_key: &[u8],
+            user_data: Option<&[u8]>,
+        ) -> Result<super::Attestation, flamingo_verifier_enclave_types::Error> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 1 {
+                self.refresh_started.wait();
+                self.release_refresh.wait();
+            }
+            EchoAttestor.attest(public_key, user_data)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refresh_in_flight_never_overwrites_newer_user_data() {
+        let attestor = Arc::new(GatedAttestor {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            refresh_started: std::sync::Barrier::new(2),
+            release_refresh: std::sync::Barrier::new(2),
+        });
+        let mut cached = key(attestor.clone(), Duration::from_millis(10));
+        let _refresh = cached.start_refresh();
+        let cached = Arc::new(cached);
+
+        let waiting = Arc::clone(&attestor);
+        tokio::task::spawn_blocking(move || waiting.refresh_started.wait())
+            .await
+            .unwrap();
+        // The refresh holds the lock, so this waits for it and attests after it.
+        let setting = Arc::clone(&cached);
+        let set = tokio::task::spawn_blocking(move || setting.set_user_data(b"release".to_vec()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let releasing = Arc::clone(&attestor);
+        tokio::task::spawn_blocking(move || releasing.release_refresh.wait())
+            .await
+            .unwrap();
+        set.await.unwrap().unwrap();
+        assert_eq!(cached.document(), b"a-public-key|release");
+    }
+
+    #[test]
+    fn reads_the_timestamp_of_a_cose_document() {
+        use coset::CborSerializable as _;
+        let document = AttestationDoc {
+            module_id: "i-test".to_owned(),
+            digest: pontifex::nsm::Digest::SHA384,
+            timestamp: 1_783_446_000_123,
+            pcrs: std::collections::BTreeMap::new(),
+            certificate: flamingo_verifier_sealed_types::ByteBuf::new(),
+            cabundle: Vec::new(),
+            public_key: None,
+            user_data: None,
+            nonce: None,
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&document, &mut payload).unwrap();
+        let envelope = coset::CoseSign1Builder::new().payload(payload).build();
+        assert_eq!(
+            super::document_timestamp(&envelope.to_vec().unwrap()),
+            Some(1_783_446_000_123)
+        );
+        assert_eq!(super::document_timestamp(b"not cose"), None);
     }
 
     #[tokio::test(start_paused = true)]

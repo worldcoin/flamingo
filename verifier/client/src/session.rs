@@ -539,9 +539,9 @@ mod tests {
         unknown_pipeline.pipeline_id = 9;
         let mut unknown_level = payload();
         unknown_level.match_strictness = 4;
-        // Pipeline 2 checks two inputs.
+        // Pipeline 3 checks two inputs.
         let mut misfit = payload();
-        misfit.pipeline_id = 2;
+        misfit.pipeline_id = 3;
         for payload in [unknown_pipeline, unknown_level, misfit] {
             let mut socket = connect_to_stub(|_| async {}).await;
             let error = exchange_match(
