@@ -210,11 +210,9 @@ async fn sign(
     claims: &FlamingoClaims,
     debug_report: DebugReport,
 ) -> Result<MatchResult, enclave_types::Error> {
-    // `now` is the Verifier's time when it signs (WIP-201 §4.5).
-    let claims = FlamingoClaims {
-        now: u32::try_from(state.now()).map_err(|_| enclave_types::Error::Internal)?,
-        ..*claims
-    };
+    // `now` stays the time the expiry and the AAT were checked at, so the token never claims an
+    // AAT verified at a later time (WIP-201 §6 item 14).
+    let claims = *claims;
     let signing_key_attestation = state.signing_key_attestation();
 
     blocking(move || {
@@ -746,6 +744,21 @@ mod tests {
             rejected(FailureReason::MalformedInputs)
         );
         assert!(start.elapsed() >= Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn signs_the_time_the_request_was_checked_at() {
+        // The Engine finishes over a second after the checks, at the last slot.
+        let slow = Engine {
+            delay: Duration::from_millis(1100),
+            ..engine(0.95)
+        };
+        let state = loaded_state_with_slots(slow, SLOTS);
+        let claims = verify(
+            &state,
+            exchange(Arc::clone(&state), &request(&deep_face(), 1)).await,
+        );
+        assert_eq!(claims.now, NOW);
     }
 
     #[tokio::test]

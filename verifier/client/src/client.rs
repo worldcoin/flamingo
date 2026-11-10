@@ -110,7 +110,7 @@ pub fn open_verified_match(
 
 /// Rejects a verified result whose claims differ from `expected`.
 ///
-/// The Verifier chooses `now` when it signs, and signs either the `billing_nullifier` the request
+/// The Verifier sets `now` from its own clock, and signs either the `billing_nullifier` the request
 /// carried or `0` for an RP it does not bill (WIP-201 §4.5), so those two claims are checked apart.
 pub fn ensure_claims_match(
     expected: &FlamingoClaims,
