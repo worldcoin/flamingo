@@ -1,11 +1,10 @@
-//! Nitro Secure Module attestation.
+//! Nitro Secure Module attestation, and the Verifier clock synced to it (WIP-201 §4.4.2).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use flamingo_verifier_enclave_types as enclave_types;
 use pontifex::{AttestationDoc, SecureModule};
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -17,13 +16,28 @@ pub const MAX_CACHED_AGE: Duration = Duration::from_mins(10);
 /// default `max_attestation_age_millis` (1h).
 pub const MAX_SERVABLE_AGE: Duration = Duration::from_hours(1);
 
+/// A document and the time it states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attestation {
+    /// The raw `COSE_Sign1` document.
+    pub document: Vec<u8>,
+    /// The document's `timestamp`, in milliseconds since the Unix epoch.
+    pub timestamp_millis: u64,
+}
+
 /// Produces documents attesting a raw signing key or a channel-key commitment.
 pub trait Attestor: Send + Sync {
-    /// Attests `public_key` in the document's `public_key` field.
+    /// Attests `public_key` in the document's `public_key` field and `user_data` in its
+    /// `user_data` field.
+    ///
     /// # Errors
     ///
     /// Returns [`enclave_types::Error::AttestationFailed`] when the module rejects the request.
-    fn attest_public_key(&self, public_key: &[u8]) -> Result<Vec<u8>, enclave_types::Error>;
+    fn attest(
+        &self,
+        public_key: &[u8],
+        user_data: Option<&[u8]>,
+    ) -> Result<Attestation, enclave_types::Error>;
 }
 
 /// [`Attestor`] backed by the real Nitro Secure Module.
@@ -31,16 +45,73 @@ pub trait Attestor: Send + Sync {
 pub struct NsmAttestor;
 
 impl Attestor for NsmAttestor {
-    fn attest_public_key(&self, public_key: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
+    fn attest(
+        &self,
+        public_key: &[u8],
+        user_data: Option<&[u8]>,
+    ) -> Result<Attestation, enclave_types::Error> {
         let secure_module =
             SecureModule::try_global().ok_or(enclave_types::Error::SecureModuleNotInitialized)?;
 
-        secure_module
-            .raw_attest(None::<Vec<u8>>, None::<Vec<u8>>, Some(public_key.to_vec()))
+        let document = secure_module
+            .raw_attest(
+                user_data.map(<[u8]>::to_vec),
+                None::<Vec<u8>>,
+                Some(public_key.to_vec()),
+            )
             .map_err(|error| {
                 tracing::error!(?error, "failed to attest public key");
                 enclave_types::Error::AttestationFailed
-            })
+            })?;
+        let timestamp_millis = document_timestamp(&document).ok_or_else(|| {
+            tracing::error!("the Nitro Secure Module returned an unreadable document");
+            enclave_types::Error::AttestationFailed
+        })?;
+        Ok(Attestation {
+            document,
+            timestamp_millis,
+        })
+    }
+}
+
+/// The `timestamp` of a `COSE_Sign1` attestation document, without verifying its signature.
+fn document_timestamp(document: &[u8]) -> Option<u64> {
+    use coset::CborSerializable as _;
+    let envelope = coset::CoseSign1::from_slice(document).ok()?;
+    let payload = envelope.payload?;
+    ciborium::from_reader::<AttestationDoc, _>(payload.as_slice())
+        .ok()
+        .map(|document| document.timestamp)
+}
+
+/// The Verifier's time: the `timestamp` of its latest attestation, advanced on the monotonic
+/// clock since (WIP-201 §4.4.2 item 6). No other time source is used.
+#[derive(Debug)]
+pub struct VerifierClock {
+    anchor: Mutex<(u64, Instant)>,
+}
+
+impl VerifierClock {
+    /// A clock set to `timestamp_millis` now.
+    #[must_use]
+    pub fn new(timestamp_millis: u64) -> Self {
+        Self {
+            anchor: Mutex::new((timestamp_millis, Instant::now())),
+        }
+    }
+
+    /// Syncs the clock to the `timestamp` of a new attestation.
+    pub fn sync(&self, timestamp_millis: u64) {
+        *self.anchor.lock().unwrap_or_else(PoisonError::into_inner) =
+            (timestamp_millis, Instant::now());
+    }
+
+    /// The Verifier's time, in Unix seconds.
+    #[must_use]
+    pub fn now(&self) -> u64 {
+        let (timestamp_millis, at) = *self.anchor.lock().unwrap_or_else(PoisonError::into_inner);
+        let elapsed = u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        timestamp_millis.saturating_add(elapsed) / 1000
     }
 }
 
@@ -50,41 +121,140 @@ struct CachedAttestation {
     attested_at: Instant,
 }
 
-/// A boot-scoped key binding (raw key or commitment) and its latest attestation document.
+/// A boot-scoped key binding (raw key or commitment), the `user_data` attested with it, and its
+/// latest attestation document. Every successful attestation syncs the [`VerifierClock`].
 ///
 /// Call [`Self::start_refresh`] once; the returned handle must be supervised (see `main`).
 /// Until then the construction-time document is served. Readers always get the last
 /// successful document immediately.
 pub struct AttestedKey {
-    attestor: Arc<dyn Attestor>,
-    public_key: Vec<u8>,
+    binding: Arc<Binding>,
     max_age: Duration,
-    cached_attestation: Arc<Mutex<CachedAttestation>>,
     refresh_started: bool,
 }
 
+/// What [`AttestedKey`] shares with its refresh task.
+struct Binding {
+    attestor: Arc<dyn Attestor>,
+    clock: Arc<VerifierClock>,
+    public_key: Vec<u8>,
+    user_data: Mutex<Option<Vec<u8>>>,
+    cached: Mutex<CachedAttestation>,
+}
+
+impl Binding {
+    /// Attests the binding with its current `user_data` and caches the document.
+    fn attest(&self) -> Result<(), enclave_types::Error> {
+        let user_data = self
+            .user_data
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let attestation = self
+            .attestor
+            .attest(&self.public_key, user_data.as_deref())?;
+        self.clock.sync(attestation.timestamp_millis);
+        *self.cached.lock().unwrap_or_else(PoisonError::into_inner) = CachedAttestation {
+            document: attestation.document,
+            attested_at: Instant::now(),
+        };
+        Ok(())
+    }
+
+    fn attested_at(&self) -> Instant {
+        self.cached
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .attested_at
+    }
+}
+
 impl AttestedKey {
-    /// Constructs a new `AttestedKey` for `public_key` using the given `attestor`.
+    /// Attests `public_key` without `user_data`, and returns it with the clock its document set.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the [`Attestor`] failure.
+    pub fn first(
+        attestor: Arc<dyn Attestor>,
+        public_key: Vec<u8>,
+        max_age: Duration,
+    ) -> Result<(Self, Arc<VerifierClock>), enclave_types::Error> {
+        let attestation = attestor.attest(&public_key, None)?;
+        let clock = Arc::new(VerifierClock::new(attestation.timestamp_millis));
+        let key = Self::with_document(
+            attestor,
+            Arc::clone(&clock),
+            public_key,
+            max_age,
+            attestation,
+        );
+        Ok((key, clock))
+    }
+
+    /// Attests `public_key` without `user_data`, syncing `clock`.
     ///
     /// # Errors
     ///
     /// Propagates the [`Attestor`] failure.
     pub fn new(
         attestor: Arc<dyn Attestor>,
+        clock: Arc<VerifierClock>,
         public_key: Vec<u8>,
         max_age: Duration,
     ) -> Result<Self, enclave_types::Error> {
-        let document = attestor.attest_public_key(&public_key)?;
-
-        Ok(Self {
+        let attestation = attestor.attest(&public_key, None)?;
+        clock.sync(attestation.timestamp_millis);
+        Ok(Self::with_document(
             attestor,
+            clock,
             public_key,
             max_age,
-            cached_attestation: Arc::new(Mutex::new(CachedAttestation {
-                document,
-                attested_at: Instant::now(),
-            })),
+            attestation,
+        ))
+    }
+
+    fn with_document(
+        attestor: Arc<dyn Attestor>,
+        clock: Arc<VerifierClock>,
+        public_key: Vec<u8>,
+        max_age: Duration,
+        attestation: Attestation,
+    ) -> Self {
+        Self {
+            binding: Arc::new(Binding {
+                attestor,
+                clock,
+                public_key,
+                user_data: Mutex::new(None),
+                cached: Mutex::new(CachedAttestation {
+                    document: attestation.document,
+                    attested_at: Instant::now(),
+                }),
+            }),
+            max_age,
             refresh_started: false,
+        }
+    }
+
+    /// Attests the key again with `user_data`, which every later refresh keeps.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the [`Attestor`] failure; the previous `user_data` and document then stay.
+    pub fn set_user_data(&self, user_data: Vec<u8>) -> Result<(), enclave_types::Error> {
+        let previous = self
+            .binding
+            .user_data
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(user_data);
+        self.binding.attest().inspect_err(|_| {
+            *self
+                .binding
+                .user_data
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = previous;
         })
     }
 
@@ -97,29 +267,19 @@ impl AttestedKey {
         assert!(!self.refresh_started, "attestation refresh already started");
         self.refresh_started = true;
 
-        let attestor = Arc::clone(&self.attestor);
-        let public_key = self.public_key.clone();
+        let binding = Arc::clone(&self.binding);
         let max_age = self.max_age;
-        let cache = Arc::clone(&self.cached_attestation);
 
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(max_age).await;
 
-                let attestor = Arc::clone(&attestor);
-                let key = public_key.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || attestor.attest_public_key(&key)).await;
-
-                match result {
-                    Ok(Ok(document)) => {
-                        let mut cached = cache.lock().await;
-                        cached.document = document;
-                        cached.attested_at = Instant::now();
-                    }
+                let attesting = Arc::clone(&binding);
+                match tokio::task::spawn_blocking(move || attesting.attest()).await {
+                    Ok(Ok(())) => {}
                     Ok(Err(error)) => {
                         tracing::error!(?error, "background attestation refresh failed");
-                        let age = cache.lock().await.attested_at.elapsed();
+                        let age = binding.attested_at().elapsed();
                         if age >= MAX_SERVABLE_AGE {
                             tracing::error!(
                                 ?age,
@@ -143,8 +303,14 @@ impl AttestedKey {
     }
 
     /// Returns the cached attestation document (may be older than `max_age` while a refresh runs).
-    pub async fn document(&self) -> Vec<u8> {
-        self.cached_attestation.lock().await.document.clone()
+    #[must_use]
+    pub fn document(&self) -> Vec<u8> {
+        self.binding
+            .cached
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .document
+            .clone()
     }
 }
 
@@ -209,11 +375,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{AttestedKey, Attestor, MAX_SERVABLE_AGE};
-    use crate::test_support::{CountingAttestor, FailsAfterSuccessesAttestor};
+    use super::{AttestedKey, Attestor, MAX_SERVABLE_AGE, VerifierClock};
+    use crate::test_support::{
+        CountingAttestor, EchoAttestor, FailsAfterSuccessesAttestor, TEST_NOW,
+    };
 
     fn key(attestor: Arc<dyn Attestor>, max_age: Duration) -> AttestedKey {
-        AttestedKey::new(attestor, b"a-public-key".to_vec(), max_age).expect("should attest")
+        AttestedKey::first(attestor, b"a-public-key".to_vec(), max_age)
+            .expect("should attest")
+            .0
     }
 
     #[tokio::test]
@@ -221,7 +391,7 @@ mod tests {
         let attestor = Arc::new(CountingAttestor::new());
         let cached = key(attestor.clone(), Duration::from_hours(1));
 
-        assert_eq!(cached.document().await, cached.document().await);
+        assert_eq!(cached.document(), cached.document());
         assert_eq!(attestor.calls(), 1, "only the one at construction");
     }
 
@@ -230,11 +400,11 @@ mod tests {
         let attestor = Arc::new(CountingAttestor::new());
         let mut cached = key(attestor.clone(), Duration::from_millis(20));
         let _refresh = cached.start_refresh();
-        let before = cached.document().await;
+        let before = cached.document();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let after = cached.document().await;
+        let after = cached.document();
         assert_ne!(before, after);
         assert!(attestor.calls() >= 2);
     }
@@ -244,7 +414,7 @@ mod tests {
         let attestor = Arc::new(FailsAfterSuccessesAttestor::new(1));
         let mut cached = key(attestor.clone(), Duration::from_millis(20));
         let refresh = cached.start_refresh();
-        let before = cached.document().await;
+        let before = cached.document();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -252,7 +422,7 @@ mod tests {
             attestor.calls() >= 2,
             "failed refresh should have been attempted"
         );
-        assert_eq!(cached.document().await, before);
+        assert_eq!(cached.document(), before);
         assert!(!refresh.is_finished());
     }
 
@@ -271,5 +441,23 @@ mod tests {
         refresh.await.expect("refresh task should not panic");
 
         assert!(attestor.calls() >= 2);
+    }
+
+    #[tokio::test]
+    async fn user_data_is_attested_and_kept() {
+        let cached = key(Arc::new(EchoAttestor), Duration::from_hours(1));
+        assert_eq!(cached.document(), b"a-public-key");
+        cached.set_user_data(b"release".to_vec()).unwrap();
+        assert_eq!(cached.document(), b"a-public-key|release");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_clock_advances_from_the_latest_attestation() {
+        let clock = VerifierClock::new(u64::from(TEST_NOW) * 1000);
+        assert_eq!(clock.now(), u64::from(TEST_NOW));
+        tokio::time::advance(Duration::from_secs(90)).await;
+        assert_eq!(clock.now(), u64::from(TEST_NOW) + 90);
+        clock.sync(u64::from(TEST_NOW) * 1000 + 30_000);
+        assert_eq!(clock.now(), u64::from(TEST_NOW) + 30);
     }
 }

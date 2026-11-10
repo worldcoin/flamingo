@@ -32,15 +32,11 @@ fn config(base_url: &str) -> Config {
 }
 
 fn assignment(attestation: &str, public_key: &str) -> String {
-    assignment_with_releases(attestation, public_key, &["2a".repeat(32)])
-}
-
-fn assignment_with_releases(attestation: &str, public_key: &str, releases: &[String]) -> String {
     serde_json::json!({
         "type": "assignment",
         "attestation": attestation,
         "public_key": public_key,
-        "release_hashes": releases,
+        "release_manifest": "header.payload.signature",
     })
     .to_string()
 }
@@ -177,12 +173,14 @@ async fn rejects_malformed_base64_in_either_assignment_field() {
 }
 
 #[tokio::test]
-async fn rejects_a_release_hash_that_is_not_32_bytes_of_hex() {
-    for release in ["2a".repeat(31), "zz".repeat(32)] {
+async fn rejects_an_assignment_without_a_release_manifest() {
+    for release_manifest in [serde_json::Value::Null, serde_json::json!(["a.b.c"])] {
         let base_url = serve(move |mut socket| async move {
             expect_assignment_request(&mut socket).await;
-            let body = assignment_with_releases("hEBAQEA=", "a2V5", &[release]);
-            let _ = socket.send(Message::Text(body.into())).await;
+            let mut body: serde_json::Value =
+                serde_json::from_str(&assignment("hEBAQEA=", "a2V5")).unwrap();
+            body["release_manifest"] = release_manifest;
+            let _ = socket.send(Message::Text(body.to_string().into())).await;
         })
         .await;
 
@@ -190,7 +188,7 @@ async fn rejects_a_release_hash_that_is_not_32_bytes_of_hex() {
             .expect("client should build")
             .connect()
             .await
-            .expect_err("a malformed release_hash must be rejected");
+            .expect_err("an assignment without a release manifest must be rejected");
 
         assert!(
             matches!(error, client::Error::MalformedMessage),

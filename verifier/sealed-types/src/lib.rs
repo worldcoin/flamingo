@@ -11,6 +11,8 @@
 mod errors;
 mod messages;
 mod response;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 /// The WIP-201 request channel: `info` is `CHANNEL_DOMAIN || direction`, and the channel
 /// attestation commits to `SHA-256(CHANNEL_KEY_DOMAIN || channel_key)`.
@@ -30,8 +32,8 @@ pub use messages::*;
 pub use response::*;
 pub use serde_bytes::ByteBuf;
 pub use world_id_flamingo::{
-    AatInputs, Entry, FlamingoAatClaims, FlamingoClaims, FlamingoToken, Payload, Request,
-    RequestError,
+    AatInputs, Entry, FlamingoAatClaims, FlamingoClaims, FlamingoToken, Payload, ReleaseManifest,
+    Request, RequestError,
 };
 
 /// Bound on sealed match bytes before decryption.

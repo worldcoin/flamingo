@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
-/// This boot's channel encryption key and the NSM document attesting its commitment.
+/// This boot's channel encryption key, the NSM document attesting its commitment with the loaded
+/// `release_hash` as `user_data`, and that release's manifest (WIP-201 §4.4.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyAttestation {
     /// Raw COSE-encoded document.
@@ -12,13 +13,12 @@ pub struct KeyAttestation {
     /// Full X-Wing public key. The document's `public_key` field contains its Pontifex commitment.
     #[serde(with = "serde_bytes")]
     pub public_key: Vec<u8>,
-    /// `release_hash` of each loaded release; not covered by the attestation. Empty or one entry
-    /// for now, as an enclave loads one Engine.
-    pub release_hashes: Vec<[u8; 32]>,
+    /// The loaded release manifest as a compact JWS, as the provisioner loaded it. The document's
+    /// `user_data` is its `release_hash`.
+    pub release_manifest: String,
     /// Latest response slot across the loaded release's pipelines, in milliseconds.
     /// Not attested; used only by the untrusted host for its transport deadline.
-    /// None until the provisioner loads a release.
-    pub max_response_slot_millis: Option<u64>,
+    pub max_response_slot_millis: u64,
 }
 
 /// Requests the attestation for this boot's encryption key.

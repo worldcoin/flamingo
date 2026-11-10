@@ -78,12 +78,9 @@ impl EnclaveClient for PontifexEnclaveClient {
 
     async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, Error> {
         let metadata = self.encryption_key_attestation().await?;
-        let last_slot = metadata
-            .max_response_slot_millis
-            .ok_or(Error::Operation(enclave_types::Error::NotReady))?;
         self.call(
             request,
-            Duration::from_millis(last_slot) + Duration::from_secs(5),
+            Duration::from_millis(metadata.max_response_slot_millis) + Duration::from_secs(5),
         )
         .await
     }

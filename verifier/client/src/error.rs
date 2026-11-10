@@ -37,9 +37,13 @@ pub enum Error {
     /// The request violated a WIP-201 bound or its AAT did not verify.
     #[error("match request was malformed")]
     MalformedRequest,
-    /// The host does not list the release the request names.
-    #[error("the enclave has not loaded the requested release")]
+    /// The attested release does not define the request's pipeline or `match_strictness`, or the
+    /// request's `pipeline_inputs` do not fit the pipeline.
+    #[error("the enclave's release does not support the request's pipeline or strictness")]
     ReleaseUnavailable,
+    /// The assignment's attestation does not carry the `release_hash` of its release manifest.
+    #[error("the attestation does not attest the assignment's release manifest")]
+    ReleaseNotAttested,
     /// The sealed plaintext was not a match result.
     #[error("sealed response was not a match result")]
     MalformedResult,

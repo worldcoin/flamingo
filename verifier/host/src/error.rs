@@ -112,9 +112,9 @@ impl ApiError {
                     true,
                 )
                 .with_detail(format!("{operation:?}")),
-                // Above every pipeline's `max_request_bytes` of the loaded release.
+                // Above the enclave's sealed request limit.
                 enclave_types::Error::RequestTooLarge => Self::request_too_large()
-                    .with_detail("sealed request exceeds the release's max_request_bytes"),
+                    .with_detail("sealed request exceeds the enclave's size limit"),
                 // Only the release route returns `ReleaseRejected`; reaching it here is a host bug.
                 enclave_types::Error::ReleaseRejected => Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,

@@ -12,3 +12,4 @@ flamingo-verifier-sealed-types.workspace = true
 rand.workspace = true
 tokio.workspace = true
 flamingo-verifier-client.workspace = true
+world-id-primitives.workspace = true

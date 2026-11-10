@@ -12,7 +12,9 @@ The enclave caches attestations and refreshes them every 10 minutes. Requests re
 
 ## Flamingo Tokens
 
-The enclave validates request bounds, the release, pipeline, match strictness and optional AAT, and rejects replays. Its interim adapter interprets `pipeline`, positions in `compare` and LightGuard entry metadata to select the Engine operation and image roles; the Engine processes the image contents. A token signs `R(SHA-256(data))` of each compared entry, the RP's `aud` and `nonce`, and `engine_config_hash` over the `release_hash`, pipeline and match strictness. It carries no score. Binding the Credential image to a Credential is the job of the downstream proof (WIP-202). The request and token formats come from [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo).
+The enclave validates request bounds, expiry, pipeline, match strictness and optional AAT against the loaded release and its own time, and rejects replays. Its interim adapter interprets `pipeline_id`, positions in `compare`, `pipeline_inputs` and LightGuard entry metadata to select the Engine operation and image roles; the Engine processes the image contents. A token signs the enclave's time, `R(SHA-256(data))` of each compared entry, the RP's `aud` and `nonce`, `compare_sources`, `engine_config_hash` over the loaded `release_hash`, pipeline and match strictness, and `billing_nullifier = 0`, since the enclave bills no RP yet. It carries no score. Binding the Credential image to a Credential is the job of the downstream proof (WIP-202). The request and token formats come from [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo).
+
+The enclave's time is the `timestamp` of its latest Nitro attestation, advanced on its monotonic clock (WIP-201 §4.4.2). It attests its channel key again with the loaded `release_hash` as `user_data` when the provisioner loads the release.
 
 The enclave runs each (`aud`, `nonce`) once per boot. It keeps up to 262,144 of them in memory; once full, it refuses requests and reports not ready until it reboots with a new channel key.
 

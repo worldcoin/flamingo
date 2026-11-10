@@ -1,7 +1,7 @@
 //! Boot-scoped state owned by the enclave.
 
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use world_id_flamingo::ReleaseManifest;
 
 use crate::{
-    attestation::{AttestedKey, Attestor, MAX_CACHED_AGE},
+    attestation::{AttestedKey, Attestor, MAX_CACHED_AGE, VerifierClock},
     biometric_engine::BiometricEngine,
     keys::SigningKey,
     replay::ReplayGuard,
@@ -25,15 +25,21 @@ pub struct EnclaveState {
     channel: ChannelEnclave,
     /// Signs accepted match claims.
     signing_key: SigningKey,
-    /// Cached attestation of the sealed-channel key.
+    /// Cached attestation of the sealed-channel key, with the loaded `release_hash` as its
+    /// `user_data` once a release is loaded.
     attested_encryption_key: AttestedKey,
     /// Cached attestation of the statement key.
     attested_signing_key: AttestedKey,
+    /// The Verifier's time, synced to every attestation of either key.
+    clock: Arc<VerifierClock>,
     engine: Box<dyn BiometricEngine>,
-    /// `SHA-256` of the Engine bundle this boot runs.
-    engine_hash: [u8; 32],
-    /// The release manifest of that bundle, once the host has loaded it.
+    /// `SHA-384` of the Engine bundle this boot runs.
+    engine_hash: [u8; 48],
+    /// The release manifest of that bundle, once the host has loaded it and the channel key is
+    /// attested with its `release_hash`.
     release: OnceLock<ReleaseManifest>,
+    /// Serializes release loads, so only one manifest is ever attested.
+    loading: Mutex<()>,
     /// (`aud`, `nonce`) pairs processed under this boot's channel key.
     replay: ReplayGuard,
     /// Set once the Engine overran a pipeline's last response slot.
@@ -53,7 +59,7 @@ impl EnclaveState {
     pub fn generate(
         attestor: Arc<dyn Attestor>,
         engine: Box<dyn BiometricEngine>,
-        engine_hash: [u8; 32],
+        engine_hash: [u8; 48],
     ) -> Result<Self, enclave_types::Error> {
         let channel = ChannelEnclave::generate(CHANNEL_DOMAIN).map_err(|error| {
             tracing::error!(?error, "failed to generate channel key");
@@ -71,35 +77,43 @@ impl EnclaveState {
                     enclave_types::Error::AttestationFailed
                 })?;
 
-        let attested_encryption_key = AttestedKey::new(
+        let (attested_signing_key, clock) = AttestedKey::first(
             Arc::clone(&attestor),
+            signing_public_key.to_vec(),
+            MAX_CACHED_AGE,
+        )?;
+        let attested_encryption_key = AttestedKey::new(
+            attestor,
+            Arc::clone(&clock),
             channel.public_key_commitment().to_vec(),
             MAX_CACHED_AGE,
         )?;
-        let attested_signing_key =
-            AttestedKey::new(attestor, signing_public_key.to_vec(), MAX_CACHED_AGE)?;
 
         Ok(Self {
             channel,
             signing_key,
             attested_encryption_key,
             attested_signing_key,
+            clock,
             engine,
             engine_hash,
             release: OnceLock::new(),
+            loading: Mutex::new(()),
             replay: ReplayGuard::default(),
             engine_overran: AtomicBool::new(false),
         })
     }
 
-    /// Loads the release manifest of this boot's Engine bundle (WIP-201 §3.5.2).
+    /// Loads the release manifest of this boot's Engine bundle (WIP-201 §4.4.5) and attests the
+    /// channel key with its `release_hash` (§4.4.2 item 3).
     ///
     /// Loading the manifest already loaded succeeds again; any other manifest is rejected.
     ///
     /// # Errors
     ///
     /// Returns [`enclave_types::Error::ReleaseRejected`] for a manifest that is malformed, breaks a
-    /// WIP-201 rule, names another bundle, or differs from the one already loaded.
+    /// WIP-201 rule, names another bundle, or differs from the one already loaded, and
+    /// [`enclave_types::Error::AttestationFailed`] if the channel key cannot be attested with it.
     pub fn load_release(&self, compact: &str) -> Result<(), enclave_types::Error> {
         let manifest = ReleaseManifest::from_jws(compact).map_err(|error| {
             tracing::warn!(%error, "release manifest rejected");
@@ -112,13 +126,18 @@ impl EnclaveState {
             );
             return Err(enclave_types::Error::ReleaseRejected);
         }
-        let loaded = self.release.get_or_init(|| manifest.clone());
-        if loaded.release_hash() == manifest.release_hash() {
-            Ok(())
-        } else {
+        let _loading = self.loading.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(loaded) = self.release.get() {
+            if loaded.release_hash() == manifest.release_hash() {
+                return Ok(());
+            }
             tracing::warn!("a different release manifest is already loaded");
-            Err(enclave_types::Error::ReleaseRejected)
+            return Err(enclave_types::Error::ReleaseRejected);
         }
+        self.attested_encryption_key
+            .set_user_data(manifest.release_hash().to_vec())?;
+        let _ = self.release.set(manifest);
+        Ok(())
     }
 
     /// The loaded release manifest, if any.
@@ -127,13 +146,10 @@ impl EnclaveState {
         self.release.get()
     }
 
-    /// `release_hash` of each loaded release.
+    /// The Verifier's time, in Unix seconds (WIP-201 §4.4.2 item 6).
     #[must_use]
-    pub fn release_hashes(&self) -> Vec<[u8; 32]> {
-        self.release()
-            .map(ReleaseManifest::release_hash)
-            .into_iter()
-            .collect()
+    pub fn now(&self) -> u64 {
+        self.clock.now()
     }
 
     /// Rejects requests this boot already processed.
@@ -148,7 +164,7 @@ impl EnclaveState {
         self.engine_overran.load(Ordering::Relaxed)
     }
 
-    /// WIP-201 §3.5.4: an Engine that overran the last slot is terminated and reset.
+    /// WIP-201 §4.4.4: an Engine that overran the last slot is terminated and reset.
     pub fn reset_overrunning_engine(&self) {
         if !self.engine_overran.swap(true, Ordering::Relaxed) {
             tracing::error!(
@@ -207,13 +223,15 @@ impl EnclaveState {
     }
 
     /// The attestation document for the encryption public key (last successful cache entry).
-    pub async fn encryption_key_attestation(&self) -> Vec<u8> {
-        self.attested_encryption_key.document().await
+    #[must_use]
+    pub fn encryption_key_attestation(&self) -> Vec<u8> {
+        self.attested_encryption_key.document()
     }
 
     /// The attestation document for the signing public key (last successful cache entry).
-    pub async fn signing_key_attestation(&self) -> Vec<u8> {
-        self.attested_signing_key.document().await
+    #[must_use]
+    pub fn signing_key_attestation(&self) -> Vec<u8> {
+        self.attested_signing_key.document()
     }
 }
 
@@ -225,8 +243,8 @@ mod tests {
 
     use super::EnclaveState;
     use crate::test_support::{
-        EchoAttestor, FailingAttestor, TEST_ENGINE_HASH, UnusedBiometricEngine, manifest,
-        state_with,
+        EchoAttestor, FailingAttestor, TEST_ENGINE_HASH, TEST_NOW, UnusedBiometricEngine, echo,
+        manifest, state_with,
     };
 
     fn state() -> Arc<EnclaveState> {
@@ -253,24 +271,25 @@ mod tests {
         assert_ne!(first.signing_public_key(), second.signing_public_key());
     }
 
-    #[tokio::test]
-    async fn each_key_is_attested_in_its_own_document() {
+    #[test]
+    fn each_key_is_attested_in_its_own_document() {
         let state = state();
 
         assert_eq!(
-            state.encryption_key_attestation().await,
+            state.encryption_key_attestation(),
             flamingo_verifier_sealed_types::CHANNEL_DOMAIN
                 .public_key_commitment(&state.encryption_public_key())
                 .to_vec()
         );
         assert_eq!(
-            state.signing_key_attestation().await,
+            state.signing_key_attestation(),
             state
                 .signing_public_key()
                 .to_compressed_bytes()
                 .expect("generated BabyJubJub public key serializes")
                 .to_vec()
         );
+        assert_eq!(state.now(), u64::from(TEST_NOW));
     }
 
     /// An enclave that cannot prove its own identity must not reach the point of serving.
@@ -287,27 +306,32 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_manifest_of_its_bundle_once() {
+    fn loads_the_manifest_of_its_bundle_once_and_attests_it() {
         let state = state();
-        assert!(state.release_hashes().is_empty());
+        assert!(state.release().is_none());
 
-        let current = manifest(TEST_ENGINE_HASH, "1.0.0");
+        let current = manifest(TEST_ENGINE_HASH, 1);
         assert_eq!(state.load_release(&current), Ok(()));
         assert_eq!(state.load_release(&current), Ok(()));
         let release_hash = state.release().expect("loaded").release_hash();
-        assert_eq!(state.release_hashes(), vec![release_hash]);
+        let commitment = flamingo_verifier_sealed_types::CHANNEL_DOMAIN
+            .public_key_commitment(&state.encryption_public_key());
+        assert_eq!(
+            state.encryption_key_attestation(),
+            echo(&commitment, Some(&release_hash))
+        );
 
         assert_eq!(
-            state.load_release(&manifest(TEST_ENGINE_HASH, "1.0.1")),
+            state.load_release(&manifest(TEST_ENGINE_HASH, 2)),
             Err(enclave_types::Error::ReleaseRejected)
         );
-        assert_eq!(state.release_hashes(), vec![release_hash]);
+        assert_eq!(state.release().unwrap().release_hash(), release_hash);
     }
 
     #[test]
     fn rejects_a_manifest_for_another_bundle_or_a_malformed_one() {
         let state = state();
-        for rejected in [manifest([0x2b; 32], "1.0.0"), "not.a.jws".to_owned()] {
+        for rejected in [manifest([0x2b; 48], 1), "not.a.jws".to_owned()] {
             assert_eq!(
                 state.load_release(&rejected),
                 Err(enclave_types::Error::ReleaseRejected)

@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use flamingo_verifier_enclave_types::{self as enclave_types, MatchRequest, MatchResponse};
 use flamingo_verifier_sealed_types::{
-    AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims, MatchResult,
-    Request, expected_claims,
+    AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims,
+    MAX_MATCH_BODY_BYTES, MatchResult, Request, expected_claims,
 };
 use tokio::time::{Instant, sleep_until};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
@@ -16,23 +16,17 @@ use crate::{
 };
 
 /// Opens one request, runs it on the loaded release and seals the outcome, released at the
-/// pipeline's next response slot (WIP-201 §3.5.4).
+/// pipeline's next response slot (WIP-201 §4.4.4).
 pub async fn handler(
     state: Arc<EnclaveState>,
     request: MatchRequest,
 ) -> Result<MatchResponse, enclave_types::Error> {
     let arrival = Instant::now();
-    let Some(release) = state.release() else {
-        return Err(enclave_types::Error::NotReady);
-    };
-    if state.engine_overran() {
+    if state.release().is_none() || state.engine_overran() {
         return Err(enclave_types::Error::NotReady);
     }
-    // WIP-201 §3.2: a sealed request above every pipeline's limit is rejected before opening.
-    let sealed_len = u64::try_from(request.body.len()).unwrap_or(u64::MAX);
-    if request.body.len() > flamingo_verifier_sealed_types::MAX_MATCH_BODY_BYTES
-        || sealed_len > release.max_request_bytes()
-    {
+    // Rejected before opening: the Verifier's size limit holds whatever the host relays.
+    if request.body.len() > MAX_MATCH_BODY_BYTES {
         return Err(enclave_types::Error::RequestTooLarge);
     }
 
@@ -45,7 +39,7 @@ pub async fn handler(
         let release = opening_state
             .release()
             .ok_or(enclave_types::Error::Internal)?;
-        let (slots, prepared) = prepare(&opening_state, release, &plaintext, sealed_len);
+        let (slots, prepared) = prepare(&opening_state, release, &plaintext);
         drop(plaintext);
         Ok::<_, enclave_types::Error>((sealer, slots, prepared))
     })
@@ -92,8 +86,8 @@ struct Prepared {
     operation: Operation,
 }
 
-/// Checks the request against the release, verifies its AAT and records its (`aud`, `nonce`).
-/// A failure here never reaches the Engine.
+/// Checks the request against the release and the Verifier's time, verifies its AAT and records
+/// its (`aud`, `nonce`) (WIP-201 §4.4.3). A failure here never reaches the Engine.
 ///
 /// Returns the slots the response is released at: the pipeline's, or, before the pipeline is
 /// known, the latest first slot of any pipeline, so an early rejection never leaves sooner than
@@ -102,7 +96,6 @@ fn prepare(
     state: &EnclaveState,
     release: &ReleaseManifest,
     plaintext: &[u8],
-    sealed_len: u64,
 ) -> (ResponseSlots, Result<Prepared, FailureReason>) {
     let latest_first_slot = release
         .payload()
@@ -112,7 +105,8 @@ fn prepare(
         .max()
         .unwrap_or_default();
     let unresolved = ResponseSlots(vec![latest_first_slot]);
-    let request = match Request::decode(plaintext, release.max_request_bytes()) {
+    let max_bytes = u64::try_from(MAX_MATCH_BODY_BYTES).unwrap_or(u64::MAX);
+    let request = match Request::decode(plaintext, max_bytes) {
         Ok(request) => request,
         Err(error) => return (unresolved, Err(error.into())),
     };
@@ -120,26 +114,20 @@ fn prepare(
         Ok(payload) => payload,
         Err(error) => return (unresolved, Err(error.into())),
     };
-    if payload.release_hash != release.release_hash() {
-        return (unresolved, Err(FailureReason::UnsupportedRelease));
-    }
-    let Some(pipeline) = release.pipeline(payload.pipeline) else {
+    let Some(pipeline) = release.pipeline(payload.pipeline_id) else {
         return (unresolved, Err(FailureReason::UnsupportedPipeline));
     };
     let slots = pipeline.response_slots.clone();
     let checked = (|| {
-        if sealed_len > pipeline.max_request_bytes {
-            return Err(FailureReason::RequestTooLarge);
-        }
-        if release
-            .match_strictness_level(payload.match_strictness)
-            .is_none()
-        {
+        if !release.has_match_strictness(payload.match_strictness) {
             return Err(FailureReason::UnsupportedMatchStrictness);
         }
         let threshold = pipeline::threshold(payload.match_strictness)?;
+        let now = state.now();
+        request.check_expiry(now)?;
+        let now = u32::try_from(now).map_err(|_| FailureReason::Internal)?;
         // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
-        let claims = expected_claims(&request, &payload)?;
+        let claims = expected_claims(&request, &payload, release, now)?;
         let operation = pipeline::operation(payload)?;
         // Reserve last; a Busy result releases it because inference never started.
         state.replay().reserve(request.aud, request.nonce)?;
@@ -221,8 +209,12 @@ async fn sign(
     claims: &FlamingoClaims,
     debug_report: DebugReport,
 ) -> Result<MatchResult, enclave_types::Error> {
-    let claims = *claims;
-    let signing_key_attestation = state.signing_key_attestation().await;
+    // `now` is the Verifier's time when it signs (WIP-201 §4.5).
+    let claims = FlamingoClaims {
+        now: u32::try_from(state.now()).map_err(|_| enclave_types::Error::Internal)?,
+        ..*claims
+    };
+    let signing_key_attestation = state.signing_key_attestation();
 
     blocking(move || {
         Ok(MatchResult::Success {
@@ -245,9 +237,7 @@ mod tests {
     use crate::{
         biometric_engine::{BiometricEngine, DeepFaceScores, GrayBadgeScores, LiveCapture},
         pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE},
-        test_support::{
-            TEST_MAX_REQUEST_BYTES, UnusedBiometricEngine, loaded_state, loaded_state_with_slots,
-        },
+        test_support::{TEST_NOW, UnusedBiometricEngine, loaded_state, loaded_state_with_slots},
     };
     use eddsa_babyjubjub::EdDSAPrivateKey;
     use flamingo_verifier_sealed_types::{AatInputs, CHANNEL_DOMAIN, Entry, Payload};
@@ -263,7 +253,8 @@ mod tests {
     };
 
     const AUD: u64 = 1_928_118;
-    const NOW: u32 = 1_783_446_000;
+    const NOW: u32 = TEST_NOW;
+    const EXPIRES_AT: u64 = TEST_NOW as u64 + 300;
 
     struct Engine {
         third: f32,
@@ -352,9 +343,9 @@ mod tests {
         }
     }
 
-    fn deep_face(state: &EnclaveState) -> Payload {
+    fn deep_face() -> Payload {
         Payload {
-            pipeline: PIPELINE_DEEPFACE,
+            pipeline_id: PIPELINE_DEEPFACE,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![
@@ -362,14 +353,14 @@ mod tests {
                 entry(b"live", b""),
                 entry(b"challenge", b""),
             ],
+            pipeline_inputs: vec![1],
             compare: vec![0, 1, 2],
-            release_hash: state.release().unwrap().release_hash(),
         }
     }
 
-    fn gray_badge(state: &EnclaveState) -> Payload {
+    fn gray_badge() -> Payload {
         Payload {
-            pipeline: PIPELINE_GRAYBADGE,
+            pipeline_id: PIPELINE_GRAYBADGE,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![
@@ -377,13 +368,25 @@ mod tests {
                 entry(b"challenge", b""),
                 entry(b"dark", b"unilluminated"),
             ],
+            pipeline_inputs: vec![0, 2],
             compare: vec![0, 1],
-            release_hash: state.release().unwrap().release_hash(),
         }
     }
 
+    fn request_for(aud: u64, payload: &Payload, nonce: u64, expires_at: u64) -> Request {
+        Request::new(
+            aud.into(),
+            nonce.into(),
+            expires_at,
+            FieldElement::ZERO,
+            payload,
+            None,
+        )
+        .unwrap()
+    }
+
     fn request(payload: &Payload, nonce: u64) -> Request {
-        Request::new(AUD.into(), nonce.into(), payload, None).unwrap()
+        request_for(AUD, payload, nonce, EXPIRES_AT)
     }
 
     /// A TAKT and an AAT over `request`'s exact payload.
@@ -409,7 +412,6 @@ mod tests {
             trust_anchor_key: trust_anchor_key.public().to_compressed_bytes().unwrap(),
             takt,
             aat,
-            now: NOW,
             min_build_version: 2006,
         });
         request
@@ -466,7 +468,7 @@ mod tests {
         passing.busy.store(true, Ordering::SeqCst);
         let calls = Arc::clone(&passing.calls);
         let state = loaded_state(passing);
-        let request = request(&deep_face(&state), 77);
+        let request = request(&deep_face(), 77);
         let consumer = ChannelConsumer::from_unverified_public_key(
             CHANNEL_DOMAIN,
             &state.channel().public_key(),
@@ -497,7 +499,7 @@ mod tests {
         let passing = engine(0.95);
         let calls = Arc::clone(&passing.calls);
         let state = loaded_state(passing);
-        let request = request(&deep_face(&state), 77);
+        let request = request(&deep_face(), 77);
         let (a, b) = tokio::join!(
             exchange(Arc::clone(&state), &request),
             exchange(Arc::clone(&state), &request)
@@ -522,33 +524,66 @@ mod tests {
     #[tokio::test]
     async fn signs_claims_bound_to_the_request() {
         let state = loaded_state(engine(0.95));
-        for (nonce, payload) in [(1, deep_face(&state)), (2, gray_badge(&state))] {
+        let release = state.release().unwrap().clone();
+        for (nonce, payload, compare_sources) in [(1, deep_face(), 256), (2, gray_badge(), 1)] {
             let request = request(&payload, nonce);
             let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
-            assert_eq!(claims, expected_claims(&request, &payload).unwrap());
+            assert_eq!(
+                claims,
+                expected_claims(&request, &payload, &release, NOW).unwrap()
+            );
             assert_eq!(
                 claims.engine_config_hash,
-                engine_config_hash(&payload.release_hash, payload.pipeline, 2)
+                engine_config_hash(&release.release_hash(), payload.pipeline_id, 2)
             );
+            assert_eq!(claims.compare_sources, compare_sources);
+            assert_eq!(claims.billing_nullifier, FieldElement::ZERO);
             assert_eq!(claims.compared_entry_hashes[3], FieldElement::ZERO);
         }
     }
 
     #[tokio::test]
+    async fn signs_the_billing_nullifier_zero_whatever_the_request_carries() {
+        let state = loaded_state(engine(0.95));
+        let request = Request::new(
+            AUD.into(),
+            1u64.into(),
+            EXPIRES_AT,
+            11u64.into(),
+            &deep_face(),
+            None,
+        )
+        .unwrap();
+        let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
+        assert_eq!(claims.billing_nullifier, FieldElement::ZERO);
+    }
+
+    #[tokio::test]
     async fn signs_the_verified_aat_values() {
         let state = loaded_state(engine(0.95));
-        let request = with_aat(request(&deep_face(&state), 1));
-        let aat = request.verify_aat().unwrap();
+        let request = with_aat(request(&deep_face(), 1));
+        let aat = request.verify_aat(NOW).unwrap();
         let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
         assert_eq!(claims.aat, aat);
-        assert_eq!(claims.aat.unwrap().now, NOW);
+        assert_eq!(claims.now, NOW);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_expired_or_too_distant_request_before_inference() {
+        for expires_at in [u64::from(NOW) - 1, u64::from(NOW) + 601] {
+            let state = loaded_state(UnusedBiometricEngine);
+            assert_eq!(
+                exchange(state, &request_for(AUD, &deep_face(), 1, expires_at)).await,
+                rejected(FailureReason::Expired)
+            );
+        }
     }
 
     #[tokio::test]
     async fn an_aat_for_another_payload_rejects_before_inference() {
         let state = loaded_state(UnusedBiometricEngine);
-        let mut request = with_aat(request(&deep_face(&state), 1));
-        let mut other = deep_face(&state);
+        let mut request = with_aat(request(&deep_face(), 1));
+        let mut other = deep_face();
         other.match_strictness = 3;
         request.payload = other.encode().unwrap();
         assert_eq!(
@@ -561,7 +596,7 @@ mod tests {
     async fn every_comparison_must_clear_the_strictness_level() {
         let state = loaded_state(engine(0.89));
         assert_eq!(
-            exchange(Arc::clone(&state), &request(&deep_face(&state), 1)).await,
+            exchange(Arc::clone(&state), &request(&deep_face(), 1)).await,
             MatchResult::Failed {
                 reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
                 debug_report: Some("{\"engine\":\"test\"}".to_owned()).into(),
@@ -569,7 +604,7 @@ mod tests {
         );
 
         let state = loaded_state(engine(0.92));
-        let mut strict = deep_face(&state);
+        let mut strict = deep_face();
         strict.match_strictness = 3;
         assert!(matches!(
             exchange(state, &request(&strict, 1)).await,
@@ -585,22 +620,26 @@ mod tests {
         type Change = (fn(&mut Payload), FailureReason);
         let changes: [Change; 4] = [
             (
-                |p| p.release_hash = [0; 32],
-                FailureReason::UnsupportedRelease,
-            ),
-            (
                 |p| p.match_strictness = 4,
                 FailureReason::UnsupportedMatchStrictness,
             ),
-            (|p| p.pipeline = 9, FailureReason::UnsupportedPipeline),
+            (|p| p.pipeline_id = 9, FailureReason::UnsupportedPipeline),
+            // Pipeline 1 checks one input.
             (
-                |p| p.compare = vec![0, 1],
+                |p| p.pipeline_inputs = vec![1, 2],
+                FailureReason::UnsupportedPipeline,
+            ),
+            (
+                |p| {
+                    p.compare = vec![0, 1];
+                    p.pipeline_inputs = vec![2];
+                },
                 FailureReason::UnsupportedPipeline,
             ),
         ];
         for (change, reason) in changes {
             let state = loaded_state(UnusedBiometricEngine);
-            let mut payload = deep_face(&state);
+            let mut payload = deep_face();
             change(&mut payload);
             assert_eq!(
                 exchange(state, &request(&payload, 1)).await,
@@ -616,21 +655,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enforces_the_pipeline_request_limit_after_opening() {
+    async fn rejects_a_request_above_the_limit_before_opening() {
         let state = loaded_state(UnusedBiometricEngine);
-        // Pipeline 2 allows half of pipeline 1, so this passes the pre-opening check only.
-        let mut payload = gray_badge(&state);
-        payload.entries[1].data = vec![0; usize::try_from(TEST_MAX_REQUEST_BYTES / 2).unwrap()];
-        assert_eq!(
-            exchange(state, &request(&payload, 1)).await,
-            rejected(FailureReason::RequestTooLarge)
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_a_request_above_every_limit_before_opening() {
-        let state = loaded_state(UnusedBiometricEngine);
-        let body = vec![0; usize::try_from(TEST_MAX_REQUEST_BYTES).unwrap() + 1];
+        let body = vec![0; MAX_MATCH_BODY_BYTES + 1];
         assert_eq!(
             handler(state, MatchRequest { body: body.into() }).await,
             Err(enclave_types::Error::RequestTooLarge)
@@ -657,7 +684,7 @@ mod tests {
         let failing = engine(0.5);
         let calls = Arc::clone(&failing.calls);
         let state = loaded_state(failing);
-        let request = request(&deep_face(&state), 1);
+        let request = request(&deep_face(), 1);
         // A failed comparison still consumes the nonce.
         assert!(matches!(
             exchange(Arc::clone(&state), &request).await,
@@ -675,8 +702,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         // Another `aud` or `nonce` is a new request; a new boot starts a new set.
-        let payload = deep_face(&state);
-        let other_aud = Request::new(7u64.into(), 1u64.into(), &payload, None).unwrap();
+        let other_aud = request_for(7, &deep_face(), 1, EXPIRES_AT);
         assert!(matches!(
             exchange(Arc::clone(&state), &other_aud).await,
             MatchResult::Failed {
@@ -702,7 +728,7 @@ mod tests {
     #[tokio::test]
     async fn an_early_rejection_waits_for_the_first_slot() {
         let state = loaded_state_with_slots(UnusedBiometricEngine, SLOTS);
-        let mut payload = deep_face(&state);
+        let mut payload = deep_face();
         payload.match_strictness = 4;
         let (result, elapsed) = timed(state, &request(&payload, 1)).await;
         assert_eq!(result, rejected(FailureReason::UnsupportedMatchStrictness));
@@ -728,7 +754,7 @@ mod tests {
             ..engine(0.95)
         };
         let state = loaded_state_with_slots(slow, SLOTS);
-        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(), 1)).await;
         assert!(matches!(result, MatchResult::Success { .. }));
         assert!(elapsed >= Duration::from_millis(800), "{elapsed:?}");
         assert!(elapsed < Duration::from_millis(1600), "{elapsed:?}");
@@ -736,7 +762,9 @@ mod tests {
 
     #[tokio::test]
     async fn queued_request_can_retry_without_resetting_an_active_engine() {
-        use crate::test_support::{EchoAttestor, TEST_ENGINE_HASH, manifest_with_slots};
+        use crate::test_support::{
+            EchoAttestor, TEST_ENGINE_HASH, manifest_with_slots, with_payload,
+        };
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let slow = Engine {
@@ -750,20 +778,13 @@ mod tests {
                 .unwrap(),
         );
         // DeepFace has time to finish, but the queued GrayBadge request expires first.
-        let manifest = manifest_with_slots(TEST_ENGINE_HASH, "1.0.0", SLOTS);
-        let parts: Vec<_> = manifest.split('.').collect();
+        let manifest = manifest_with_slots(TEST_ENGINE_HASH, 1, SLOTS);
+        let encoded = manifest.split('.').nth(1).unwrap();
         let mut payload: serde_json::Value =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
         payload["pipelines"][1]["response_slots"] = serde_json::json!([200]);
-        state
-            .load_release(&format!(
-                "{}.{}.{}",
-                parts[0],
-                URL_SAFE_NO_PAD.encode(payload.to_string()),
-                parts[2]
-            ))
-            .unwrap();
-        let first = request(&deep_face(&state), 1);
+        state.load_release(&with_payload(&payload)).unwrap();
+        let first = request(&deep_face(), 1);
         let running = tokio::spawn({
             let state = Arc::clone(&state);
             async move { exchange(state, &first).await }
@@ -775,7 +796,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let queued = request(&gray_badge(&state), 2);
+        let queued = request(&gray_badge(), 2);
         let consumer = ChannelConsumer::from_unverified_public_key(
             CHANNEL_DOMAIN,
             &state.channel().public_key(),
@@ -809,7 +830,7 @@ mod tests {
         };
         let terminated = Arc::clone(&stuck.terminated);
         let state = loaded_state_with_slots(stuck, SLOTS);
-        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(&state), 1)).await;
+        let (result, elapsed) = timed(Arc::clone(&state), &request(&deep_face(), 1)).await;
         assert_eq!(result, rejected(FailureReason::EngineTimeout));
         assert!(elapsed >= Duration::from_millis(1600), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
