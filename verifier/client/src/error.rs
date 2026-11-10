@@ -41,6 +41,10 @@ pub enum Error {
     /// request's `pipeline_inputs` do not fit the pipeline.
     #[error("the enclave's release does not support the request's pipeline or strictness")]
     ReleaseUnavailable,
+    /// The request's pipeline lists more response slots than the configured maximum, so its
+    /// response timing could reveal too much (WIP-201 §4.6 step 3).
+    #[error("the pipeline lists more response slots than the configured maximum")]
+    TooManyResponseSlots,
     /// The assignment's attestation does not carry the `release_hash` of its release manifest.
     #[error("the attestation does not attest the assignment's release manifest")]
     ReleaseNotAttested,

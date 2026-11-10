@@ -26,6 +26,11 @@ const fn default_request_timeout_millis() -> u64 {
     60_000
 }
 
+/// WIP-201 §4.6 step 3: at most 8 slots, so a response's timing reveals at most 3 bits.
+const fn default_max_response_slots() -> usize {
+    8
+}
+
 /// Configuration to interact with a Flamingo Verifier host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +53,9 @@ pub struct Config {
     /// Bound on a whole exchange.
     #[serde(default = "default_request_timeout_millis")]
     request_timeout_millis: u64,
+    /// Most response slots a pipeline may list before the client sends biometrics to it.
+    #[serde(default = "default_max_response_slots")]
+    max_response_slots: usize,
 }
 
 impl Config {
@@ -97,6 +105,7 @@ impl Config {
             max_attestation_age_millis: default_max_attestation_age_millis(),
             connect_timeout_millis: default_connect_timeout_millis(),
             request_timeout_millis: default_request_timeout_millis(),
+            max_response_slots: default_max_response_slots(),
         };
         config.validate()?;
 
@@ -117,6 +126,13 @@ impl Config {
         self
     }
 
+    /// Bounds how many response slots a pipeline may list (WIP-201 §4.6 step 3).
+    #[must_use]
+    pub const fn with_max_response_slots(mut self, max_slots: usize) -> Self {
+        self.max_response_slots = max_slots;
+        self
+    }
+
     /// Loads a configuration from JSON.
     ///
     /// # Errors
@@ -132,6 +148,12 @@ impl Config {
 
     /// Validates the measurement policy before constructing the verifier.
     fn validate(&self) -> Result<(), Error> {
+        if self.max_response_slots == 0 {
+            return Err(Error::InvalidConfig {
+                attribute: "max_response_slots".to_owned(),
+                reason: "must be nonzero".to_owned(),
+            });
+        }
         self.verifier().map(|_| ())
     }
 
@@ -214,6 +236,12 @@ impl Config {
     #[must_use]
     pub const fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.request_timeout_millis)
+    }
+
+    /// Most response slots a pipeline may list before the client sends biometrics to it.
+    #[must_use]
+    pub const fn max_response_slots(&self) -> usize {
+        self.max_response_slots
     }
 }
 
@@ -509,6 +537,7 @@ mod tests {
 
         let decoded = Config::from_json(&json.to_string()).expect("config should parse");
         assert_eq!(decoded.request_timeout(), Duration::from_mins(1));
+        assert_eq!(decoded.max_response_slots(), 8);
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
 }

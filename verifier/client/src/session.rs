@@ -43,6 +43,7 @@ pub struct FlamingoVerifierSession {
     assignment: VerifiedAssignment,
     verifier: Verifier,
     request_timeout: Duration,
+    max_response_slots: usize,
 }
 
 impl FlamingoVerifierSession {
@@ -68,6 +69,7 @@ impl FlamingoVerifierSession {
             &mut self.socket,
             self.assignment.consumer(),
             self.assignment.release(),
+            self.max_response_slots,
             request,
             &self.verifier,
             self.request_timeout,
@@ -124,6 +126,7 @@ pub async fn connect(
         assignment,
         verifier,
         request_timeout: config.request_timeout(),
+        max_response_slots: config.max_response_slots(),
     })
 }
 
@@ -197,14 +200,22 @@ async fn exchange_match(
     socket: &mut Socket,
     consumer: &pontifex::ChannelConsumer,
     release: &ReleaseManifest,
+    max_response_slots: usize,
     request: &Request,
     verifier: &Verifier,
     request_timeout: Duration,
 ) -> Result<VerifiedMatchResult, Error> {
-    // Checks the bounds, the release and the AAT before any biometric data leaves the device.
+    // Checks the bounds, the release, its timing budget and the AAT before any biometric data
+    // leaves the device.
     let payload = request.payload().map_err(|_| Error::MalformedRequest)?;
     if !release.has_match_strictness(payload.match_strictness) {
         return Err(Error::ReleaseUnavailable);
+    }
+    if release
+        .pipeline(payload.pipeline_id)
+        .is_some_and(|pipeline| pipeline.response_slots.0.len() > max_response_slots)
+    {
+        return Err(Error::TooManyResponseSlots);
     }
     let expected =
         expected_claims(request, &payload, release, unix_now()).map_err(|reason| match reason {
@@ -318,6 +329,9 @@ mod tests {
     fn verifier() -> super::Verifier {
         super::Verifier::new(vec![PcrConfig::new([0xab; 48])], Duration::from_mins(1))
     }
+
+    /// The client's default slot budget; the test manifest lists 4 slots.
+    const MAX_SLOTS: usize = 8;
 
     fn release() -> ReleaseManifest {
         ReleaseManifest::from_jws(&testing::manifest(testing::TEST_ENGINE_HASH, 1))
@@ -439,6 +453,7 @@ mod tests {
             &mut socket,
             &consumer_for(&responder),
             &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -493,6 +508,7 @@ mod tests {
             &mut socket,
             &consumer_for(&responder()),
             &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             Duration::from_millis(100),
@@ -523,6 +539,7 @@ mod tests {
             &mut socket,
             &consumer_for(&responder()),
             &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -548,6 +565,7 @@ mod tests {
                 &mut socket,
                 &consumer_for(&responder()),
                 &release(),
+                MAX_SLOTS,
                 &request_with(&payload),
                 &verifier(),
                 TIMEOUT,
@@ -556,6 +574,27 @@ mod tests {
             .expect_err("an unsupported request must be rejected");
             assert!(matches!(error, Error::ReleaseUnavailable), "got {error:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_pipeline_above_the_slot_budget_is_never_sent() {
+        // The test manifest lists 4 slots per pipeline.
+        let mut socket = connect_to_stub(|_| async {}).await;
+        let error = exchange_match(
+            &mut socket,
+            &consumer_for(&responder()),
+            &release(),
+            3,
+            &request(),
+            &verifier(),
+            TIMEOUT,
+        )
+        .await
+        .expect_err("a pipeline with too many slots must be rejected");
+        assert!(
+            matches!(error, Error::TooManyResponseSlots),
+            "got {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -573,6 +612,7 @@ mod tests {
             &mut socket,
             &consumer_for(&responder()),
             &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -600,6 +640,7 @@ mod tests {
             &mut socket,
             &consumer_for(&responder()),
             &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -625,6 +666,7 @@ mod tests {
             &mut socket,
             &consumer_for(&responder()),
             &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -669,6 +711,7 @@ mod tests {
             &mut socket,
             &consumer_for(&responder),
             &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
