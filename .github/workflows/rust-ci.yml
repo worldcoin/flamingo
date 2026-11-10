@@ -36,7 +36,8 @@ jobs:
 
   cargo-clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    # ubuntu-26.04's kernel headers break the pinned minijail-sys build (blk_user_trace_setup2).
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -50,7 +51,8 @@ jobs:
 
   cargo-tests:
     name: tests
-    runs-on: ubuntu-latest
+    # ubuntu-26.04's kernel headers break the pinned minijail-sys build (blk_user_trace_setup2).
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
