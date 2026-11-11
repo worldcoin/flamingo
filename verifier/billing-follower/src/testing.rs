@@ -26,6 +26,8 @@ struct Inner {
     failures: VecDeque<&'static str>,
     /// `eth_getLogs` ranges wider than this fail.
     max_log_range: Option<u64>,
+    /// Serves the chain as a node this many blocks behind would.
+    lag: u64,
     log_calls: Vec<(u64, u64, EventSet)>,
 }
 
@@ -96,6 +98,11 @@ impl FakeChain {
         }
     }
 
+    /// Serves the chain as a node `blocks` behind its head would, e.g. after a provider failover.
+    pub fn lag(&self, blocks: u64) {
+        self.lock().lag = blocks;
+    }
+
     pub fn limit_log_range(&self, max: u64) {
         self.lock().max_log_range = Some(max);
     }
@@ -106,6 +113,11 @@ impl FakeChain {
 
     pub fn head(&self) -> BlockRef {
         self.lock().blocks.last().unwrap().block
+    }
+
+    /// The newest block the lagging node has.
+    fn served_head(inner: &Inner) -> u64 {
+        (inner.blocks.len() as u64 - 1).saturating_sub(inner.lag)
     }
 
     fn check_failure(&self, method: &'static str) -> Result<(), SourceError> {
@@ -125,13 +137,17 @@ impl ChainSource for FakeChain {
 
     async fn latest(&self) -> Result<BlockRef, SourceError> {
         self.check_failure("eth_getBlockByNumber")?;
-        Ok(self.head())
+        let inner = self.lock();
+        Ok(inner.blocks[usize::try_from(Self::served_head(&inner)).unwrap()].block)
     }
 
     async fn block(&self, number: u64) -> Result<Option<BlockRef>, SourceError> {
         self.check_failure("eth_getBlockByNumber")?;
-        Ok(self
-            .lock()
+        let inner = self.lock();
+        if number > Self::served_head(&inner) {
+            return Ok(None);
+        }
+        Ok(inner
             .blocks
             .get(usize::try_from(number).unwrap())
             .map(|b| b.block))

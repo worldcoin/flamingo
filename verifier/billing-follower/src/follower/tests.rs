@@ -199,6 +199,43 @@ async fn undoes_a_reorganization_within_the_window() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn waits_for_a_lagging_source_instead_of_undoing_blocks() {
+    let chain = FakeChain::new(NOV_2026 + DAY);
+    chain.mine(vec![billed(7, true)]);
+    chain.mine_empty(3);
+    chain.mine(vec![registered(1, 7)]);
+    chain.mine(vec![registered(2, 7)]);
+
+    let mut follower = follower(&chain, config(5)).await;
+    let mut mirror = Mirror::default();
+    mirror.sync(&mut follower, &chain).await;
+
+    // Now served by a node two blocks behind, which lacks both registrations' blocks.
+    chain.lag(2);
+    let waited = tokio::time::timeout(Duration::from_secs(10), follower.next()).await;
+    assert!(
+        waited.is_err(),
+        "a lagging source must not produce an update: {waited:?}"
+    );
+    assert!(
+        follower
+            .state()
+            .is_registered(nullifier(1), RpId::new(7), now())
+    );
+    assert!(
+        follower
+            .state()
+            .is_registered(nullifier(2), RpId::new(7), now())
+    );
+
+    chain.lag(0);
+    chain.mine(vec![registered(3, 7)]);
+    mirror.sync(&mut follower, &chain).await;
+    mirror.assert_matches(&follower);
+    assert_eq!(follower.state().registration_count(), 3);
+}
+
+#[tokio::test(start_paused = true)]
 async fn starts_over_after_a_fork_deeper_than_the_window() {
     let chain = FakeChain::new(NOV_2026 + DAY);
     chain.mine(vec![billed(7, true)]);

@@ -170,15 +170,12 @@ pub struct BillingFollower<S = RpcSource> {
 }
 
 impl BillingFollower<RpcSource> {
-    /// Follows `config.contract` over the HTTP endpoints `urls`.
+    /// Follows `config.contract` over the HTTP endpoint `url`.
     ///
     /// # Errors
     /// If the chain ID cannot be read or is not `config.chain_id`.
-    ///
-    /// # Panics
-    /// If `urls` is empty.
-    pub async fn connect(urls: Vec<Url>, config: FollowerConfig) -> Result<Self, FollowerError> {
-        let source = RpcSource::new(urls, config.contract);
+    pub async fn connect(url: Url, config: FollowerConfig) -> Result<Self, FollowerError> {
+        let source = RpcSource::new(url, config.contract);
         Self::with_source(source, config).await
     }
 }
@@ -348,11 +345,9 @@ impl<S: ChainSource> BillingFollower<S> {
             }
             if head.number <= tip.number {
                 match self.source.block(tip.number).await? {
-                    // The source is behind the one that served the tip.
-                    Some(block) if block.hash == tip.hash => {
-                        return Ok(self.idle_update(tip.number));
-                    }
-                    _ => self.unwind().await?,
+                    Some(block) if block.hash != tip.hash => self.unwind().await?,
+                    // The tip is still canonical, or the source has not caught up with it.
+                    _ => return Ok(self.idle_update(tip.number)),
                 }
             }
         }
@@ -467,9 +462,11 @@ impl<S: ChainSource> BillingFollower<S> {
             let Some(newest) = self.window.back() else {
                 return Err(StepError::DeepFork);
             };
-            let canonical = self.source.block(newest.block.number).await?;
-            if canonical.is_some_and(|block| block.hash == newest.block.hash) {
-                break;
+            match self.source.block(newest.block.number).await? {
+                Some(block) if block.hash == newest.block.hash => break,
+                Some(_) => {}
+                // A block the source does not have is not proof of a fork: retry once it has.
+                None => return Err(StepError::ChainMoved),
             }
             let undone = self.window.pop_back().expect("checked above");
             for inverse in undone.inverses.into_iter().rev() {
