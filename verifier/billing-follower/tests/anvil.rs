@@ -1,7 +1,4 @@
-//! The follower against a real node: backfill, live blocks and a reorganization on anvil.
-//!
-//! `BillingEventEmitter` emits the Billing Contract's events with the same signatures, so the test
-//! needs no registration proofs. It needs the `anvil` binary: run it with `-- --ignored`.
+//! The follower on anvil, with `BillingEventEmitter`'s events; run with `-- --ignored`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -72,7 +69,7 @@ impl Mirror {
 async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     let anvil = Anvil::new().try_spawn()?;
     let signer = PrivateKeySigner::from(anvil.keys()[0].clone());
-    // Nonces are read from the node: `evm_revert` rewinds them, so a cached nonce would leave a gap.
+    // Nonces come from the node, since `evm_revert` rewinds them.
     let provider = ProviderBuilder::new()
         .with_simple_nonce_management()
         .wallet(EthereumWallet::from(signer))
@@ -87,8 +84,7 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
         let provider = provider.clone();
         async move {
             let hash = *provider.send_transaction(call).await?.tx_hash();
-            // Polled directly: `get_receipt` watches new block numbers, and after `evm_revert`
-            // the new fork reuses numbers it has already seen, so it would wait forever.
+            // Polled: `get_receipt` waits on new block numbers, which `evm_revert` reuses.
             let receipt = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if let Some(receipt) = provider.get_transaction_receipt(hash).await? {

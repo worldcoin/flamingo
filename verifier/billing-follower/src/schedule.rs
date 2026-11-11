@@ -5,12 +5,7 @@ use std::time::Duration;
 use rand::Rng as _;
 use tokio::time::Instant;
 
-/// Polls on the chain's block schedule: quiet until just before the next block is due, then
-/// every `poll_interval` until it arrives, then every `stalled_poll_interval` once the chain is
-/// late by a whole block.
-///
-/// Timing follows when new heads were seen locally, not block timestamps, so the host's clock and
-/// the provider's propagation delay do not matter.
+/// Polls just before the next block is due, from when heads were seen locally, not timestamps.
 #[derive(Debug, Clone)]
 pub struct PollSchedule {
     block_time: Duration,
@@ -55,8 +50,7 @@ impl PollSchedule {
     }
 }
 
-/// Exponential backoff with equal jitter: the `n`th wait is half of `min(max, base * 2^n)` plus a
-/// random share of the other half.
+/// Exponential backoff with equal jitter: half of `min(max, base * 2^n)` plus a random share.
 #[derive(Debug, Clone)]
 pub struct Backoff {
     base: Duration,

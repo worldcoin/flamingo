@@ -21,6 +21,7 @@ alloy = { workspace = true, features = [
     "transports",
 ] }
 flamingo-verifier-billing-state.workspace = true
+futures-util.workspace = true
 metrics.workspace = true
 rand.workspace = true
 thiserror.workspace = true

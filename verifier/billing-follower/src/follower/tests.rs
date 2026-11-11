@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use alloy::primitives::{Address, U256};
 use flamingo_verifier_billing_state::BillingState;
 use world_id_primitives::rp::RpId;
@@ -236,6 +238,36 @@ async fn waits_for_a_lagging_source_instead_of_undoing_blocks() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn undoes_a_reorganization_onto_a_shorter_fork_at_once() {
+    let chain = FakeChain::new(NOV_2026 + DAY);
+    chain.mine(vec![billed(7, true)]);
+    chain.mine_empty(3);
+    chain.mine(vec![registered(1, 7)]);
+    chain.mine(vec![registered(2, 7)]);
+    chain.mine(vec![registered(3, 7)]);
+
+    let mut follower = follower(&chain, config(6)).await;
+    let mut mirror = Mirror::default();
+    mirror.sync(&mut follower, &chain).await;
+
+    // Three blocks replaced by one: the new head is below the old tip.
+    chain.reorg(3);
+    chain.mine(vec![registered(9, 7)]);
+    let update = tokio::time::timeout(Duration::from_secs(5), follower.next())
+        .await
+        .expect("a shorter fork is undone without waiting for it to grow")
+        .unwrap();
+    mirror.apply(update);
+    mirror.sync(&mut follower, &chain).await;
+    mirror.assert_matches(&follower);
+    let state = follower.state();
+    for orphaned in [1, 2, 3] {
+        assert_eq!(state.registration(nullifier(orphaned)), None);
+    }
+    assert!(state.is_registered(nullifier(9), RpId::new(7), now()));
+}
+
+#[tokio::test(start_paused = true)]
 async fn starts_over_after_a_fork_deeper_than_the_window() {
     let chain = FakeChain::new(NOV_2026 + DAY);
     chain.mine(vec![billed(7, true)]);
@@ -249,6 +281,10 @@ async fn starts_over_after_a_fork_deeper_than_the_window() {
     chain.reorg(6);
     chain.mine(vec![registered(2, 8)]);
     chain.mine_empty(6);
+    // The consumer keeps its copy until one update replaces it with the rebuilt state.
+    let update = follower.next().await.unwrap();
+    assert!(update.reset && update.backfill_done, "{update:?}");
+    mirror.apply(update);
     mirror.sync(&mut follower, &chain).await;
     mirror.assert_matches(&follower);
 
@@ -264,10 +300,9 @@ async fn retries_failed_reads() {
     let chain = FakeChain::new(NOV_2026 + DAY);
     chain.mine(vec![billed(7, true), registered(1, 7)]);
     chain.mine_empty(8);
+    let mut follower = follower(&chain, config(3)).await;
     chain.fail("eth_getBlockByNumber", 2);
     chain.fail("eth_getLogs", 3);
-
-    let mut follower = follower(&chain, config(3)).await;
     let mut mirror = Mirror::default();
     mirror.sync(&mut follower, &chain).await;
     mirror.assert_matches(&follower);
@@ -333,6 +368,25 @@ async fn stops_on_a_nullifier_registered_twice() {
     assert!(matches!(
         error,
         FollowerError::State(BillingStateError::Conflict)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejects_an_address_without_a_contract_and_a_future_deployment() {
+    let chain = FakeChain::new(NOV_2026);
+    chain.mine_empty(3);
+    let ahead = FollowerConfig::new(CHAIN_ID, Address::ZERO, 4);
+    assert!(matches!(
+        BillingFollower::with_source(chain.clone(), ahead).await,
+        Err(FollowerError::DeployBlockAhead {
+            deploy_block: 4,
+            head: 3
+        })
+    ));
+    chain.remove_contract();
+    assert!(matches!(
+        BillingFollower::with_source(chain, config(4)).await,
+        Err(FollowerError::NoContract)
     ));
 }
 

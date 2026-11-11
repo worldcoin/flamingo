@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// Emits the WIP-107 Billing Contract's state-changing events with its exact signatures, so the
-/// follower's tests need no registration proofs. Compiled with solc 0.8.28 (cancun) into
-/// `BillingEventEmitter.json`.
+/// Emits the Billing Contract's events; compiled with solc 0.8.28 (cancun) into the JSON fixture.
 contract BillingEventEmitter {
     event Registered(uint64 indexed rpId, uint64 indexed periodStart, uint256 indexed billingNullifier);
     event BilledRpUpdated(uint64 indexed rpId, bool billed);

@@ -7,6 +7,7 @@ use std::{
 
 use alloy::primitives::Address;
 use flamingo_verifier_billing_state::{BillingOp, BillingState, BillingStateError, Registration};
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use tokio::time::Instant;
 use url::Url;
 use world_id_primitives::{
@@ -21,6 +22,9 @@ use crate::{
     source::{BillingEvent, BlockRef, ChainLog, ChainSource, EventSet, SourceError},
 };
 
+/// Header reads in flight at once, e.g. for the window after backfill.
+const HEADER_READS_IN_FLIGHT: usize = 16;
+
 /// What and how the follower follows.
 #[derive(Debug, Clone)]
 pub struct FollowerConfig {
@@ -30,11 +34,9 @@ pub struct FollowerConfig {
     pub contract: Address,
     /// The block the Billing Contract was deployed in. `BilledRpUpdated` logs are read from here.
     pub deploy_block: u64,
-    /// The largest block range of one `eth_getLogs` call. Halved after a failed call, and grown
-    /// back after successful ones.
+    /// The largest `eth_getLogs` block range; halved after a failure, regrown after successes.
     pub max_log_range: u64,
-    /// How many recent blocks the follower can undo after a reorganization. A deeper fork
-    /// restarts it from an empty state.
+    /// How many recent blocks a reorganization can undo; a deeper fork restarts the follower.
     pub reorg_window: usize,
     /// Bound on the registrations the follower holds.
     pub max_registrations: usize,
@@ -47,8 +49,7 @@ pub struct FollowerConfig {
 }
 
 impl FollowerConfig {
-    /// Defaults for World Chain: 2 s blocks, 100 ms polls, 10,000-block log ranges and a
-    /// 256-block reorganization window.
+    /// World Chain defaults: 2 s blocks, 100 ms polls, 10,000-block log ranges, 256-block window.
     #[must_use]
     pub const fn new(chain_id: u64, contract: Address, deploy_block: u64) -> Self {
         Self {
@@ -68,8 +69,7 @@ impl FollowerConfig {
 /// A change to the billing state, to apply in order to a copy of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BillingUpdate {
-    /// The follower started over after a reorganization deeper than its window. Clear the copy
-    /// before applying `ops`.
+    /// After a fork deeper than the window: replace the copy with `ops`, a full snapshot.
     pub reset: bool,
     /// The state changes, in chain order. Each changes the state.
     pub ops: Vec<BillingOp>,
@@ -90,7 +90,18 @@ pub enum FollowerError {
         /// The source's chain.
         actual: u64,
     },
-    /// Reading the chain ID failed.
+    /// No contract at the configured address; its empty logs would read as "nothing billed".
+    #[error("no contract is deployed at the configured Billing Contract address")]
+    NoContract,
+    /// The configured deployment block is past the chain's head.
+    #[error("the deployment block {deploy_block} is past the head {head}")]
+    DeployBlockAhead {
+        /// The configured deployment block.
+        deploy_block: u64,
+        /// The chain's head.
+        head: u64,
+    },
+    /// Reading the chain ID, the head or the contract's code failed.
     #[error(transparent)]
     Source(#[from] SourceError),
     /// The billing state rejected an op: it is full, or the logs registered a nullifier twice.
@@ -129,8 +140,7 @@ struct WindowBlock {
 enum Phase {
     /// Nothing read yet.
     Start,
-    /// Reading logs without header checks, from `cursor` to `deep_end`. Logs before
-    /// `registered_from` cannot hold active registrations, so only `BilledRpUpdated` is read there.
+    /// Headerless log reads up to `deep_end`; below `registered_from` only `BilledRpUpdated`.
     Backfill {
         cursor: u64,
         deep_end: u64,
@@ -141,14 +151,7 @@ enum Phase {
     Live,
 }
 
-/// Follows the WIP-107 Billing Contract and emits the billing state a TEE Verifier's host
-/// supplies (WIP-107 §4.8).
-///
-/// It backfills `BilledRpUpdated` logs from the deployment and `Registered` logs of the active
-/// periods, then follows the latest block. It keeps the last `reorg_window` blocks and the ops
-/// that undo them, so a reorganization is answered with those ops.
-///
-/// [`Self::next`] is cancel safe: ops applied but not yet returned are kept for the next call.
+/// Follows the WIP-107 Billing Contract and emits the host's billing state (WIP-107 §4.8).
 pub struct BillingFollower<S = RpcSource> {
     source: S,
     config: FollowerConfig,
@@ -159,7 +162,8 @@ pub struct BillingFollower<S = RpcSource> {
     next_block: u64,
     /// Applied ops not yet returned.
     outbox: Vec<BillingOp>,
-    pending_reset: bool,
+    /// Rebuilding after a deep fork: updates are held back until a full snapshot is ready.
+    rebuilding: bool,
     announced: bool,
     log_range: u64,
     schedule: PollSchedule,
@@ -170,10 +174,7 @@ pub struct BillingFollower<S = RpcSource> {
 }
 
 impl BillingFollower<RpcSource> {
-    /// Follows `config.contract` over the HTTP endpoint `url`.
-    ///
-    /// # Errors
-    /// If the chain ID cannot be read or is not `config.chain_id`.
+    /// Follows `config.contract` over the HTTP endpoint `url`; fails as [`Self::with_source`] does.
     pub async fn connect(url: Url, config: FollowerConfig) -> Result<Self, FollowerError> {
         let source = RpcSource::new(url, config.contract);
         Self::with_source(source, config).await
@@ -181,16 +182,24 @@ impl BillingFollower<RpcSource> {
 }
 
 impl<S: ChainSource> BillingFollower<S> {
-    /// Follows the chain `source` reads.
-    ///
-    /// # Errors
-    /// If the chain ID cannot be read or is not `config.chain_id`.
+    /// Follows `source`; fails on another chain, a missing contract or a deployment past the head.
     pub async fn with_source(source: S, config: FollowerConfig) -> Result<Self, FollowerError> {
         let actual = source.chain_id().await?;
         if actual != config.chain_id {
             return Err(FollowerError::WrongChain {
                 expected: config.chain_id,
                 actual,
+            });
+        }
+        // A wrong address or deployment block would read as "nothing billed": fail closed.
+        if !source.contract_deployed().await? {
+            return Err(FollowerError::NoContract);
+        }
+        let head = source.latest().await?.number;
+        if config.deploy_block > head {
+            return Err(FollowerError::DeployBlockAhead {
+                deploy_block: config.deploy_block,
+                head,
             });
         }
         let schedule = PollSchedule::new(
@@ -206,7 +215,7 @@ impl<S: ChainSource> BillingFollower<S> {
             tip: None,
             next_block: 0,
             outbox: Vec::new(),
-            pending_reset: false,
+            rebuilding: false,
             announced: false,
             log_range: config.max_log_range.max(1),
             schedule,
@@ -224,14 +233,7 @@ impl<S: ChainSource> BillingFollower<S> {
         &self.state
     }
 
-    /// The next change to the billing state.
-    ///
-    /// During backfill it returns one update per log page that changed the state. Once caught
-    /// up it returns one update per new block, also when nothing changed, so the consumer
-    /// sees the head advance.
-    ///
-    /// # Errors
-    /// Only when the billing state rejects an op. Failed chain reads are retried with backoff.
+    /// The next state change: per log page in backfill, then per new block; errs only on a bad op.
     pub async fn next(&mut self) -> Result<BillingUpdate, FollowerError> {
         loop {
             let step = match self.phase {
@@ -250,7 +252,12 @@ impl<S: ChainSource> BillingFollower<S> {
                 }
                 Ok(None) => self.backoff.reset(),
                 Err(StepError::Source(error)) => self.source_failed(&error).await,
-                Err(StepError::ChainMoved) => {}
+                // Live rounds already wait for the next poll; elsewhere wait one interval.
+                Err(StepError::ChainMoved) => {
+                    if !matches!(self.phase, Phase::Live) {
+                        tokio::time::sleep(self.config.poll_interval).await;
+                    }
+                }
                 Err(StepError::DeepFork) => self.reset(),
                 Err(StepError::State(error)) => {
                     tracing::error!(%error, "billing state rejected an op");
@@ -260,8 +267,7 @@ impl<S: ChainSource> BillingFollower<S> {
         }
     }
 
-    /// Reads the head, finds where the active periods' registrations start, and plans the
-    /// backfill.
+    /// Reads the head, finds where the active periods' registrations start, and plans the backfill.
     async fn start(&mut self) -> Result<Option<BillingUpdate>, StepError> {
         let head = self.source.latest().await?;
         let now = (self.clock)();
@@ -330,6 +336,11 @@ impl<S: ChainSource> BillingFollower<S> {
             registered_from,
             started,
         };
+        if self.rebuilding {
+            // The snapshot sent once live carries these.
+            self.outbox.clear();
+            return Ok(None);
+        }
         Ok((!self.outbox.is_empty()).then(|| self.update(end)))
     }
 
@@ -344,10 +355,20 @@ impl<S: ChainSource> BillingFollower<S> {
                 return Ok(self.idle_update(tip.number));
             }
             if head.number <= tip.number {
-                match self.source.block(tip.number).await? {
-                    Some(block) if block.hash != tip.hash => self.unwind().await?,
-                    // The tip is still canonical, or the source has not caught up with it.
-                    _ => return Ok(self.idle_update(tip.number)),
+                let ours = self
+                    .window
+                    .iter()
+                    .find(|block| block.block.number == head.number)
+                    .map(|block| block.block.hash);
+                match ours {
+                    // A shorter fork: everything from the head's height up is orphaned.
+                    Some(hash) if hash != head.hash => self.unwind(head.number).await?,
+                    // The head is our own ancestor: the source is behind.
+                    Some(_) => return Ok(self.idle_update(tip.number)),
+                    None => match self.source.block(tip.number).await? {
+                        Some(block) if block.hash != tip.hash => self.unwind(tip.number).await?,
+                        _ => return Ok(self.idle_update(tip.number)),
+                    },
                 }
             }
         }
@@ -364,28 +385,28 @@ impl<S: ChainSource> BillingFollower<S> {
                 .block(from)
                 .await?
                 .ok_or(StepError::ChainMoved)?;
-            if self.tip.is_some_and(|tip| first.parent_hash != tip.hash) {
-                self.unwind().await?;
+            if let Some(tip) = self.tip
+                && first.parent_hash != tip.hash
+            {
+                self.unwind(tip.number).await?;
                 return Ok(self.idle_update(self.next_block.saturating_sub(1)));
             }
             self.catch_up(from, to - self.window_len()).await?;
         }
 
         let from = self.next_block;
-        let mut headers = Vec::new();
-        for number in from..to {
-            headers.push(
-                self.source
-                    .block(number)
-                    .await?
-                    .ok_or(StepError::ChainMoved)?,
-            );
-        }
+        let source = &self.source;
+        let mut headers = stream::iter(from..to)
+            .map(|number| source.block(number))
+            .buffered(HEADER_READS_IN_FLIGHT)
+            .map(|block| block?.ok_or(StepError::ChainMoved))
+            .try_collect::<Vec<_>>()
+            .await?;
         headers.push(head);
         if let Some(tip) = self.tip
             && headers[0].parent_hash != tip.hash
         {
-            self.unwind().await?;
+            self.unwind(tip.number).await?;
             return Ok(self.idle_update(self.next_block.saturating_sub(1)));
         }
         if headers
@@ -452,22 +473,22 @@ impl<S: ChainSource> BillingFollower<S> {
         Ok(())
     }
 
-    /// Undoes blocks from the newest until the window's newest block is canonical again.
-    ///
-    /// Each undone block's inverses are applied and queued, so a failed read leaves a state the
-    /// next round continues from.
-    async fn unwind(&mut self) -> Result<(), StepError> {
+    /// Undoes blocks from `orphaned_from` up, then older ones until the newest is canonical.
+    async fn unwind(&mut self, orphaned_from: u64) -> Result<(), StepError> {
         let mut depth = 0u64;
         loop {
             let Some(newest) = self.window.back() else {
                 return Err(StepError::DeepFork);
             };
-            match self.source.block(newest.block.number).await? {
-                Some(block) if block.hash == newest.block.hash => break,
-                Some(_) => {}
-                // A block the source does not have is not proof of a fork: retry once it has.
-                None => return Err(StepError::ChainMoved),
+            if newest.block.number < orphaned_from {
+                match self.source.block(newest.block.number).await? {
+                    Some(block) if block.hash == newest.block.hash => break,
+                    Some(_) => {}
+                    // A block the source does not have is not proof of a fork: retry once it has.
+                    None => return Err(StepError::ChainMoved),
+                }
             }
+            // Queued with its inverses applied, so a failed read leaves a state to continue from.
             let undone = self.window.pop_back().expect("checked above");
             for inverse in undone.inverses.into_iter().rev() {
                 self.state.apply(inverse)?;
@@ -501,7 +522,7 @@ impl<S: ChainSource> BillingFollower<S> {
         self.tip = None;
         self.outbox.clear();
         self.phase = Phase::Start;
-        self.pending_reset = true;
+        self.rebuilding = true;
         self.announced = false;
     }
 
@@ -527,8 +548,7 @@ impl<S: ChainSource> BillingFollower<S> {
         }
     }
 
-    /// Reads all logs of blocks `from..=to` in pages of the current page size. Nothing is
-    /// applied until every page is read, so a failure only repeats the reads.
+    /// Reads all logs of `from..=to` in pages; nothing is applied until all are read.
     async fn read_logs_paged(&mut self, from: u64, to: u64) -> Result<Vec<ChainLog>, StepError> {
         let mut logs = Vec::new();
         let mut cursor = from;
@@ -550,9 +570,7 @@ impl<S: ChainSource> BillingFollower<S> {
         }
     }
 
-    /// Applies one event and returns the op and its inverse, or `None` if it changed nothing.
-    ///
-    /// A registration for a period that is not active now is skipped: no request can use it.
+    /// Applies one event and returns the op and its inverse; inactive registrations are skipped.
     fn apply_event(
         &mut self,
         event: BillingEvent,
@@ -571,7 +589,7 @@ impl<S: ChainSource> BillingFollower<S> {
                 }
                 let Ok(nullifier) = FieldElement::try_from(nullifier) else {
                     metrics::counter!(names::INVALID_EVENTS).increment(1);
-                    tracing::error!(%nullifier, "Registered log with a nullifier outside the field");
+                    tracing::error!(%nullifier, "Registered nullifier outside the field");
                     return Ok(None);
                 };
                 BillingOp::AddRegistration {
@@ -586,8 +604,7 @@ impl<S: ChainSource> BillingFollower<S> {
         Ok(self.state.apply(op)?.map(|inverse| (op, inverse)))
     }
 
-    /// The first block in `from..=head` with a timestamp at or after `timestamp`, or the block
-    /// after `head` if there is none.
+    /// The first block in `from..=head` at or after `timestamp`, else the block after `head`.
     async fn first_block_at(
         &self,
         from: u64,
@@ -639,7 +656,11 @@ impl<S: ChainSource> BillingFollower<S> {
     }
 
     fn finish(&mut self, mut update: BillingUpdate) -> BillingUpdate {
-        update.reset = std::mem::take(&mut self.pending_reset);
+        // The consumer keeps its old copy until this one replaces it in a single update.
+        if std::mem::take(&mut self.rebuilding) {
+            update.reset = true;
+            update.ops = self.state.snapshot().collect();
+        }
         self.announced |= update.backfill_done;
         metrics::gauge!(names::SYNCED_BLOCK).set(gauge_value(update.head));
         metrics::gauge!(names::REGISTRATIONS).set(gauge_value(
@@ -675,8 +696,7 @@ impl<S: ChainSource> BillingFollower<S> {
         tokio::time::sleep(delay).await;
     }
 
-    /// Drops registrations once their period has ended. No op is emitted: a consumer expires its
-    /// copy with its own clock.
+    /// Drops ended periods' registrations without an op; consumers expire with their own clock.
     fn expire(&mut self) {
         let now = (self.clock)();
         if now >= self.next_expiry {

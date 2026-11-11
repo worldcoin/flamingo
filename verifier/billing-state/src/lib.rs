@@ -1,8 +1,4 @@
-//! The WIP-107 billing state the Flamingo host supplies to the enclave (WIP-107 §4.8).
-//!
-//! A host derives [`BillingOp`]s from the Billing Contract's logs and applies them to its own
-//! [`BillingState`]; the Verifier applies the same ops to its copy. Every op is absolute, so a
-//! reorganization is undone by applying the inverses [`BillingState::apply`] returned.
+//! The WIP-107 billing state the host supplies to the enclave, as absolute, invertible ops.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,8 +45,7 @@ pub enum BillingStateError {
     /// The state already holds its maximum number of registrations.
     #[error("the billing state holds its maximum of {0} registrations")]
     Full(usize),
-    /// The nullifier is already registered for another RP or period. The Billing Contract
-    /// registers a nullifier at most once, so the source of the ops is broken.
+    /// The nullifier is registered with other values, which the Billing Contract never does.
     #[error("the billing nullifier is already registered for another RP or period")]
     Conflict,
 }
@@ -73,14 +68,7 @@ impl BillingState {
         }
     }
 
-    /// Applies `op` and returns the op that undoes it, or `None` if it changed nothing.
-    ///
-    /// Adding a registration the state already holds with the same values changes nothing, as does
-    /// removing one it does not hold.
-    ///
-    /// # Errors
-    /// [`BillingStateError::Full`] when adding beyond the limit, and
-    /// [`BillingStateError::Conflict`] when adding a nullifier held with other values.
+    /// Applies `op` and returns its undo op, or `None` for a no-op; errs when full or conflicting.
     pub fn apply(&mut self, op: BillingOp) -> Result<Option<BillingOp>, BillingStateError> {
         match op {
             BillingOp::SetBilledRp { rp_id, billed } => {

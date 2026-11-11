@@ -111,11 +111,13 @@ impl SourceError {
     }
 }
 
-/// Reads the Billing Contract's chain. [`crate::RpcSource`] implements it over JSON-RPC; another
-/// source, e.g. a preconfirmation feed, can implement it too.
+/// Reads the Billing Contract's chain; [`crate::RpcSource`] implements it over JSON-RPC.
 pub trait ChainSource: Send + Sync {
     /// The chain ID.
     fn chain_id(&self) -> impl Future<Output = Result<u64, SourceError>> + Send;
+
+    /// Whether the Billing Contract's address holds code.
+    fn contract_deployed(&self) -> impl Future<Output = Result<bool, SourceError>> + Send;
 
     /// The latest block.
     fn latest(&self) -> impl Future<Output = Result<BlockRef, SourceError>> + Send;

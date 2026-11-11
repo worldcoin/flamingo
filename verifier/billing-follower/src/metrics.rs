@@ -1,5 +1,4 @@
-//! Metrics, through the `metrics` facade. They reach a backend once the consumer installs a
-//! recorder.
+//! Metrics through the `metrics` facade; they reach a backend once a recorder is installed.
 
 pub const HEAD_BLOCK: &str = "billing_follower.head_block";
 pub const SYNCED_BLOCK: &str = "billing_follower.synced_block";

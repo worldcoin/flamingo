@@ -28,8 +28,7 @@ const RATE_LIMIT_BACKOFF_MS: u64 = 200;
 /// The compute-unit budget the transport paces rate-limit retries against.
 const COMPUTE_UNITS_PER_SECOND: u64 = 330;
 
-/// Reads the Billing Contract over one JSON-RPC endpoint. Failover between providers belongs in
-/// front of it, e.g. in the infrastructure's RPC proxy.
+/// Reads the Billing Contract over one JSON-RPC endpoint; failover belongs in front of it.
 #[derive(Debug)]
 pub struct RpcSource {
     provider: RootProvider<Ethereum>,
@@ -75,6 +74,11 @@ impl RpcSource {
 impl ChainSource for RpcSource {
     async fn chain_id(&self) -> Result<u64, SourceError> {
         Self::guard("eth_chainId", self.provider.get_chain_id()).await
+    }
+
+    async fn contract_deployed(&self) -> Result<bool, SourceError> {
+        let code = Self::guard("eth_getCode", self.provider.get_code_at(self.contract)).await?;
+        Ok(!code.is_empty())
     }
 
     async fn latest(&self) -> Result<BlockRef, SourceError> {

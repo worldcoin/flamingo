@@ -28,6 +28,8 @@ struct Inner {
     max_log_range: Option<u64>,
     /// Serves the chain as a node this many blocks behind would.
     lag: u64,
+    /// Answers that no contract is deployed.
+    no_contract: bool,
     log_calls: Vec<(u64, u64, EventSet)>,
 }
 
@@ -103,6 +105,10 @@ impl FakeChain {
         self.lock().lag = blocks;
     }
 
+    pub fn remove_contract(&self) {
+        self.lock().no_contract = true;
+    }
+
     pub fn limit_log_range(&self, max: u64) {
         self.lock().max_log_range = Some(max);
     }
@@ -133,6 +139,10 @@ impl FakeChain {
 impl ChainSource for FakeChain {
     async fn chain_id(&self) -> Result<u64, SourceError> {
         Ok(CHAIN_ID)
+    }
+
+    async fn contract_deployed(&self) -> Result<bool, SourceError> {
+        Ok(!self.lock().no_contract)
     }
 
     async fn latest(&self) -> Result<BlockRef, SourceError> {
