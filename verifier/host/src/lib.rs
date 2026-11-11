@@ -12,6 +12,7 @@ mod app_state;
 mod engine_provider;
 mod environment;
 
+pub mod billing;
 pub mod enclave;
 pub mod error;
 pub mod routes;

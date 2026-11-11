@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use clap::Parser as _;
 use flamingo_verifier_host::{AppState, HostConfig, enclave::PontifexEnclaveClient};
 
@@ -16,7 +17,19 @@ async fn main() -> anyhow::Result<()> {
         config.enclave_cid,
         config.enclave_port,
     ));
-    let state = AppState::new(config, enclave_client);
+    let billing = config.billing();
+    let state = AppState::new(config, enclave_client.clone());
+    let server = flamingo_verifier_host::server::start(state);
 
-    flamingo_verifier_host::server::start(state).await
+    let Some(billing) = billing else {
+        tracing::warn!("no billing configuration; the host supplies no billing state");
+        return server.await;
+    };
+    // A stopped follower leaves the enclave's billing state stale, so it ends the process.
+    tokio::select! {
+        result = server => result,
+        result = flamingo_verifier_host::billing::run(billing, enclave_client) => {
+            result.context("billing state sync stopped")
+        }
+    }
 }

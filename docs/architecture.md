@@ -20,6 +20,12 @@ The enclave runs each (`aud`, `nonce`) once per boot. It keeps up to 262,144 of 
 
 The current engine still returns similarity scores, so the enclave's [interim adapter](../verifier/enclave/src/pipeline.rs) maps pipelines to engine operations and strictness levels to thresholds. Every compared pair must clear the level's threshold.
 
+## Billing state
+
+The enclave checks WIP-107 billing against state its host supplies (WIP-107 §4.8). The host runs [`flamingo-verifier-billing-follower`](../verifier/billing-follower), which follows the Billing Contract at the latest block and undoes reorganizations, and pushes each change to the enclave's `/v1/billing` route as the next update of a numbered stream, at most 8,192 ops per update. The enclave applies a repeated update once, so the host retries an update whose answer it lost. When the enclave rebooted or rejected an update, the host starts a new stream from the follower's full state, which replaces the enclave's.
+
+The chain and contract an enclave accepts state of come from `FLAMINGO_BILLING_CHAIN_ID` and `FLAMINGO_BILLING_CONTRACT` in the EIF's environment, so they are part of the measurement; an image without them bills nothing. An enclave that bills reports not ready until it has a caught-up state, and while its 1,048,576-registration bound is reached. A stopped follower ends the host process, so the state never goes stale silently.
+
 ## Repository layout
 
 All crates share the root [Cargo workspace](../Cargo.toml) and lockfile.

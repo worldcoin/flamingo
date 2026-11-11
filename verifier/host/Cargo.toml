@@ -11,22 +11,29 @@ name = "flamingo-verifier-host"
 path = "src/main.rs"
 
 [dependencies]
+alloy.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum = { workspace = true, features = ["ws"] }
 base64.workspace = true
 clap.workspace = true
 flamingo-verifier-api-types.workspace = true
+flamingo-verifier-billing-follower.workspace = true
+flamingo-verifier-billing-state.workspace = true
 flamingo-verifier-enclave-types.workspace = true
+metrics.workspace = true
 pontifex = { workspace = true, features = ["client"] }
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-telemetry-batteries = { workspace = true, features = ["axum"] }
+telemetry-batteries = { workspace = true, features = ["axum", "metrics-statsd"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tungstenite.workspace = true
+url.workspace = true
 world-id-flamingo.workspace = true
+world-id-primitives.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
