@@ -17,7 +17,17 @@ ciborium.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 world-id-flamingo.workspace = true
+world-id-primitives.workspace = true
+base64 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# Release manifests for tests of dependent crates.
+testing = ["dep:base64", "dep:hex", "dep:serde_json"]
 
 [dev-dependencies]
+base64.workspace = true
+hex.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
-world-id-primitives.workspace = true

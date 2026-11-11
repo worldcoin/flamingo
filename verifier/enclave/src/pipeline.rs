@@ -1,17 +1,21 @@
 //! Interim adapter from the WIP-201 request onto the DeepFace-specific engine operations.
 //!
 //! The current engine returns similarity scores instead of a verdict, so this module maps
-//! `pipeline` positions to roles and `match_strictness` levels to thresholds. Both move into the
-//! Engine once it implements the generic WIP-201 interface.
+//! `compare` positions and `pipeline_inputs` to roles and `match_strictness` levels to
+//! thresholds. Both move into the Engine once it implements the generic WIP-201 interface.
 
 use flamingo_verifier_sealed_types::{ComparisonRole, Entry, FailureReason, Payload};
 
 use crate::biometric_engine::{LightGuardMatchingFrame, LiveCapture};
 
-/// Compares the Credential image, the live capture and the challenge, in `compare` order.
+/// Compares the Credential image, a single live frame and the challenge, in `compare` order.
 pub const PIPELINE_DEEPFACE: u16 = 1;
-/// Compares the live capture and the challenge, in `compare` order.
+/// Compares a single live frame and the challenge, in `compare` order.
 pub const PIPELINE_GRAYBADGE: u16 = 2;
+/// [`PIPELINE_DEEPFACE`] with a `LightGuard` capture: two live frames as pipeline inputs.
+pub const PIPELINE_DEEPFACE_LIGHTGUARD: u16 = 3;
+/// [`PIPELINE_GRAYBADGE`] with a `LightGuard` capture: two live frames as pipeline inputs.
+pub const PIPELINE_GRAYBADGE_LIGHTGUARD: u16 = 4;
 
 /// `match_strictness` levels and the minimum normalized similarity of every compared pair.
 const MATCH_THRESHOLDS: [(u8, f64); 3] = [(1, 0.85), (2, 0.9), (3, 0.95)];
@@ -22,7 +26,7 @@ const UNILLUMINATED: &[u8] = b"unilluminated";
 
 /// One engine call with its inputs in role order.
 pub enum Operation {
-    /// [`PIPELINE_DEEPFACE`].
+    /// [`PIPELINE_DEEPFACE`] or [`PIPELINE_DEEPFACE_LIGHTGUARD`].
     DeepFace {
         /// The Credential image.
         credential: Vec<u8>,
@@ -31,7 +35,7 @@ pub enum Operation {
         /// The challenge image.
         challenge: Vec<u8>,
     },
-    /// [`PIPELINE_GRAYBADGE`].
+    /// [`PIPELINE_GRAYBADGE`] or [`PIPELINE_GRAYBADGE_LIGHTGUARD`].
     GrayBadge {
         /// The live capture.
         live: LiveCapture,
@@ -72,19 +76,34 @@ pub fn check_score(
 
 /// Maps a validated payload onto an engine operation.
 ///
-/// Every entry is compared, except the second frame of a `LightGuard` capture: the compared live
-/// entry's `meta` is `illuminated` or `unilluminated`, and the one other entry carries the other.
-/// All other entry `meta` and the request-level `hints` are empty.
+/// The live entry, at a fixed `compare` position per Engine operation, is a pipeline input. A
+/// release fixes each pipeline's input count (WIP-201 §4.3.4), so a single live frame and a
+/// `LightGuard` capture use separate pipelines. A `LightGuard` capture's other frame is the one
+/// other pipeline input, and is not compared: the compared frame's `meta` is `illuminated` or
+/// `unilluminated`, and the other frame carries the other. All other entry `meta` and the
+/// request-level `hints` are empty.
 ///
 /// # Errors
 /// Returns [`FailureReason::UnsupportedPipeline`] for an unknown pipeline or another layout.
 pub fn operation(payload: Payload) -> Result<Operation, FailureReason> {
-    let live_position = match payload.pipeline {
-        PIPELINE_DEEPFACE => 1,
-        PIPELINE_GRAYBADGE => 0,
+    let (live_position, light_guard) = match payload.pipeline_id {
+        PIPELINE_DEEPFACE => (1, false),
+        PIPELINE_GRAYBADGE => (0, false),
+        PIPELINE_DEEPFACE_LIGHTGUARD => (1, true),
+        PIPELINE_GRAYBADGE_LIGHTGUARD => (0, true),
         _ => return Err(FailureReason::UnsupportedPipeline),
     };
     if payload.compare.len() != live_position + 2 || !payload.hints.is_empty() {
+        return Err(FailureReason::UnsupportedPipeline);
+    }
+    let live_index = payload.compare[live_position];
+    let partner_index = match (light_guard, payload.pipeline_inputs.as_slice()) {
+        (false, &[only]) if only == live_index => None,
+        (true, &[first, second]) if first == live_index => Some(second),
+        (true, &[first, second]) if second == live_index => Some(first),
+        _ => return Err(FailureReason::UnsupportedPipeline),
+    };
+    if partner_index.is_some_and(|index| payload.compare.contains(&index)) {
         return Err(FailureReason::UnsupportedPipeline);
     }
 
@@ -99,7 +118,7 @@ pub fn operation(payload: Payload) -> Result<Operation, FailureReason> {
     for &index in &payload.compare {
         compared.push(take(index)?);
     }
-    let partner = entries.iter_mut().find_map(Option::take);
+    let partner = partner_index.map(&mut take).transpose()?;
     if entries.iter().any(Option::is_some) {
         return Err(FailureReason::UnsupportedPipeline);
     }
@@ -160,14 +179,19 @@ mod tests {
         }
     }
 
-    fn payload(pipeline: u16, entries: Vec<Entry>, compare: Vec<u8>) -> Payload {
+    fn payload(
+        pipeline_id: u16,
+        entries: Vec<Entry>,
+        pipeline_inputs: Vec<u8>,
+        compare: Vec<u8>,
+    ) -> Payload {
         Payload {
-            pipeline,
+            pipeline_id,
             match_strictness: 2,
             hints: Vec::new(),
             entries,
+            pipeline_inputs,
             compare,
-            release_hash: [0; 32],
         }
     }
 
@@ -184,6 +208,7 @@ mod tests {
                 entry(b"credential", b""),
                 entry(b"live", b""),
             ],
+            vec![2],
             vec![1, 2, 0],
         ))
         else {
@@ -217,12 +242,13 @@ mod tests {
                     },
                 ..
             }) = operation(payload(
-                PIPELINE_GRAYBADGE,
+                PIPELINE_GRAYBADGE_LIGHTGUARD,
                 vec![
                     entry(b"partner", partner_meta),
                     entry(b"live", live_meta),
                     entry(b"challenge", b""),
                 ],
+                vec![0, 1],
                 vec![1, 2],
             ))
             else {
@@ -242,33 +268,53 @@ mod tests {
     fn other_layouts_are_unsupported() {
         let plain = || vec![entry(b"a", b""), entry(b"b", b""), entry(b"c", b"")];
         for payload in [
-            payload(3, plain(), vec![0, 1, 2]),
-            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1, 3]),
-            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1, 255]),
-            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1, 1]),
-            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1]),
-            payload(PIPELINE_GRAYBADGE, plain(), vec![0, 1]),
+            payload(3, plain(), vec![1], vec![0, 1, 2]),
+            payload(PIPELINE_DEEPFACE, plain(), vec![1], vec![0, 1, 3]),
+            payload(PIPELINE_DEEPFACE, plain(), vec![1], vec![0, 1, 255]),
+            payload(PIPELINE_DEEPFACE, plain(), vec![1], vec![0, 1]),
+            // The live entry is not a pipeline input.
+            payload(PIPELINE_DEEPFACE, plain(), vec![0], vec![0, 1, 2]),
+            // A single-frame pipeline gets two frames, and a LightGuard one gets one.
+            payload(PIPELINE_DEEPFACE, plain(), vec![1, 2], vec![0, 1]),
+            payload(
+                PIPELINE_DEEPFACE_LIGHTGUARD,
+                plain(),
+                vec![1],
+                vec![0, 1, 2],
+            ),
+            // The partner frame is compared.
+            payload(
+                PIPELINE_DEEPFACE_LIGHTGUARD,
+                plain(),
+                vec![1, 2],
+                vec![0, 1, 2],
+            ),
+            payload(PIPELINE_DEEPFACE, plain(), vec![0, 1, 2], vec![0, 1, 2]),
+            payload(PIPELINE_GRAYBADGE, plain(), vec![0], vec![0, 1]),
             payload(
                 PIPELINE_DEEPFACE,
                 vec![entry(b"a", b"x"), entry(b"b", b""), entry(b"c", b"")],
+                vec![1],
                 vec![0, 1, 2],
             ),
             payload(
-                PIPELINE_GRAYBADGE,
+                PIPELINE_GRAYBADGE_LIGHTGUARD,
                 vec![
                     entry(b"a", ILLUMINATED),
                     entry(b"b", b""),
                     entry(b"c", ILLUMINATED),
                 ],
+                vec![0, 2],
                 vec![0, 1],
             ),
             payload(
-                PIPELINE_GRAYBADGE,
+                PIPELINE_GRAYBADGE_LIGHTGUARD,
                 vec![
                     entry(b"a", b""),
                     entry(b"b", b""),
                     entry(b"c", UNILLUMINATED),
                 ],
+                vec![0, 2],
                 vec![0, 1],
             ),
         ] {
@@ -280,6 +326,7 @@ mod tests {
         let mut with_hints = payload(
             PIPELINE_GRAYBADGE,
             vec![entry(b"a", b""), entry(b"b", b"")],
+            vec![0],
             vec![0, 1],
         );
         with_hints.hints = vec![1];

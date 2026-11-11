@@ -6,24 +6,49 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use flamingo_verifier_enclave_types as enclave_types;
 
 use crate::{
-    attestation::Attestor,
+    attestation::{Attestation, Attestor},
     biometric_engine::{BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores},
     state::EnclaveState,
 };
 
-/// Returns the attested key as its own "document", so tests can tell the two apart.
+/// The Verifier time test attestations state, in Unix seconds.
+pub const TEST_NOW: u32 = 1_783_446_000;
+
+fn attestation(document: Vec<u8>) -> Attestation {
+    Attestation {
+        document,
+        timestamp_millis: u64::from(TEST_NOW) * 1000,
+    }
+}
+
+/// Returns the attested key, then `|` and the `user_data` if any, as its own "document", so tests
+/// can tell documents apart.
 pub struct EchoAttestor;
 
 impl Attestor for EchoAttestor {
-    fn attest_public_key(&self, public_key: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
-        Ok(public_key.to_vec())
+    fn attest(
+        &self,
+        public_key: &[u8],
+        user_data: Option<&[u8]>,
+    ) -> Result<Attestation, enclave_types::Error> {
+        Ok(attestation(echo(public_key, user_data)))
     }
+}
+
+/// The document [`EchoAttestor`] returns.
+pub fn echo(public_key: &[u8], user_data: Option<&[u8]>) -> Vec<u8> {
+    let mut document = public_key.to_vec();
+    if let Some(user_data) = user_data {
+        document.push(b'|');
+        document.extend_from_slice(user_data);
+    }
+    document
 }
 
 pub struct FailingAttestor;
 
 impl Attestor for FailingAttestor {
-    fn attest_public_key(&self, _: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
+    fn attest(&self, _: &[u8], _: Option<&[u8]>) -> Result<Attestation, enclave_types::Error> {
         Err(enclave_types::Error::AttestationFailed)
     }
 }
@@ -48,13 +73,17 @@ impl CountingAttestor {
 }
 
 impl Attestor for CountingAttestor {
-    fn attest_public_key(&self, public_key: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
+    fn attest(
+        &self,
+        public_key: &[u8],
+        _: Option<&[u8]>,
+    ) -> Result<Attestation, enclave_types::Error> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
 
         let mut document = public_key.to_vec();
         document.push(u8::try_from(call % 256).unwrap_or_default());
 
-        Ok(document)
+        Ok(attestation(document))
     }
 }
 
@@ -79,10 +108,14 @@ impl FailsAfterSuccessesAttestor {
 }
 
 impl Attestor for FailsAfterSuccessesAttestor {
-    fn attest_public_key(&self, public_key: &[u8]) -> Result<Vec<u8>, enclave_types::Error> {
+    fn attest(
+        &self,
+        public_key: &[u8],
+        _: Option<&[u8]>,
+    ) -> Result<Attestation, enclave_types::Error> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
         if call < self.successful_calls {
-            Ok(public_key.to_vec())
+            Ok(attestation(public_key.to_vec()))
         } else {
             Err(enclave_types::Error::AttestationFailed)
         }
@@ -118,8 +151,9 @@ impl BiometricEngine for UnusedBiometricEngine {
     }
 }
 
-/// `engine_hash` of the bundle test states claim to run.
-pub const TEST_ENGINE_HASH: [u8; 32] = [0x2a; 32];
+pub use flamingo_verifier_sealed_types::testing::{
+    TEST_ENGINE_HASH, TEST_SLOTS, manifest, manifest_with_slots, with_payload,
+};
 
 /// Builds state whose biometric engine must not be called.
 pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
@@ -128,12 +162,6 @@ pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
             .expect("boot state should generate"),
     )
 }
-
-/// `max_request_bytes` of pipeline 1 in [`manifest`]; pipeline 2 allows half.
-pub const TEST_MAX_REQUEST_BYTES: u64 = 1 << 20;
-
-/// Response slots of [`manifest`]: the first is immediate, so tests not about timing stay fast.
-pub const TEST_SLOTS: &[u64] = &[1, 15, 252, 4000];
 
 /// Builds state for `engine` with the [`manifest`] of [`TEST_ENGINE_HASH`] loaded.
 pub fn loaded_state(engine: impl BiometricEngine + 'static) -> Arc<EnclaveState> {
@@ -148,48 +176,7 @@ pub fn loaded_state_with_slots(
     let state = EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine), TEST_ENGINE_HASH)
         .expect("boot state should generate");
     state
-        .load_release(&manifest_with_slots(TEST_ENGINE_HASH, "1.0.0", slots))
+        .load_release(&manifest_with_slots(TEST_ENGINE_HASH, 1, slots))
         .expect("the test manifest should load");
     Arc::new(state)
-}
-
-/// A release manifest for `engine_hash`; the enclave does not check its signature.
-pub fn manifest(engine_hash: [u8; 32], version: &str) -> String {
-    manifest_with_slots(engine_hash, version, TEST_SLOTS)
-}
-
-/// [`manifest`] with every pipeline's response slots set to `slots`.
-pub fn manifest_with_slots(engine_hash: [u8; 32], version: &str, slots: &[u64]) -> String {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    let payload = serde_json::json!({
-        "engine_hash": hex::encode(engine_hash),
-        "version": version,
-        "pipelines": [
-            {
-                "pipeline": 1,
-                "description": "credential image, live capture, challenge",
-                "response_slots": slots,
-                "max_request_bytes": TEST_MAX_REQUEST_BYTES,
-            },
-            {
-                "pipeline": 2,
-                "description": "live capture, challenge",
-                "response_slots": slots,
-                "max_request_bytes": TEST_MAX_REQUEST_BYTES / 2,
-            },
-        ],
-        "match_strictness_levels": [
-            { "match_strictness": 1, "description": "lenient" },
-            { "match_strictness": 2, "description": "strict" },
-            { "match_strictness": 3, "description": "strictest" },
-        ],
-    });
-    let header = r#"{"alg":"ES256","kid":"test","typ":"world-id-engine-manifest"}"#;
-    format!(
-        "{}.{}.{}",
-        URL_SAFE_NO_PAD.encode(header),
-        URL_SAFE_NO_PAD.encode(payload.to_string()),
-        URL_SAFE_NO_PAD.encode([0u8; 64])
-    )
 }

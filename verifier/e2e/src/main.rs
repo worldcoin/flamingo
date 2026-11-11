@@ -1,12 +1,19 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use flamingo_verifier_client::{Config, FlamingoVerifierClient, VerifiedMatchResult};
 use flamingo_verifier_sealed_types::{Entry, Payload, Request};
+use world_id_primitives::FieldElement;
 
 /// The enclave's interim pipelines; see `verifier/enclave/src/pipeline.rs`.
 const PIPELINE_DEEPFACE: u16 = 1;
 const PIPELINE_GRAYBADGE: u16 = 2;
+const PIPELINE_DEEPFACE_LIGHTGUARD: u16 = 3;
+const PIPELINE_GRAYBADGE_LIGHTGUARD: u16 = 4;
 const DEFAULT_MATCH_STRICTNESS: u8 = 2;
 
 #[tokio::main]
@@ -28,6 +35,7 @@ async fn main() -> Result<()> {
         entries.push(entry(read_image(path, "credential")?, b""));
     }
     let live = read_image(&image_paths.live, "live")?;
+    let live_index = u8::try_from(entries.len())?;
     let partner = match env::var("LIGHT_GUARD_UNILLUMINATED_IMAGE") {
         Ok(path) => {
             let unilluminated = read_image(&PathBuf::from(path), "unilluminated")?;
@@ -55,7 +63,18 @@ async fn main() -> Result<()> {
     };
     entries.push(entry(read_image(&image_paths.challenge, "challenge")?, b""));
     let compare = (0..u8::try_from(entries.len())?).collect();
-    entries.extend(partner);
+    // The pipeline checks the compared live frame and, for LightGuard, its partner frame.
+    let pipeline_id = match (gray_badge, partner.is_some()) {
+        (false, false) => PIPELINE_DEEPFACE,
+        (true, false) => PIPELINE_GRAYBADGE,
+        (false, true) => PIPELINE_DEEPFACE_LIGHTGUARD,
+        (true, true) => PIPELINE_GRAYBADGE_LIGHTGUARD,
+    };
+    let mut pipeline_inputs = vec![live_index];
+    if let Some(partner) = partner {
+        pipeline_inputs.push(u8::try_from(entries.len())?);
+        entries.push(partner);
+    }
 
     let match_strictness = env::var("MATCH_STRICTNESS")
         .map_or(Ok(DEFAULT_MATCH_STRICTNESS), |value| {
@@ -68,28 +87,27 @@ async fn main() -> Result<()> {
         .connect()
         .await
         .context("enclave assignment did not verify")?;
-    let release_hash = *session
-        .assignment()
-        .release_hashes()
-        .first()
-        .context("the host serves no loaded release")?;
-
     let payload = Payload {
-        pipeline: if gray_badge {
-            PIPELINE_GRAYBADGE
-        } else {
-            PIPELINE_DEEPFACE
-        },
+        pipeline_id,
         match_strictness,
         hints: Vec::new(),
         entries,
+        pipeline_inputs,
         compare,
-        release_hash,
     };
-    // A test RP: `aud` 0 and a random nonce, since the enclave rejects a repeated one.
+    // A test RP: `aud` 0 and a random nonce, since the enclave rejects a repeated one. It bills
+    // nothing, and the request expires in 5 minutes.
     let nonce = rand::random::<u64>().max(1);
-    let request = Request::new(0u64.into(), nonce.into(), &payload, None)
-        .context("the request is out of bounds")?;
+    let expires_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + 300;
+    let request = Request::new(
+        0u64.into(),
+        nonce.into(),
+        expires_at,
+        FieldElement::ZERO,
+        &payload,
+        None,
+    )
+    .context("the request is out of bounds")?;
 
     let result = session
         .request_match(&request)

@@ -32,6 +32,6 @@ world-id-primitives.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-flamingo-verifier-sealed-types.workspace = true
+flamingo-verifier-sealed-types = { workspace = true, features = ["testing"] }
 hex-literal.workspace = true
 tokio.workspace = true

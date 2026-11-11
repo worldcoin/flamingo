@@ -12,7 +12,7 @@ use flamingo_verifier_api_types::{
     ClientMessage, EnclaveAssignmentResponse, ErrorEnvelope, HostMessage, MAX_MATCH_BODY_BYTES,
     MAX_MATCH_RESPONSE_BYTES,
 };
-use flamingo_verifier_sealed_types::{Request, expected_claims};
+use flamingo_verifier_sealed_types::{FailureReason, ReleaseManifest, Request, expected_claims};
 use futures_util::{SinkExt, StreamExt};
 use pontifex::attestation::Verifier;
 use tokio::net::TcpStream;
@@ -43,6 +43,7 @@ pub struct FlamingoVerifierSession {
     assignment: VerifiedAssignment,
     verifier: Verifier,
     request_timeout: Duration,
+    max_response_slots: usize,
 }
 
 impl FlamingoVerifierSession {
@@ -60,14 +61,15 @@ impl FlamingoVerifierSession {
     ///
     /// # Errors
     ///
-    /// Returns [`Error`] if the request is malformed or names a release the host does not list,
+    /// Returns [`Error`] if the request is malformed or does not fit the attested release,
     /// sealing or transport fails, the host answers with an error envelope, the response is
     /// oversized, or the result or its claims do not verify.
     pub async fn request_match(mut self, request: &Request) -> Result<VerifiedMatchResult, Error> {
         let result = exchange_match(
             &mut self.socket,
             self.assignment.consumer(),
-            self.assignment.release_hashes(),
+            self.assignment.release(),
+            self.max_response_slots,
             request,
             &self.verifier,
             self.request_timeout,
@@ -124,6 +126,7 @@ pub async fn connect(
         assignment,
         verifier,
         request_timeout: config.request_timeout(),
+        max_response_slots: config.max_response_slots(),
     })
 }
 
@@ -196,17 +199,29 @@ async fn request_assignment(
 async fn exchange_match(
     socket: &mut Socket,
     consumer: &pontifex::ChannelConsumer,
-    release_hashes: &[[u8; 32]],
+    release: &ReleaseManifest,
+    max_response_slots: usize,
     request: &Request,
     verifier: &Verifier,
     request_timeout: Duration,
 ) -> Result<VerifiedMatchResult, Error> {
-    // Checks the bounds and the AAT before any biometric data leaves the device.
+    // Checks the bounds, the release, its timing budget and the AAT before any biometric data
+    // leaves the device.
     let payload = request.payload().map_err(|_| Error::MalformedRequest)?;
-    let expected = expected_claims(request, &payload).map_err(|_| Error::MalformedRequest)?;
-    if !release_hashes.contains(&payload.release_hash) {
+    if !release.has_match_strictness(payload.match_strictness) {
         return Err(Error::ReleaseUnavailable);
     }
+    if release
+        .pipeline(payload.pipeline_id)
+        .is_some_and(|pipeline| pipeline.response_slots.0.len() > max_response_slots)
+    {
+        return Err(Error::TooManyResponseSlots);
+    }
+    let expected =
+        expected_claims(request, &payload, release, unix_now()).map_err(|reason| match reason {
+            FailureReason::UnsupportedPipeline => Error::ReleaseUnavailable,
+            _ => Error::MalformedRequest,
+        })?;
     drop(payload);
     let plaintext = zeroize::Zeroizing::new(request.encode());
     let (sealed, opener) = consumer
@@ -227,7 +242,7 @@ async fn exchange_match(
                     return Err(Error::MalformedResult);
                 }
                 let result = open_verified_match(verifier, &ciphertext, opener)?;
-                ensure_claims_match(&expected, &result)?;
+                ensure_claims_match(&expected, request.billing_nullifier, &result)?;
                 return Ok(result);
             }
             Message::Text(text) => return Err(error_from_text(text.as_str())),
@@ -235,6 +250,15 @@ async fn exchange_match(
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
+}
+
+/// The device's time, in Unix seconds, for checking the AAT before sending.
+fn unix_now() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u32::try_from(elapsed.as_secs()).ok())
+        .unwrap_or(u32::MAX)
 }
 
 /// Parses the host's assignment text frame, or returns the error envelope it carries.
@@ -286,7 +310,7 @@ mod tests {
     use flamingo_verifier_api_types::MAX_MATCH_RESPONSE_BYTES;
     use flamingo_verifier_sealed_types::{
         AttestedStatement, CHANNEL_DOMAIN, DebugReport, Entry, FailureReason, MatchResult, Payload,
-        Request,
+        ReleaseManifest, Request, testing,
     };
     use futures_util::{SinkExt, StreamExt};
     use pontifex::attestation::PcrConfig;
@@ -294,6 +318,7 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
+    use world_id_primitives::FieldElement;
 
     use super::{Socket, exchange_match, websocket_url};
     use crate::VerifiedMatchResult;
@@ -305,22 +330,43 @@ mod tests {
         super::Verifier::new(vec![PcrConfig::new([0xab; 48])], Duration::from_mins(1))
     }
 
-    const RELEASE_HASH: [u8; 32] = [0x2a; 32];
+    /// The client's default slot budget; the test manifest lists 4 slots.
+    const MAX_SLOTS: usize = 8;
 
-    fn request() -> Request {
+    fn release() -> ReleaseManifest {
+        ReleaseManifest::from_jws(&testing::manifest(testing::TEST_ENGINE_HASH, 1))
+            .expect("a valid manifest")
+    }
+
+    fn payload() -> Payload {
         let entry = |data: &[u8]| Entry {
             data: data.to_vec(),
             meta: Vec::new(),
         };
-        let payload = Payload {
-            pipeline: 2,
+        Payload {
+            pipeline_id: 1,
             match_strictness: 2,
             hints: Vec::new(),
             entries: vec![entry(b"live"), entry(b"challenge")],
+            pipeline_inputs: vec![0],
             compare: vec![0, 1],
-            release_hash: RELEASE_HASH,
-        };
-        Request::new(0u64.into(), 42u64.into(), &payload, None).expect("a valid request")
+        }
+    }
+
+    fn request_with(payload: &Payload) -> Request {
+        Request::new(
+            0u64.into(),
+            42u64.into(),
+            u64::from(super::unix_now()) + 300,
+            FieldElement::ZERO,
+            payload,
+            None,
+        )
+        .expect("a valid request")
+    }
+
+    fn request() -> Request {
+        request_with(&payload())
     }
 
     fn consumer_for(enclave: &ChannelEnclave) -> ChannelConsumer {
@@ -406,7 +452,8 @@ mod tests {
         exchange_match(
             &mut socket,
             &consumer_for(&responder),
-            &[RELEASE_HASH],
+            &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -460,7 +507,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &[RELEASE_HASH],
+            &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             Duration::from_millis(100),
@@ -490,7 +538,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &[RELEASE_HASH],
+            &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -502,21 +551,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_release_the_host_does_not_list_is_never_sent() {
-        let mut socket = connect_to_stub(|_| async {}).await;
+    async fn a_request_the_release_does_not_support_is_never_sent() {
+        let mut unknown_pipeline = payload();
+        unknown_pipeline.pipeline_id = 9;
+        let mut unknown_level = payload();
+        unknown_level.match_strictness = 4;
+        // Pipeline 3 checks two inputs.
+        let mut misfit = payload();
+        misfit.pipeline_id = 3;
+        for payload in [unknown_pipeline, unknown_level, misfit] {
+            let mut socket = connect_to_stub(|_| async {}).await;
+            let error = exchange_match(
+                &mut socket,
+                &consumer_for(&responder()),
+                &release(),
+                MAX_SLOTS,
+                &request_with(&payload),
+                &verifier(),
+                TIMEOUT,
+            )
+            .await
+            .expect_err("an unsupported request must be rejected");
+            assert!(matches!(error, Error::ReleaseUnavailable), "got {error:?}");
+        }
+    }
 
+    #[tokio::test]
+    async fn a_pipeline_above_the_slot_budget_is_never_sent() {
+        // The test manifest lists 4 slots per pipeline.
+        let mut socket = connect_to_stub(|_| async {}).await;
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &[[0x2b; 32]],
+            &release(),
+            3,
             &request(),
             &verifier(),
             TIMEOUT,
         )
         .await
-        .expect_err("an unlisted release must be rejected");
-
-        assert!(matches!(error, Error::ReleaseUnavailable), "got {error:?}");
+        .expect_err("a pipeline with too many slots must be rejected");
+        assert!(
+            matches!(error, Error::TooManyResponseSlots),
+            "got {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -533,7 +611,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &[RELEASE_HASH],
+            &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -560,7 +639,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &[RELEASE_HASH],
+            &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -585,7 +665,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder()),
-            &[RELEASE_HASH],
+            &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,
@@ -629,7 +710,8 @@ mod tests {
         let error = exchange_match(
             &mut socket,
             &consumer_for(&responder),
-            &[RELEASE_HASH],
+            &release(),
+            MAX_SLOTS,
             &request(),
             &verifier(),
             TIMEOUT,

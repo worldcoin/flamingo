@@ -5,7 +5,7 @@ use world_id_flamingo::{Entry, Payload};
 #[test]
 fn published_protocol_payload_survives_worker_framing_unchanged() {
     let payload = Payload {
-        pipeline: 1,
+        pipeline_id: 1,
         match_strictness: 2,
         hints: vec![0, 128, 255],
         entries: vec![
@@ -22,8 +22,8 @@ fn published_protocol_payload_survives_worker_framing_unchanged() {
                 meta: Vec::new(),
             },
         ],
+        pipeline_inputs: vec![0],
         compare: vec![2, 0, 1],
-        release_hash: [42; 32],
     };
     let encoded = payload.encode().unwrap();
     let mut wire = Vec::new();

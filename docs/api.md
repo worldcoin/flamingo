@@ -12,9 +12,9 @@ The host exposes these routes:
 ## Engine Provider discovery
 
 Set `ENGINE_PROVIDER_METADATA` to the complete JSON document defined by
-[WIP-201 §3.5.2](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md#352-release-manifests):
-`version: 1`, `provider_id`, `release_keys` (public P-256 JWKs and statuses), and
-`manifests` (exact compact JWS strings). The host uses the validated
+[WIP-201 §4.3.6](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md#436-engine-provider-metadata):
+`version: 1`, `release_keys` (public P-256 JWKs and statuses), and
+`manifests` (exact compact JWS strings), which must all name the same `iss`. The host uses the validated
 [`PublishedMetadata`](../verifier/host/src/engine_provider.rs) type and returns
 `application/json` with `Cache-Control: no-store`. Only `GET` and `HEAD` are served;
 the deployment must expose this exact path without match authentication over HTTPS.
@@ -55,28 +55,30 @@ Only `host_url` and `allowed_pcr_configs` are required. The other fields default
 
 ## Matches
 
-The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment. Identity and certificate expiry come from the verified document.
+The WebSocket session carries the assignment and match on one connection, so the enclave that answered the assignment serves the match. The client verifies the assignment document's signature, certificate chain, measurements, and age, then checks the encryption key against the attested commitment and that the document's `user_data` is the `release_hash` of the release manifest sent with it. Identity and certificate expiry come from the verified document.
 
-The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md) request, encoded by [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo): `version`, `aud`, `nonce`, optional `aat_inputs` and the nested `payload` (`pipeline`, `match_strictness`, `hints`, `entries`, `compare`, `release_hash`). The enclave rejects any other shape, a `release_hash` it did not load, a `pipeline` or `match_strictness` the release does not define, a request above the pipeline's `max_request_bytes`, and an (`aud`, `nonce`) it already processed. `aat_inputs` carry a WIP-106 TAKT and AAT; the enclave verifies them with `cdh = R(SHA-256(payload))` before the Engine runs and signs their public values into the token. The interim pipelines are:
+The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-protocol/blob/main/docs/WIPs/wip-201.md) request, encoded by [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo): `version`, `aud`, `nonce`, `expires_at`, `billing_nullifier`, optional `aat_inputs` and the nested `payload` (`pipeline_id`, `match_strictness`, `hints`, `entries`, `pipeline_inputs`, `compare`). The enclave rejects any other shape, a `pipeline_id` or `match_strictness` the loaded release does not define, `pipeline_inputs` that do not match the pipeline's `inputs`, an `expires_at` that has passed or is more than 10 minutes ahead, and an (`aud`, `nonce`) it already processed. `aat_inputs` carry a WIP-106 TAKT and AAT; the enclave verifies them at its own time with `cdh = R(SHA-256(payload))` before the Engine runs and signs their public values into the token. The enclave bills no RP yet: it signs `billing_nullifier = 0` whatever the request carries. The interim pipelines are:
 
-| `pipeline` | `compare` positions | Engine operation |
-| --- | --- | --- |
-| `1` | Credential image, live capture, challenge | DeepFace |
-| `2` | Live capture, challenge | GrayBadge |
+| `pipeline_id` | `compare` positions | Pipeline inputs | Engine operation |
+| --- | --- | --- | --- |
+| `1` | Credential image, live frame, challenge | Live frame | DeepFace |
+| `2` | Live frame, challenge | Live frame | GrayBadge |
+| `3` | Credential image, live frame, challenge | Both LightGuard frames | DeepFace |
+| `4` | Live frame, challenge | Both LightGuard frames | GrayBadge |
 
-A LightGuard live capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the one uncompared entry. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
+A release fixes each pipeline's input count, so single-frame and LightGuard captures use separate pipelines, and the loaded manifest must declare these counts. A LightGuard capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the second pipeline input, which is not compared. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
 
 The enclave releases every opened request's response at the first of its pipeline's `response_slots` at which the Engine has finished, counted from arrival; a request rejected before its pipeline is known waits for the latest first slot of any pipeline. An Engine still running at the last slot fails the request with `engine_timeout`; the enclave then reports not ready and exits to reset the worker.
 
-A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at the WIP-201 `MAX_DEBUG_REPORT` of 64 KiB. Responses use a 96 KiB padded envelope with a four-byte length prefix on the WIP-201 channel (`WORLD-ID/WIP-201/CHANNEL`, key commitment domain `WORLD-ID/WIP-201/CHANNEL-KEY\0`).
+A binary result frame contains a padded, encrypted success or rejection. A success includes the [Flamingo Token](architecture.md#flamingo-tokens) and signing-key attestation. The client verifies both and checks that the claims equal those its request implies under the attested release, except `now`, the enclave's time when it checked the request, and `billing_nullifier`, which must be the request's or `0`. A rejection contains a failure reason and no signed statement. Both variants carry `debug_report` (`Available`, `NotProduced`, or `OmittedTooLarge`); available worker JSON is capped at the WIP-201 `MAX_DEBUG_REPORT` of 64 KiB. Responses use a 96 KiB padded envelope with a four-byte length prefix on the WIP-201 channel (`WORLD-ID/WIP-201/CHANNEL`, key commitment domain `WORLD-ID/WIP-201/CHANNEL-KEY\0`).
 
-The release manifest's `max_request_bytes` bounds each sealed request; the host additionally caps it at the [API constants](../verifier/api-types/src/matches.rs), which also define the response limits.
+The [API constants](../verifier/api-types/src/matches.rs) bound each sealed request, in the host and again in the enclave, and define the response limits.
 
 ### WebSocket session
 
 `GET /v1/matches` upgrades to a WebSocket. A session runs exactly two client frames in order, and the host closes after the second:
 
-1. An assignment request text frame, `{"type":"assignment_request"}`. The host answers with an assignment text frame, `{"type":"assignment","attestation":"…","public_key":"…","release_hashes":["…"]}`, carrying the enclave's attestation, its encryption key, and the lowercase-hex `release_hash` of each loaded release. The release hashes are not attested.
+1. An assignment request text frame, `{"type":"assignment_request"}`. The host answers with an assignment text frame, `{"type":"assignment","attestation":"…","public_key":"…","release_manifest":"…"}`, carrying the enclave's attestation, its encryption key, and the loaded release manifest as the enclave received it. The attestation's `user_data` is that manifest's `release_hash`. The enclave answers no assignment before a release is loaded.
 2. One sealed match binary frame, to which the host answers with one sealed result binary frame.
 
 The client verifies the assignment, seals the match to that key, and verifies the result and its claims without a second round trip for ordering. `FlamingoVerifierClient::connect` returns a session whose `request_match` runs the exchange; the session owns the socket and the verified assignment, so a match cannot be sent over a connection whose assignment was not verified. For authenticated gateways, call `build_request()`, add an `Authorization` header with `with_header`, then pass the builder to `connect_with()`.

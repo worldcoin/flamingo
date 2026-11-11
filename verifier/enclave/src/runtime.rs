@@ -1,9 +1,6 @@
 //! Provisioned worker startup and enclave serving on Linux.
 
 use std::{
-    fs::File,
-    io,
-    os::unix::fs::FileExt as _,
     path::Path,
     sync::{Arc, LazyLock},
 };
@@ -16,8 +13,8 @@ use flamingo_verifier_enclave::{
     state::EnclaveState,
 };
 use flamingo_verifier_sandbox_client::{FaceLimits, SandboxClient};
+use hex::FromHex as _;
 use pontifex::SecureModule;
-use sha2::{Digest as _, Sha256};
 use tabernaculum::{
     ConnectionError, Limits, Policy, SandboxConfig, Worker,
     bundle::{
@@ -46,13 +43,10 @@ pub(super) fn run() -> anyhow::Result<()> {
     let boot = enclave::accept(&BootstrapConfig::default(), Path::new(STAGING_DIR))
         .context("worker artifact provisioning failed")?;
     let runtime = boot.runtime();
-    // WIP-201 names the bundle by SHA-256; tabernaculum's SHA-384 only checks the transfer.
-    let engine_hash = sha256(&runtime.binary).context("failed to hash the worker executable")?;
-    tracing::info!(
-        worker_sha384 = %runtime.sha384,
-        engine_hash = %hex::encode(engine_hash),
-        "worker executable provisioned"
-    );
+    // WIP-201 §4.3.4 names the bundle by the SHA-384 tabernaculum checked the executable against.
+    let engine_hash = <[u8; 48]>::from_hex(&runtime.sha384)
+        .context("the worker executable's SHA-384 is not 96 hex digits")?;
+    tracing::info!(engine_hash = %runtime.sha384, "worker executable provisioned");
     let limits = FaceLimits {
         max_request_bytes: MAX_REQUEST_BYTES,
         max_image_bytes: MAX_IMAGE_BYTES,
@@ -80,21 +74,6 @@ pub(super) fn run() -> anyhow::Result<()> {
         .block_on(serve(boot, worker, engine_hash))
 }
 
-/// `SHA-256` of a file, read without moving its offset.
-fn sha256(file: &File) -> io::Result<[u8; 32]> {
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1 << 20];
-    let mut offset = 0;
-    loop {
-        let read = file.read_at(&mut buffer, offset)?;
-        if read == 0 {
-            return Ok(hasher.finalize().into());
-        }
-        hasher.update(&buffer[..read]);
-        offset += read as u64;
-    }
-}
-
 /// A terminal worker cannot be replaced within an enclave boot; init tears down the guest.
 fn worker_failed(error: ConnectionError) -> ! {
     error!(
@@ -109,7 +88,7 @@ fn worker_failed(error: ConnectionError) -> ! {
 async fn serve(
     boot: Bootstrap,
     worker: SandboxClient,
-    engine_hash: [u8; 32],
+    engine_hash: [u8; 48],
 ) -> anyhow::Result<()> {
     worker.check_alive();
     let engine = Box::new(SandboxBiometricEngine::new(worker));

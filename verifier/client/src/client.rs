@@ -5,10 +5,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_api_types::{EnclaveAssignmentResponse, ErrorEnvelope};
 use flamingo_verifier_sealed_types::{
-    CHANNEL_DOMAIN, DebugReport, FlamingoClaims, FlamingoToken, MatchResult,
+    CHANNEL_DOMAIN, DebugReport, FlamingoClaims, FlamingoToken, MatchResult, ReleaseManifest,
 };
 use pontifex::ChannelConsumer;
 use pontifex::attestation::{VerifiedAttestation, Verifier};
+use world_id_primitives::FieldElement;
 
 use crate::config::Config;
 use crate::error::Error;
@@ -17,7 +18,8 @@ use crate::session::FlamingoVerifierSession;
 /// Error code the host uses for a request that did not open.
 const REASSIGN_REQUIRED: &str = "reassign_required";
 
-/// Verifies an assignment response's attestation and binds it to the supplied public key.
+/// Verifies an assignment response's attestation, binds it to the supplied public key, and checks
+/// that it attests the release manifest sent with it (WIP-201 §4.6 step 1).
 pub fn verify_assignment(
     verifier: &Verifier,
     response: &EnclaveAssignmentResponse,
@@ -31,12 +33,29 @@ pub fn verify_assignment(
     let (consumer, attestation) =
         ChannelConsumer::from_attestation(CHANNEL_DOMAIN, verifier, &document, &public_key)
             .map_err(Error::Channel)?;
+    let release = attested_release(
+        &response.release_manifest,
+        attestation
+            .document()
+            .user_data
+            .as_ref()
+            .map(|data| data.as_slice()),
+    )?;
 
     Ok(VerifiedAssignment {
         attestation,
         consumer,
-        release_hashes: response.release_hashes.clone(),
+        release,
     })
+}
+
+/// The release manifest `jws`, if the channel attestation's `user_data` is its `release_hash`.
+fn attested_release(jws: &str, user_data: Option<&[u8]>) -> Result<ReleaseManifest, Error> {
+    let release = ReleaseManifest::from_jws(jws).map_err(|_| Error::MalformedAssignment)?;
+    if user_data != Some(release.release_hash().as_slice()) {
+        return Err(Error::ReleaseNotAttested);
+    }
+    Ok(release)
 }
 
 /// Opens a sealed match response and verifies the statement it carries, if any.
@@ -90,15 +109,29 @@ pub fn open_verified_match(
 }
 
 /// Rejects a verified result whose claims differ from `expected`.
+///
+/// The Verifier sets `now` from its own clock, and signs either the `billing_nullifier` the request
+/// carried or `0` for an RP it does not bill (WIP-201 §4.5), so those two claims are checked apart.
 pub fn ensure_claims_match(
     expected: &FlamingoClaims,
+    billing_nullifier: FieldElement,
     result: &VerifiedMatchResult,
 ) -> Result<(), Error> {
-    match result {
-        VerifiedMatchResult::Success { verified, .. } if verified.claims != *expected => {
-            Err(Error::StatementInvalid)
-        }
-        _ => Ok(()),
+    let VerifiedMatchResult::Success { verified, .. } = result else {
+        return Ok(());
+    };
+    let claims = &verified.claims;
+    let expected = FlamingoClaims {
+        now: claims.now,
+        billing_nullifier: claims.billing_nullifier,
+        ..*expected
+    };
+    let billing = claims.billing_nullifier == FieldElement::ZERO
+        || claims.billing_nullifier == billing_nullifier;
+    if *claims == expected && billing {
+        Ok(())
+    } else {
+        Err(Error::StatementInvalid)
     }
 }
 
@@ -120,8 +153,8 @@ pub struct VerifiedAssignment {
     /// Metadata read from the signed attestation document.
     attestation: VerifiedAttestation,
     consumer: ChannelConsumer,
-    /// Not attested: a wrong list only makes requests fail.
-    release_hashes: Vec<[u8; 32]>,
+    /// The release whose `release_hash` the attestation carries.
+    release: ReleaseManifest,
 }
 
 impl VerifiedAssignment {
@@ -137,10 +170,11 @@ impl VerifiedAssignment {
         &self.consumer
     }
 
-    /// The `release_hash` of every release the host says this enclave serves.
+    /// The attested release the enclave runs. Its manifest signature is not verified here
+    /// (WIP-201 §4.3.4).
     #[must_use]
-    pub fn release_hashes(&self) -> &[[u8; 32]] {
-        &self.release_hashes
+    pub const fn release(&self) -> &ReleaseManifest {
+        &self.release
     }
 }
 
@@ -239,7 +273,10 @@ pub enum VerifiedMatchResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, FlamingoClaims, VerifiedMatch, VerifiedMatchResult, ensure_claims_match};
+    use super::{
+        Error, FlamingoClaims, VerifiedMatch, VerifiedMatchResult, attested_release,
+        ensure_claims_match,
+    };
     use flamingo_verifier_sealed_types::{AttestedStatement, DebugReport};
     use world_id_primitives::FieldElement;
 
@@ -257,8 +294,37 @@ mod tests {
     }
 
     #[test]
+    fn the_release_must_be_the_attested_one() {
+        use flamingo_verifier_sealed_types::{ReleaseManifest, testing};
+        let jws = testing::manifest(testing::TEST_ENGINE_HASH, 1);
+        let release_hash = ReleaseManifest::from_jws(&jws).unwrap().release_hash();
+        assert_eq!(
+            attested_release(&jws, Some(&release_hash))
+                .unwrap()
+                .release_hash(),
+            release_hash
+        );
+        let other = testing::manifest(testing::TEST_ENGINE_HASH, 2);
+        for (jws, user_data) in [
+            (&jws, None),
+            (&jws, Some(&[0u8; 32][..])),
+            (&other, Some(&release_hash[..])),
+        ] {
+            assert!(matches!(
+                attested_release(jws, user_data),
+                Err(Error::ReleaseNotAttested)
+            ));
+        }
+        assert!(matches!(
+            attested_release("not.a.jws", Some(&release_hash)),
+            Err(Error::MalformedAssignment)
+        ));
+    }
+
+    #[test]
     fn claims_must_be_the_ones_the_request_implies() {
         let expected = FlamingoClaims {
+            now: 1,
             compared_entry_hashes: [
                 1u64.into(),
                 2u64.into(),
@@ -268,9 +334,21 @@ mod tests {
             aud: 1u64.into(),
             nonce: 2u64.into(),
             aat: None,
+            compare_sources: 256,
             engine_config_hash: 3u64.into(),
+            billing_nullifier: FieldElement::ZERO,
         };
-        assert!(ensure_claims_match(&expected, &success(&expected)).is_ok());
+        let billed = 7u64.into();
+        for accepted in [
+            expected,
+            FlamingoClaims { now: 9, ..expected },
+            FlamingoClaims {
+                billing_nullifier: billed,
+                ..expected
+            },
+        ] {
+            assert!(ensure_claims_match(&expected, billed, &success(&accepted)).is_ok());
+        }
         for changed in [
             FlamingoClaims {
                 nonce: 3u64.into(),
@@ -284,9 +362,17 @@ mod tests {
                 compared_entry_hashes: [3u64.into(); 4],
                 ..expected
             },
+            FlamingoClaims {
+                compare_sources: 1,
+                ..expected
+            },
+            FlamingoClaims {
+                billing_nullifier: 8u64.into(),
+                ..expected
+            },
         ] {
             assert!(matches!(
-                ensure_claims_match(&expected, &success(&changed)),
+                ensure_claims_match(&expected, billed, &success(&changed)),
                 Err(Error::StatementInvalid)
             ));
         }

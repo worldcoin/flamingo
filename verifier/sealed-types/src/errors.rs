@@ -75,11 +75,13 @@ pub enum InputFailureReason {
 pub enum FailureReason {
     /// Invalid CBOR shape or a WIP-201 bound violated.
     MalformedInputs,
-    /// The plaintext exceeds the pipeline's `max_request_bytes`.
+    /// The plaintext exceeds the Verifier's request size limit.
     RequestTooLarge,
-    /// The Verifier has not loaded the release the request's `release_hash` names.
-    UnsupportedRelease,
-    /// The Engine does not define the request's `pipeline`, or the entries do not fit its layout.
+    /// The request's `expires_at` has passed, or is more than `MAX_REQUEST_LIFETIME` ahead of the
+    /// Verifier's time (WIP-201 §4.4.4).
+    Expired,
+    /// The loaded release does not define the request's `pipeline_id`, or the entries do not fit
+    /// its inputs.
     UnsupportedPipeline,
     /// The Engine does not define the request's `match_strictness`.
     UnsupportedMatchStrictness,
@@ -121,6 +123,7 @@ impl From<world_id_flamingo::RequestError> for FailureReason {
         match error {
             RequestError::AatRejected(_) => Self::AatRejected,
             RequestError::OutOfBounds("request") => Self::RequestTooLarge,
+            RequestError::OutOfBounds("expires_at") => Self::Expired,
             RequestError::Malformed(_) | RequestError::OutOfBounds(_) => Self::MalformedInputs,
         }
     }

@@ -22,7 +22,6 @@ impl fmt::Debug for PublishedMetadata {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PublishedMetadata")
-            .field("provider_id", &self.0.provider_id)
             .field("release_keys", &self.0.release_keys.len())
             .field("manifests", &self.0.manifests.len())
             .finish()
@@ -41,9 +40,9 @@ pub enum PublishedMetadataError {
     /// The schema version is not supported.
     #[error("Engine Provider metadata version must be 1")]
     Version,
-    /// The provider identifier is empty.
-    #[error("Engine Provider metadata needs a nonempty provider_id")]
-    ProviderId,
+    /// The manifests name more than one Engine Provider.
+    #[error("release manifests must all name the same iss")]
+    Issuer,
     /// A public key or its identifier is invalid.
     #[error("release keys must be valid public P-256 JWKs with nonempty kid values")]
     Key,
@@ -84,9 +83,6 @@ impl FromStr for PublishedMetadata {
         if metadata.version != 1 {
             return Err(Error::Version);
         }
-        if metadata.provider_id.trim().is_empty() {
-            return Err(Error::ProviderId);
-        }
         let mut kids = BTreeSet::new();
         for key in &metadata.release_keys {
             let kid = key.jwk.prm.kid.as_deref().unwrap_or_default();
@@ -98,11 +94,18 @@ impl FromStr for PublishedMetadata {
             }
         }
         let mut manifests = BTreeSet::new();
+        let mut issuer = None;
         for jws in &metadata.manifests {
             if !manifests.insert(jws) {
                 return Err(Error::DuplicateManifest);
             }
             let manifest = ReleaseManifest::from_jws(jws).map_err(|_| Error::Manifest)?;
+            // Readers ignore manifests of another `iss` than the one they fetched for (WIP-201
+            // §4.3.6), so a mixed document would silently withdraw releases.
+            let iss = &manifest.payload().iss;
+            if *issuer.get_or_insert_with(|| iss.clone()) != *iss {
+                return Err(Error::Issuer);
+            }
             let key = metadata
                 .release_keys
                 .iter()
@@ -121,6 +124,8 @@ mod tests {
     use serde_json::{Value, json};
 
     const FIXTURE: &str = include_str!("../tests/fixtures/engine-provider.json");
+    /// `iss` of the fixture's manifest.
+    const ISS: &str = "https://engines.example.com";
 
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).unwrap()
@@ -134,7 +139,7 @@ mod tests {
             let metadata: PublishedMetadata = value.to_string().parse().unwrap();
             assert_eq!(serde_json::to_value(&metadata).unwrap(), value);
             assert_eq!(
-                metadata.0.verified_manifests().len(),
+                metadata.0.verified_manifests(ISS).len(),
                 usize::from(status == "active")
             );
         }
@@ -145,7 +150,7 @@ mod tests {
         let mut value = fixture();
         value["release_keys"][0]["status"] = "revoked".into();
         let metadata: PublishedMetadata = value.to_string().parse().unwrap();
-        assert!(metadata.0.verified_manifests().is_empty());
+        assert!(metadata.0.verified_manifests(ISS).is_empty());
         value["manifests"] = json!([]);
         assert!(value.to_string().parse::<PublishedMetadata>().is_ok());
         value["release_keys"] = json!([]);
@@ -157,7 +162,6 @@ mod tests {
         use PublishedMetadataError as Error;
         for (pointer, replacement, error) in [
             ("/version", json!(2), Error::Version),
-            ("/provider_id", json!(" "), Error::ProviderId),
             ("/release_keys/0/jwk/kid", json!(""), Error::Key),
             ("/release_keys/0/jwk/crv", json!("P-384"), Error::Key),
             // Coordinates are decoded while parsing, so a non-base64url one is malformed.
@@ -189,6 +193,32 @@ mod tests {
             " ".repeat(MAX_ENGINE_METADATA_BYTES + 1)
                 .parse::<PublishedMetadata>(),
             Err(Error::TooLarge)
+        );
+    }
+
+    #[test]
+    fn rejects_manifests_of_more_than_one_engine_provider() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let mut value = fixture();
+        let manifest = value["manifests"][0].as_str().unwrap().to_owned();
+        let parts: Vec<_> = manifest.split('.').collect();
+        let mut payload: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        payload["iss"] = "https://other.example.com".into();
+        // Checked before the signature, which the changed payload no longer matches.
+        let other = format!(
+            "{}.{}.{}",
+            parts[0],
+            URL_SAFE_NO_PAD.encode(payload.to_string()),
+            parts[2]
+        );
+        value["manifests"]
+            .as_array_mut()
+            .unwrap()
+            .push(other.into());
+        assert_eq!(
+            value.to_string().parse::<PublishedMetadata>(),
+            Err(PublishedMetadataError::Issuer)
         );
     }
 
