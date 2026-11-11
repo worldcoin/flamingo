@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, anyhow};
 use flamingo_verifier_enclave::{
     attestation::{self, NsmAttestor},
+    billing::BillingTarget,
     biometric_engine::{MAX_IMAGE_BYTES, MAX_REQUEST_BYTES, SandboxBiometricEngine},
     rng, server,
     state::EnclaveState,
@@ -96,7 +97,13 @@ async fn serve(
     attestation::connect()
         .await
         .context("Nitro Secure Module is unavailable")?;
-    let mut state = EnclaveState::generate(Arc::new(NsmAttestor), engine, engine_hash)
+    // The billing target is part of the measured image's environment; a malformed one stops the boot.
+    let billing =
+        BillingTarget::from_env().map_err(|error| anyhow!("invalid billing target: {error}"))?;
+    if billing.is_none() {
+        tracing::warn!("no billing target in the image; this enclave bills no RP");
+    }
+    let mut state = EnclaveState::generate(Arc::new(NsmAttestor), engine, engine_hash, billing)
         .map_err(|error| anyhow!("failed to generate and attest the boot keys: {error:?}"))?;
     let (encryption_refresh, signing_refresh) = state.start_attestation_refresh();
     let state = Arc::new(state);

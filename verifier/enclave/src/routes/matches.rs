@@ -788,8 +788,13 @@ mod tests {
         let calls = Arc::clone(&slow.calls);
         let terminated = Arc::clone(&slow.terminated);
         let state = Arc::new(
-            EnclaveState::generate(Arc::new(EchoAttestor), Box::new(slow), TEST_ENGINE_HASH)
-                .unwrap(),
+            EnclaveState::generate(
+                Arc::new(EchoAttestor),
+                Box::new(slow),
+                TEST_ENGINE_HASH,
+                None,
+            )
+            .unwrap(),
         );
         // DeepFace has time to finish, but the queued GrayBadge request expires first.
         let manifest = manifest_with_slots(TEST_ENGINE_HASH, 1, SLOTS);

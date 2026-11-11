@@ -2614,6 +2614,7 @@ dependencies = [
  "ciborium",
  "coset",
  "flamingo-verifier-api-types",
+ "flamingo-verifier-billing-state",
  "flamingo-verifier-enclave-types",
  "flamingo-verifier-sandbox-client",
  "flamingo-verifier-sealed-types",
@@ -2637,6 +2638,7 @@ name = "flamingo-verifier-enclave-types"
 version = "0.11.0"
 dependencies = [
  "bytes",
+ "flamingo-verifier-billing-state",
  "pontifex",
  "serde",
  "serde_bytes",

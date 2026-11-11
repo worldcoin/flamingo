@@ -81,6 +81,8 @@ impl ApiError {
                 enclave_types::Error::RequestNotOpened
                 | enclave_types::Error::RequestTooLarge
                 | enclave_types::Error::ReleaseRejected
+                | enclave_types::Error::BillingRejected
+                | enclave_types::Error::BillingOutOfOrder
                 | enclave_types::Error::Internal => Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
@@ -115,8 +117,10 @@ impl ApiError {
                 // Above the enclave's sealed request limit.
                 enclave_types::Error::RequestTooLarge => Self::request_too_large()
                     .with_detail("sealed request exceeds the enclave's size limit"),
-                // Only the release route returns `ReleaseRejected`; reaching it here is a host bug.
-                enclave_types::Error::ReleaseRejected => Self::new(
+                // Only the release and billing routes return these; reaching them here is a host bug.
+                enclave_types::Error::ReleaseRejected
+                | enclave_types::Error::BillingRejected
+                | enclave_types::Error::BillingOutOfOrder => Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
                     "Internal server error",

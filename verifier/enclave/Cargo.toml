@@ -16,6 +16,7 @@ anyhow.workspace = true
 ciborium.workspace = true
 coset.workspace = true
 flamingo-verifier-api-types.workspace = true
+flamingo-verifier-billing-state.workspace = true
 flamingo-verifier-enclave-types.workspace = true
 flamingo-verifier-sealed-types.workspace = true
 eddsa-babyjubjub.workspace = true

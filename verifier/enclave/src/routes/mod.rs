@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use flamingo_verifier_enclave_types::{
-    GetEncryptionKeyRequest, HealthRequest, LoadReleaseRequest, MatchRequest,
+    BillingUpdateRequest, GetEncryptionKeyRequest, HealthRequest, LoadReleaseRequest, MatchRequest,
 };
 use pontifex::Router;
 
+mod billing;
 mod encryption_key;
 mod health;
 mod matches;
@@ -21,6 +22,7 @@ pub(crate) fn router(state: Arc<EnclaveState>) -> Router<Arc<EnclaveState>> {
         .route::<GetEncryptionKeyRequest, _, _>(encryption_key::handler)
         .route::<MatchRequest, _, _>(matches::handler)
         .route::<LoadReleaseRequest, _, _>(release::handler)
+        .route::<BillingUpdateRequest, _, _>(billing::handler)
 }
 
 #[cfg(test)]

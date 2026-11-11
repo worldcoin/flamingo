@@ -14,6 +14,7 @@ use world_id_flamingo::ReleaseManifest;
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE, VerifierClock},
+    billing::{BillingStore, BillingTarget},
     biometric_engine::BiometricEngine,
     keys::SigningKey,
     replay::ReplayGuard,
@@ -35,6 +36,8 @@ pub struct EnclaveState {
     engine: Box<dyn BiometricEngine>,
     /// `SHA-384` of the Engine bundle this boot runs.
     engine_hash: [u8; 48],
+    /// The WIP-107 billing state the host supplies.
+    billing: BillingStore,
     /// The release manifest of that bundle, once the host has loaded it and the channel key is
     /// attested with its `release_hash`.
     release: OnceLock<ReleaseManifest>,
@@ -60,6 +63,7 @@ impl EnclaveState {
         attestor: Arc<dyn Attestor>,
         engine: Box<dyn BiometricEngine>,
         engine_hash: [u8; 48],
+        billing: Option<BillingTarget>,
     ) -> Result<Self, enclave_types::Error> {
         let channel = ChannelEnclave::generate(CHANNEL_DOMAIN).map_err(|error| {
             tracing::error!(?error, "failed to generate channel key");
@@ -101,6 +105,7 @@ impl EnclaveState {
             loading: Mutex::new(()),
             replay: ReplayGuard::default(),
             engine_overran: AtomicBool::new(false),
+            billing: BillingStore::new(billing),
         })
     }
 
@@ -150,6 +155,12 @@ impl EnclaveState {
     #[must_use]
     pub fn now(&self) -> u64 {
         self.clock.now()
+    }
+
+    /// The WIP-107 billing state the host supplies.
+    #[must_use]
+    pub const fn billing(&self) -> &BillingStore {
+        &self.billing
     }
 
     /// Rejects requests this boot already processed.
@@ -299,6 +310,7 @@ mod tests {
             Arc::new(FailingAttestor),
             Box::new(UnusedBiometricEngine),
             TEST_ENGINE_HASH,
+            None,
         )
         .err();
 
