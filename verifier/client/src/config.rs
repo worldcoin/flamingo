@@ -148,12 +148,6 @@ impl Config {
 
     /// Validates the measurement policy before constructing the verifier.
     fn validate(&self) -> Result<(), Error> {
-        if self.max_response_slots == 0 {
-            return Err(Error::InvalidConfig {
-                attribute: "max_response_slots".to_owned(),
-                reason: "must be nonzero".to_owned(),
-            });
-        }
         self.verifier().map(|_| ())
     }
 
@@ -161,10 +155,17 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Rejects a zero age or one above WIP-201 `MAX_ATTESTATION_AGE`. Without the explicit
-    /// measurement bypass, also rejects an empty policy, missing or zero PCR0–2, duplicate indices,
-    /// or malformed measurements.
+    /// Rejects a zero `max_response_slots`, and a zero age or one above WIP-201
+    /// `MAX_ATTESTATION_AGE`. Without the explicit measurement bypass, also rejects an empty
+    /// policy, missing or zero PCR0–2, duplicate indices, or malformed measurements.
     pub fn verifier(&self) -> Result<Verifier, Error> {
+        // Checked here, not only in `validate`, so the builder methods cannot bypass it.
+        if self.max_response_slots == 0 {
+            return Err(Error::InvalidConfig {
+                attribute: "max_response_slots".to_owned(),
+                reason: "must be nonzero".to_owned(),
+            });
+        }
         let max_age = Duration::from_millis(self.max_attestation_age_millis);
         if max_age.is_zero() || max_age > MAX_ATTESTATION_AGE {
             return Err(Error::InvalidConfig {
@@ -345,6 +346,22 @@ mod tests {
                 Err(Error::InvalidConfig { .. })
             ));
         }
+    }
+
+    #[test]
+    fn a_zero_slot_budget_is_rejected_whichever_way_it_is_set() {
+        let config = Config::new("http://localhost:8000", pcrs()).unwrap();
+        assert!(matches!(
+            config.clone().with_max_response_slots(0).verifier(),
+            Err(Error::InvalidConfig { .. })
+        ));
+        assert!(matches!(
+            crate::FlamingoVerifierClient::new(config.clone().with_max_response_slots(0)),
+            Err(Error::InvalidConfig { .. })
+        ));
+        let mut json = serde_json::to_value(&config).unwrap();
+        json["max_response_slots"] = 0.into();
+        assert!(Config::from_json(&json.to_string()).is_err());
     }
 
     #[test]
