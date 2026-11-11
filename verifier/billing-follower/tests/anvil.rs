@@ -72,7 +72,9 @@ impl Mirror {
 async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     let anvil = Anvil::new().try_spawn()?;
     let signer = PrivateKeySigner::from(anvil.keys()[0].clone());
+    // Nonces are read from the node: `evm_revert` rewinds them, so a cached nonce would leave a gap.
     let provider = ProviderBuilder::new()
+        .with_simple_nonce_management()
         .wallet(EthereumWallet::from(signer))
         .connect_http(anvil.endpoint_url());
     let emitter = BillingEventEmitter::deploy(&provider).await?;
@@ -84,7 +86,19 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     let send = |call: alloy::rpc::types::TransactionRequest| {
         let provider = provider.clone();
         async move {
-            let receipt = provider.send_transaction(call).await?.get_receipt().await?;
+            let hash = *provider.send_transaction(call).await?.tx_hash();
+            // Polled directly: `get_receipt` watches new block numbers, and after `evm_revert`
+            // the new fork reuses numbers it has already seen, so it would wait forever.
+            let receipt = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(receipt) = provider.get_transaction_receipt(hash).await? {
+                        return Ok::<_, eyre::Report>(receipt);
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .map_err(|_| eyre!("no receipt for {hash}"))??;
             eyre::ensure!(receipt.status(), "the emitter call reverted");
             Ok::<_, eyre::Report>(receipt.block_number.unwrap_or_default())
         }
