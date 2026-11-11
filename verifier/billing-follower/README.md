@@ -6,7 +6,7 @@ Follows the WIP-107 Billing Contract at the latest block and emits the billing s
 
 - backfills `BilledRpUpdated` logs from the Contract's deployment and `Registered` logs from the start of the earliest active billing period, with `eth_getLogs` ranges that shrink when a provider rejects them;
 - polls on the chain's block schedule, checks each new block's parent hash, and answers a reorganization within its window with the ops that undo it; a deeper fork restarts it from an empty state, flagged as `reset`;
-- retries failed reads with exponential backoff and jitter, and moves to the next endpoint after a failure;
+- retries failed reads with exponential backoff and jitter, over one JSON-RPC endpoint (failover belongs in front of it);
 - reports `billing_follower.*` metrics through the `metrics` facade.
 
 `ChainSource` abstracts the reads; `RpcSource` implements it over JSON-RPC.

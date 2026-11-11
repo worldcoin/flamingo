@@ -118,7 +118,7 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
         stalled_poll_interval: Duration::from_millis(200),
         ..FollowerConfig::new(ANVIL_CHAIN_ID, *emitter.address(), deploy_block)
     };
-    let mut follower = BillingFollower::connect(vec![anvil.endpoint_url()], config.clone()).await?;
+    let mut follower = BillingFollower::connect(anvil.endpoint_url(), config.clone()).await?;
     let mut mirror = Mirror::default();
     mirror.sync_to(&mut follower, backfilled).await?;
     assert!(mirror.state.is_billed(rp));
@@ -153,7 +153,7 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     assert!(mirror.state.is_registered(nullifier(1), rp, now()));
 
     // A follower started now sees the same state.
-    let mut fresh = BillingFollower::connect(vec![anvil.endpoint_url()], config).await?;
+    let mut fresh = BillingFollower::connect(anvil.endpoint_url(), config).await?;
     let mut fresh_mirror = Mirror::default();
     fresh_mirror.sync_to(&mut fresh, replacing).await?;
     assert_eq!(fresh_mirror.state, mirror.state);

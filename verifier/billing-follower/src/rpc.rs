@@ -1,10 +1,6 @@
 //! [`ChainSource`] over JSON-RPC.
 
-use std::{
-    future::IntoFuture,
-    sync::atomic::{AtomicUsize, Ordering},
-    time::Duration,
-};
+use std::{future::IntoFuture, time::Duration};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -32,94 +28,59 @@ const RATE_LIMIT_BACKOFF_MS: u64 = 200;
 /// The compute-unit budget the transport paces rate-limit retries against.
 const COMPUTE_UNITS_PER_SECOND: u64 = 330;
 
-/// Reads the Billing Contract over one or more JSON-RPC endpoints.
-///
-/// Calls go to one endpoint at a time, so consecutive reads see one node's view of the chain. A
-/// failed call moves later calls to the next endpoint.
+/// Reads the Billing Contract over one JSON-RPC endpoint. Failover between providers belongs in
+/// front of it, e.g. in the infrastructure's RPC proxy.
 #[derive(Debug)]
 pub struct RpcSource {
-    providers: Vec<RootProvider<Ethereum>>,
-    active: AtomicUsize,
+    provider: RootProvider<Ethereum>,
     contract: Address,
 }
 
 impl RpcSource {
-    /// Reads the Billing Contract at `contract` over the HTTP endpoints `urls`.
-    ///
-    /// # Panics
-    /// If `urls` is empty.
+    /// Reads the Billing Contract at `contract` over the HTTP endpoint `url`.
     #[must_use]
-    pub fn new(urls: Vec<Url>, contract: Address) -> Self {
-        assert!(!urls.is_empty(), "RpcSource needs at least one endpoint");
-        let providers = urls
-            .into_iter()
-            .map(|url| {
-                let client = RpcClient::builder()
-                    .layer(RetryBackoffLayer::new(
-                        RATE_LIMIT_RETRIES,
-                        RATE_LIMIT_BACKOFF_MS,
-                        COMPUTE_UNITS_PER_SECOND,
-                    ))
-                    .http(url);
-                RootProvider::new(client)
-            })
-            .collect();
+    pub fn new(url: Url, contract: Address) -> Self {
+        let client = RpcClient::builder()
+            .layer(RetryBackoffLayer::new(
+                RATE_LIMIT_RETRIES,
+                RATE_LIMIT_BACKOFF_MS,
+                COMPUTE_UNITS_PER_SECOND,
+            ))
+            .http(url);
         Self {
-            providers,
-            active: AtomicUsize::new(0),
+            provider: RootProvider::new(client),
             contract,
         }
     }
 
-    /// The endpoint calls currently go to, and its index.
-    fn pick(&self) -> (usize, &RootProvider<Ethereum>) {
-        let index = self.active.load(Ordering::Relaxed) % self.providers.len();
-        (index, &self.providers[index])
-    }
-
-    /// Awaits `call` on endpoint `index` within [`CALL_TIMEOUT`]. A failure moves later calls to
-    /// the next endpoint.
+    /// Awaits `call` within [`CALL_TIMEOUT`].
     async fn guard<T, E>(
-        &self,
-        index: usize,
         method: &'static str,
         call: impl IntoFuture<Output = Result<T, E>>,
     ) -> Result<T, SourceError>
     where
         E: std::error::Error + Send + Sync + 'static,
     {
-        let error = match tokio::time::timeout(CALL_TIMEOUT, call.into_future()).await {
-            Ok(Ok(value)) => return Ok(value),
-            Ok(Err(error)) => SourceError::Rpc {
+        match tokio::time::timeout(CALL_TIMEOUT, call.into_future()).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(SourceError::Rpc {
                 method,
                 source: Box::new(error),
-            },
-            Err(_) => SourceError::Timeout { method },
-        };
-        // Another call may have moved on already; only move off the endpoint that failed.
-        let _ = self.active.compare_exchange(
-            index,
-            (index + 1) % self.providers.len(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
-        Err(error)
+            }),
+            Err(_) => Err(SourceError::Timeout { method }),
+        }
     }
 }
 
 impl ChainSource for RpcSource {
     async fn chain_id(&self) -> Result<u64, SourceError> {
-        let (index, provider) = self.pick();
-        self.guard(index, "eth_chainId", provider.get_chain_id())
-            .await
+        Self::guard("eth_chainId", self.provider.get_chain_id()).await
     }
 
     async fn latest(&self) -> Result<BlockRef, SourceError> {
-        let (index, provider) = self.pick();
-        self.guard(
-            index,
+        Self::guard(
             "eth_getBlockByNumber",
-            provider.get_block_by_number(BlockNumberOrTag::Latest),
+            self.provider.get_block_by_number(BlockNumberOrTag::Latest),
         )
         .await?
         .map(|block| block_ref(&block))
@@ -130,15 +91,13 @@ impl ChainSource for RpcSource {
     }
 
     async fn block(&self, number: u64) -> Result<Option<BlockRef>, SourceError> {
-        let (index, provider) = self.pick();
-        Ok(self
-            .guard(
-                index,
-                "eth_getBlockByNumber",
-                provider.get_block_by_number(BlockNumberOrTag::Number(number)),
-            )
-            .await?
-            .map(|block| block_ref(&block)))
+        Ok(Self::guard(
+            "eth_getBlockByNumber",
+            self.provider
+                .get_block_by_number(BlockNumberOrTag::Number(number)),
+        )
+        .await?
+        .map(|block| block_ref(&block)))
     }
 
     async fn logs(
@@ -156,10 +115,7 @@ impl ChainSource for RpcSource {
             .from_block(from)
             .to_block(to)
             .event_signature(signatures);
-        let (index, provider) = self.pick();
-        let logs = self
-            .guard(index, "eth_getLogs", provider.get_logs(&filter))
-            .await?;
+        let logs = Self::guard("eth_getLogs", self.provider.get_logs(&filter)).await?;
         let mut decoded = logs.iter().map(chain_log).collect::<Result<Vec<_>, _>>()?;
         decoded.sort_by_key(|log| (log.block_number, log.log_index));
         Ok(decoded)
