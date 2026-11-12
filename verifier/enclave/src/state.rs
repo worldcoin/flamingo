@@ -65,6 +65,23 @@ impl EnclaveState {
         engine_hash: [u8; 48],
         billing: Option<BillingConfig>,
     ) -> Result<Self, enclave_types::Error> {
+        Self::generate_with(
+            Arc::clone(&attestor),
+            attestor,
+            engine,
+            engine_hash,
+            billing,
+        )
+    }
+
+    /// [`Self::generate`] with one attestor per key.
+    pub(crate) fn generate_with(
+        signing_attestor: Arc<dyn Attestor>,
+        channel_attestor: Arc<dyn Attestor>,
+        engine: Box<dyn BiometricEngine>,
+        engine_hash: [u8; 48],
+        billing: Option<BillingConfig>,
+    ) -> Result<Self, enclave_types::Error> {
         let channel = ChannelEnclave::generate(CHANNEL_DOMAIN).map_err(|error| {
             tracing::error!(?error, "failed to generate channel key");
             enclave_types::Error::Internal
@@ -82,12 +99,12 @@ impl EnclaveState {
                 })?;
 
         let (attested_signing_key, clock) = AttestedKey::first(
-            Arc::clone(&attestor),
+            signing_attestor,
             signing_public_key.to_vec(),
             MAX_CACHED_AGE,
         )?;
         let attested_encryption_key = AttestedKey::new(
-            attestor,
+            channel_attestor,
             Arc::clone(&clock),
             channel.public_key_commitment().to_vec(),
             MAX_CACHED_AGE,
