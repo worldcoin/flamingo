@@ -27,6 +27,10 @@ const RESYNCS: &str = "flamingo.billing.resyncs";
 const PUSHED_BLOCK: &str = "flamingo.billing.pushed_block";
 const ENCLAVE_REGISTRATIONS: &str = "flamingo.billing.enclave_registrations";
 const ENCLAVE_READY: &str = "flamingo.billing.enclave_ready";
+const ENCLAVE_MAX_REGISTRATIONS: &str = "flamingo.billing.enclave_max_registrations";
+
+/// Default bound on the registrations the host follows; the enclave image's should match.
+pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
 
 /// A JSON-RPC endpoint. `Debug` shows only its host: provider URLs often carry API keys.
 #[derive(Clone, PartialEq, Eq)]
@@ -49,6 +53,9 @@ pub struct BillingConfig {
     pub contract: Address,
     /// The block the Billing Contract was deployed in.
     pub deploy_block: u64,
+    /// Bound on the registrations the follower holds. Above the enclave's, the enclave fills up
+    /// and stops serving first.
+    pub max_registrations: usize,
 }
 
 /// Follows the Billing Contract and pushes its state to the enclave until the follower fails.
@@ -59,16 +66,28 @@ pub struct BillingConfig {
 /// # Errors
 /// When the follower stops: the endpoints serve another chain, or the billing state rejects an op.
 pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyhow::Result<()> {
-    let follower_config =
-        FollowerConfig::new(config.chain_id, config.contract, config.deploy_block);
+    let follower_config = FollowerConfig {
+        max_registrations: config.max_registrations,
+        ..FollowerConfig::new(config.chain_id, config.contract, config.deploy_block)
+    };
     let mut follower = connect(&config, follower_config).await?;
-    let mut pusher = Pusher::new(enclave, config.chain_id, config.contract.into_array());
+    let mut pusher = Pusher::new(
+        enclave,
+        config.chain_id,
+        config.contract.into_array(),
+        config.max_registrations,
+    );
     loop {
         let update = follower
             .next()
             .await
             .context("the billing follower stopped")?;
-        pusher.push(&update, follower.state()).await;
+        // Pushing a partial state would replace the enclave's complete one, so a restarted host
+        // first catches up. The first push after that sends the whole state; a rebuild after a
+        // deep fork arrives complete in one update.
+        if update.backfill_done {
+            pusher.push(&update, follower.state()).await;
+        }
     }
 }
 
@@ -97,17 +116,26 @@ pub struct Pusher {
     contract: [u8; 20],
     /// The `seq` of the next update, or `None` if the next push starts a new stream.
     next_seq: Option<u64>,
+    max_registrations: usize,
+    warned_capacity: bool,
 }
 
 impl Pusher {
     /// A pusher whose first push starts a new stream.
     #[must_use]
-    pub fn new(client: Arc<dyn EnclaveClient>, chain_id: u64, contract: [u8; 20]) -> Self {
+    pub const fn new(
+        client: Arc<dyn EnclaveClient>,
+        chain_id: u64,
+        contract: [u8; 20],
+        max_registrations: usize,
+    ) -> Self {
         Self {
             client,
             chain_id,
             contract,
             next_seq: None,
+            max_registrations,
+            warned_capacity: false,
         }
     }
 
@@ -136,7 +164,7 @@ impl Pusher {
             match self.client.update_billing(request).await {
                 Ok(status) => {
                     metrics::counter!(PUSHES, "result" => "ok").increment(1);
-                    record(status);
+                    self.record(status);
                     sent += 1;
                 }
                 Err(error) => {
@@ -171,6 +199,23 @@ impl Pusher {
     }
 }
 
+impl Pusher {
+    fn record(&mut self, status: BillingStatus) {
+        metrics::gauge!(ENCLAVE_REGISTRATIONS).set(gauge_value(status.registrations));
+        metrics::gauge!(ENCLAVE_MAX_REGISTRATIONS).set(gauge_value(status.max_registrations));
+        metrics::gauge!(ENCLAVE_READY).set(if status.ready { 1.0 } else { 0.0 });
+        let own = u64::try_from(self.max_registrations).unwrap_or(u64::MAX);
+        if own > status.max_registrations && !self.warned_capacity {
+            self.warned_capacity = true;
+            tracing::warn!(
+                host_max_registrations = own,
+                enclave_max_registrations = status.max_registrations,
+                "the enclave holds fewer registrations than the host follows; it stops serving once full"
+            );
+        }
+    }
+}
+
 /// The first `seq` and the ops of a new stream: the whole state.
 fn new_stream(state: &BillingState) -> (u64, Vec<BillingOp>) {
     metrics::counter!(RESYNCS).increment(1);
@@ -189,11 +234,6 @@ const fn chunk_count(ops: &[BillingOp]) -> usize {
 
 fn chunk(ops: &[BillingOp], index: usize) -> &[BillingOp] {
     ops.chunks(MAX_BILLING_OPS).nth(index).unwrap_or_default()
-}
-
-fn record(status: BillingStatus) {
-    metrics::gauge!(ENCLAVE_REGISTRATIONS).set(gauge_value(status.registrations));
-    metrics::gauge!(ENCLAVE_READY).set(if status.ready { 1.0 } else { 0.0 });
 }
 
 const fn result_label(error: &enclave::Error) -> &'static str {
@@ -291,6 +331,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or(Ok(BillingStatus {
                     registrations: 0,
+                    max_registrations: 1 << 22,
                     ready: true,
                 }))
         }
@@ -324,6 +365,7 @@ mod tests {
             Arc::clone(recorder) as Arc<dyn EnclaveClient>,
             CHAIN_ID,
             CONTRACT,
+            DEFAULT_MAX_REGISTRATIONS,
         )
     }
 
@@ -435,6 +477,25 @@ mod tests {
                 .iter()
                 .all(|push| push.ops == vec![registration(2)])
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_smaller_enclave_bound_is_flagged() {
+        let recorder = Arc::new(Recorder::default());
+        let mut sync = pusher(&recorder);
+        let mut state = BillingState::default();
+        let update = follow(&mut state, Vec::new(), 10);
+        sync.push(&update, &state).await;
+        assert!(!sync.warned_capacity);
+
+        recorder.answer(Ok(BillingStatus {
+            registrations: 0,
+            max_registrations: 1,
+            ready: true,
+        }));
+        let update = follow(&mut state, Vec::new(), 11);
+        sync.push(&update, &state).await;
+        assert!(sync.warned_capacity);
     }
 
     #[tokio::test(start_paused = true)]

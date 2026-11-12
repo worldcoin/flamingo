@@ -42,6 +42,7 @@ mod tests {
     const TARGET: BillingTarget = BillingTarget {
         chain_id: 480,
         contract: [0x11; 20],
+        max_registrations: 1,
     };
 
     fn update(backfill_done: bool) -> BillingUpdateRequest {

@@ -82,8 +82,9 @@ The host reads every setting from an environment variable and an equivalent CLI 
 | `--billing-chain-id` | `BILLING_CHAIN_ID` | unset | The Billing Contract's chain; must match the enclave image. |
 | `--billing-contract` | `BILLING_CONTRACT` | unset | The Billing Contract's address; must match the enclave image. |
 | `--billing-deploy-block` | `BILLING_DEPLOY_BLOCK` | unset | The block the Billing Contract was deployed in. |
+| `--billing-max-registrations` | `BILLING_MAX_REGISTRATIONS` | `4194304` | Registrations the host follows; keep it at most the enclave image's `FLAMINGO_BILLING_MAX_REGISTRATIONS`. |
 
-`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The four billing settings are set together or not at all. The API host publishes configured provider metadata but does not provision enclave manifests. The enclave accepts only a manifest whose `engine_hash` matches the SHA-384 of its worker executable and reports not ready until the provisioner has loaded it.
+`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The four billing settings without a default are set together or not at all. The API host publishes configured provider metadata but does not provision enclave manifests. The enclave accepts only a manifest whose `engine_hash` matches the SHA-384 of its worker executable and reports not ready until the provisioner has loaded it.
 
 ```bash
 RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 \

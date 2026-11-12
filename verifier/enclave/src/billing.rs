@@ -14,12 +14,13 @@ use flamingo_verifier_enclave_types::{
 };
 use world_id_primitives::billing::billing_period;
 
-/// Bound on the registrations the enclave holds, about 100 MiB. Reaching it fails closed.
-pub const MAX_REGISTRATIONS: usize = 1 << 20;
+/// Default bound on the registrations the enclave holds. Reaching the bound fails closed.
+pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
 
 /// The chain this measurement bills on, from the EIF's environment, so the host cannot change it.
 const CHAIN_ID_VAR: &str = "FLAMINGO_BILLING_CHAIN_ID";
 const CONTRACT_VAR: &str = "FLAMINGO_BILLING_CONTRACT";
+const MAX_REGISTRATIONS_VAR: &str = "FLAMINGO_BILLING_MAX_REGISTRATIONS";
 
 /// The Billing Contract this enclave accepts state of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,26 +29,36 @@ pub struct BillingTarget {
     pub chain_id: u64,
     /// The Billing Contract's address.
     pub contract: [u8; 20],
+    /// Bound on the registrations the enclave holds.
+    pub max_registrations: usize,
 }
 
 impl BillingTarget {
     /// The target set in the EIF's environment, or `None` if billing is off.
     ///
     /// # Errors
-    /// If only one of the variables is set, or either is malformed: a broken image must not boot.
+    /// If only one of chain and contract is set, or a variable is malformed: a broken image must
+    /// not boot. The bound defaults to [`DEFAULT_MAX_REGISTRATIONS`].
     pub fn from_env() -> Result<Option<Self>, String> {
         let chain_id = env::var(CHAIN_ID_VAR).ok();
         let contract = env::var(CONTRACT_VAR).ok();
+        let max_registrations = env::var(MAX_REGISTRATIONS_VAR).ok();
         match (chain_id, contract) {
             (None, None) => Ok(None),
-            (Some(chain_id), Some(contract)) => Self::parse(&chain_id, &contract).map(Some),
+            (Some(chain_id), Some(contract)) => {
+                Self::parse(&chain_id, &contract, max_registrations.as_deref()).map(Some)
+            }
             _ => Err(format!(
                 "set both {CHAIN_ID_VAR} and {CONTRACT_VAR}, or neither"
             )),
         }
     }
 
-    fn parse(chain_id: &str, contract: &str) -> Result<Self, String> {
+    fn parse(
+        chain_id: &str,
+        contract: &str,
+        max_registrations: Option<&str>,
+    ) -> Result<Self, String> {
         let chain_id = chain_id
             .parse()
             .map_err(|_| format!("{CHAIN_ID_VAR} is not a chain ID"))?;
@@ -55,7 +66,19 @@ impl BillingTarget {
             .ok()
             .and_then(|bytes| <[u8; 20]>::try_from(bytes).ok())
             .ok_or_else(|| format!("{CONTRACT_VAR} is not a 20-byte hex address"))?;
-        Ok(Self { chain_id, contract })
+        let max_registrations =
+            max_registrations.map_or(Ok(DEFAULT_MAX_REGISTRATIONS), |value| {
+                value
+                    .parse()
+                    .ok()
+                    .filter(|&bound| bound > 0)
+                    .ok_or_else(|| format!("{MAX_REGISTRATIONS_VAR} is not a positive count"))
+            })?;
+        Ok(Self {
+            chain_id,
+            contract,
+            max_registrations,
+        })
     }
 }
 
@@ -71,7 +94,6 @@ struct Inner {
 /// The enclave's copy of the billing state.
 pub struct BillingStore {
     target: Option<BillingTarget>,
-    max_registrations: usize,
     inner: Mutex<Inner>,
 }
 
@@ -79,15 +101,10 @@ impl BillingStore {
     /// A store for `target`, or a store that bills nothing if `target` is `None`.
     #[must_use]
     pub fn new(target: Option<BillingTarget>) -> Self {
-        Self::with_limit(target, MAX_REGISTRATIONS)
-    }
-
-    fn with_limit(target: Option<BillingTarget>, max_registrations: usize) -> Self {
         Self {
             target,
-            max_registrations,
             inner: Mutex::new(Inner {
-                state: BillingState::with_limit(max_registrations),
+                state: BillingState::with_limit(max_registrations(target)),
                 last_seq: None,
                 caught_up: false,
                 next_expiry: 0,
@@ -129,13 +146,13 @@ impl BillingStore {
 
         let mut inner = self.lock();
         if update.seq == 0 {
-            let mut state = BillingState::with_limit(self.max_registrations);
+            let mut state = BillingState::with_limit(target.max_registrations);
             apply_all(&mut state, &update.ops).map_err(rejected)?;
             inner.state = state;
             inner.caught_up = false;
         } else if inner.last_seq == Some(update.seq) {
             // A retry of an update whose answer the host lost.
-            return Ok(status(&inner));
+            return Ok(status(&inner, target.max_registrations));
         } else if inner.last_seq.map(|seq| seq + 1) == Some(update.seq) {
             apply_all(&mut inner.state, &update.ops).map_err(rejected)?;
         } else {
@@ -147,7 +164,7 @@ impl BillingStore {
             inner.state.expire(now);
             inner.next_expiry = billing_period(now).map_or(u64::MAX, |(_, end)| end);
         }
-        let status = status(&inner);
+        let status = status(&inner, target.max_registrations);
         drop(inner);
         Ok(status)
     }
@@ -185,9 +202,16 @@ fn ready(inner: &Inner) -> bool {
     inner.caught_up && !inner.state.is_full()
 }
 
-fn status(inner: &Inner) -> BillingStatus {
+/// A store that bills nothing holds no registrations.
+fn max_registrations(target: Option<BillingTarget>) -> usize {
+    target.map_or(0, |target| target.max_registrations)
+}
+
+fn status(inner: &Inner, max_registrations: usize) -> BillingStatus {
+    let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
     BillingStatus {
-        registrations: u64::try_from(inner.state.registration_count()).unwrap_or(u64::MAX),
+        registrations: count(inner.state.registration_count()),
+        max_registrations: count(max_registrations),
         ready: ready(inner),
     }
 }
@@ -206,6 +230,7 @@ mod tests {
     const TARGET: BillingTarget = BillingTarget {
         chain_id: 480,
         contract: [0x11; 20],
+        max_registrations: DEFAULT_MAX_REGISTRATIONS,
     };
 
     fn add(nullifier: u64, period_start: u64) -> BillingOp {
@@ -259,6 +284,7 @@ mod tests {
             status,
             BillingStatus {
                 registrations: 2,
+                max_registrations: 1 << 22,
                 ready: true
             }
         );
@@ -355,7 +381,10 @@ mod tests {
 
     #[test]
     fn a_full_store_is_not_ready() {
-        let store = BillingStore::with_limit(Some(TARGET), 1);
+        let store = BillingStore::new(Some(BillingTarget {
+            max_registrations: 1,
+            ..TARGET
+        }));
         let status = store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
             .unwrap();
@@ -387,16 +416,20 @@ mod tests {
     }
 
     #[test]
-    fn the_target_needs_both_variables_and_valid_values() {
+    fn the_target_needs_valid_values_and_defaults_its_bound() {
+        const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
+        assert_eq!(BillingTarget::parse("480", CONTRACT, None), Ok(TARGET));
         assert_eq!(
-            BillingTarget::parse("480", "0x1111111111111111111111111111111111111111"),
-            Ok(TARGET)
+            BillingTarget::parse("480", &CONTRACT[2..], Some("5")),
+            Ok(BillingTarget {
+                max_registrations: 5,
+                ..TARGET
+            })
         );
-        assert_eq!(
-            BillingTarget::parse("480", "1111111111111111111111111111111111111111"),
-            Ok(TARGET)
-        );
-        assert!(BillingTarget::parse("world", "0x11").is_err());
-        assert!(BillingTarget::parse("480", "0x11").is_err());
+        assert!(BillingTarget::parse("world", CONTRACT, None).is_err());
+        assert!(BillingTarget::parse("480", "0x11", None).is_err());
+        for bound in ["0", "-1", "many"] {
+            assert!(BillingTarget::parse("480", CONTRACT, Some(bound)).is_err());
+        }
     }
 }
