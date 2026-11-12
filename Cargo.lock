@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-api-types"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-client"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64 0.22.1",
  "flamingo-verifier-api-types",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-e2e"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "flamingo-verifier-client",
@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave-types"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "pontifex",
@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-host"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1871,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-sealed-types"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64 0.22.1",
  "ciborium",

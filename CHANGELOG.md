@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.10.0...flamingo-verifier-client-v0.11.0) - 2026-11-12
+
+### Added
+
+- [**breaking**] adopt world-id-protocol 0.20 ([#170](https://github.com/worldcoin/flamingo/pull/170))
+
 ## [0.10.0](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.9.0...flamingo-verifier-client-v0.10.0) - 2026-10-28
 
 ### Changed
