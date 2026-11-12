@@ -157,7 +157,6 @@ impl Pusher {
                 contract: self.contract,
                 seq: first_seq + u64::try_from(sent).unwrap_or(u64::MAX),
                 ops: chunk(&ops, sent).to_vec(),
-                head_block: update.head,
                 // A new stream serves once complete, so only its last part may say so.
                 backfill_done: update.backfill_done && last,
             };
@@ -222,8 +221,8 @@ fn new_stream(state: &BillingState) -> (u64, Vec<BillingOp>) {
     (0, state.snapshot().collect())
 }
 
-/// Updates needed for `ops`: one per [`MAX_BILLING_OPS`], and one even without ops, so the
-/// enclave sees the head advance.
+/// Updates needed for `ops`: one per [`MAX_BILLING_OPS`], and one even without ops, so a
+/// rebooted enclave answers `BillingOutOfOrder` within a block and gets its state back.
 const fn chunk_count(ops: &[BillingOp]) -> usize {
     if ops.is_empty() {
         1
@@ -395,7 +394,6 @@ mod tests {
         );
         assert_eq!(pushes[1].seq, 1);
         assert!(pushes[1].ops.is_empty());
-        assert_eq!(pushes[1].head_block, 11);
     }
 
     #[tokio::test(start_paused = true)]

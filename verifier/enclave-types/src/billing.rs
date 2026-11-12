@@ -23,8 +23,6 @@ pub struct BillingUpdateRequest {
     pub seq: u64,
     /// The state changes, in chain order. At most [`MAX_BILLING_OPS`].
     pub ops: Vec<BillingOp>,
-    /// The block the host's state is current up to.
-    pub head_block: u64,
     /// Whether the host's state has caught up with the chain.
     pub backfill_done: bool,
 }

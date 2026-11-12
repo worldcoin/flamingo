@@ -51,7 +51,6 @@ mod tests {
             contract: TARGET.contract,
             seq: 0,
             ops: Vec::new(),
-            head_block: 1,
             backfill_done,
         }
     }

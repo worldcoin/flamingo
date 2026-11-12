@@ -377,7 +377,6 @@ mod tests {
             contract: TARGET.contract,
             seq,
             ops,
-            head_block: seq,
             backfill_done,
         }
     }
