@@ -6,50 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use world_id_primitives::{FieldElement, billing::is_period_active, rp::RpId};
 
-/// A World ID's registration in one RP's billing period, as `registrationOf` returns it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Registration {
-    /// The RP the registration consumed capacity of.
-    pub rp_id: RpId,
-    /// The start of the registration's billing period.
-    pub period_start: u64,
-}
-
-/// One change to a [`BillingState`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BillingOp {
-    /// Sets whether the Billing Contract bills `rp_id`, from a `BilledRpUpdated` log.
-    SetBilledRp {
-        /// The RP.
-        rp_id: RpId,
-        /// Whether it is billed.
-        billed: bool,
-    },
-    /// Adds a registration, from a `Registered` log.
-    AddRegistration {
-        /// The registered `billingNullifier`.
-        nullifier: FieldElement,
-        /// Its RP and period.
-        registration: Registration,
-    },
-    /// Removes a registration, when a reorganization drops its `Registered` log.
-    RemoveRegistration {
-        /// The registered `billingNullifier`.
-        nullifier: FieldElement,
-    },
-}
-
-/// Why a [`BillingState`] rejected an op. A rejected op leaves the state unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum BillingStateError {
-    /// The state already holds its maximum number of registrations.
-    #[error("the billing state holds its maximum of {0} registrations")]
-    Full(usize),
-    /// The nullifier is registered with other values, which the Billing Contract never does.
-    #[error("the billing nullifier is already registered for another RP or period")]
-    Conflict,
-}
-
 /// The billed RPs and the registrations a TEE Verifier checks requests against (WIP-107 §4.7).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BillingState {
@@ -170,6 +126,50 @@ impl BillingState {
         self.max_registrations
             .is_some_and(|limit| self.registrations.len() >= limit)
     }
+}
+
+/// One change to a [`BillingState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BillingOp {
+    /// Sets whether the Billing Contract bills `rp_id`, from a `BilledRpUpdated` log.
+    SetBilledRp {
+        /// The RP.
+        rp_id: RpId,
+        /// Whether it is billed.
+        billed: bool,
+    },
+    /// Adds a registration, from a `Registered` log.
+    AddRegistration {
+        /// The registered `billingNullifier`.
+        nullifier: FieldElement,
+        /// Its RP and period.
+        registration: Registration,
+    },
+    /// Removes a registration, when a reorganization drops its `Registered` log.
+    RemoveRegistration {
+        /// The registered `billingNullifier`.
+        nullifier: FieldElement,
+    },
+}
+
+/// A World ID's registration in one RP's billing period, as `registrationOf` returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Registration {
+    /// The RP the registration consumed capacity of.
+    pub rp_id: RpId,
+    /// The start of the registration's billing period.
+    pub period_start: u64,
+}
+
+/// Why a [`BillingState`] rejected an op. A rejected op leaves the state unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BillingStateError {
+    /// The state already holds its maximum number of registrations.
+    #[error("the billing state holds its maximum of {0} registrations")]
+    Full(usize),
+    /// The nullifier is registered with other values, which the Billing Contract never does.
+    #[error("the billing nullifier is already registered for another RP or period")]
+    Conflict,
 }
 
 #[cfg(test)]

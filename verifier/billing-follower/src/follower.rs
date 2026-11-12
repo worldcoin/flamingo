@@ -25,132 +25,6 @@ use crate::{
 /// Header reads in flight at once, e.g. for the window after backfill.
 const HEADER_READS_IN_FLIGHT: usize = 16;
 
-/// What and how the follower follows.
-#[derive(Debug, Clone)]
-pub struct FollowerConfig {
-    /// The chain hosting the Billing Contract. [`BillingFollower::with_source`] checks it.
-    pub chain_id: u64,
-    /// The Billing Contract's address. Used by [`BillingFollower::connect`].
-    pub contract: Address,
-    /// The block the Billing Contract was deployed in. `BilledRpUpdated` logs are read from here.
-    pub deploy_block: u64,
-    /// The largest `eth_getLogs` block range; halved after a failure, regrown after successes.
-    pub max_log_range: u64,
-    /// How many recent blocks a reorganization can undo; a deeper fork restarts the follower.
-    pub reorg_window: usize,
-    /// Bound on the registrations the follower holds.
-    pub max_registrations: usize,
-    /// The chain's block time.
-    pub block_time: Duration,
-    /// How often to poll while a new block is due.
-    pub poll_interval: Duration,
-    /// How often to poll once the chain is a whole block late.
-    pub stalled_poll_interval: Duration,
-}
-
-impl FollowerConfig {
-    /// World Chain defaults: 2 s blocks, 100 ms polls, 10,000-block log ranges, 256-block window.
-    #[must_use]
-    pub const fn new(chain_id: u64, contract: Address, deploy_block: u64) -> Self {
-        Self {
-            chain_id,
-            contract,
-            deploy_block,
-            max_log_range: 10_000,
-            reorg_window: 256,
-            max_registrations: 1 << 22,
-            block_time: Duration::from_secs(2),
-            poll_interval: Duration::from_millis(100),
-            stalled_poll_interval: Duration::from_secs(1),
-        }
-    }
-}
-
-/// A change to the billing state, to apply in order to a copy of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BillingUpdate {
-    /// After a fork deeper than the window: replace the copy with `ops`, a full snapshot.
-    pub reset: bool,
-    /// The state changes, in chain order. Each changes the state.
-    pub ops: Vec<BillingOp>,
-    /// The block the state is current up to.
-    pub head: u64,
-    /// Whether the follower has caught up with the chain since it started or reset.
-    pub backfill_done: bool,
-}
-
-/// Why the follower stopped. Failed chain reads are retried and never end it.
-#[derive(Debug, thiserror::Error)]
-pub enum FollowerError {
-    /// The source serves another chain than the configured one.
-    #[error("the source serves chain {actual}, not chain {expected}")]
-    WrongChain {
-        /// The configured chain.
-        expected: u64,
-        /// The source's chain.
-        actual: u64,
-    },
-    /// No contract at the configured address; its empty logs would read as "nothing billed".
-    #[error("no contract is deployed at the configured Billing Contract address")]
-    NoContract,
-    /// The configured deployment block is past the chain's head.
-    #[error("the deployment block {deploy_block} is past the head {head}")]
-    DeployBlockAhead {
-        /// The configured deployment block.
-        deploy_block: u64,
-        /// The chain's head.
-        head: u64,
-    },
-    /// Reading the chain ID, the head or the contract's code failed.
-    #[error(transparent)]
-    Source(#[from] SourceError),
-    /// The billing state rejected an op: it is full, or the logs registered a nullifier twice.
-    #[error("the billing state rejected an op: {0}")]
-    State(#[from] BillingStateError),
-}
-
-/// Why one step did not finish.
-enum StepError {
-    Source(SourceError),
-    /// The source's view changed during the step; it is retried.
-    ChainMoved,
-    /// A reorganization reached past the window.
-    DeepFork,
-    State(BillingStateError),
-}
-
-impl From<SourceError> for StepError {
-    fn from(error: SourceError) -> Self {
-        Self::Source(error)
-    }
-}
-
-impl From<BillingStateError> for StepError {
-    fn from(error: BillingStateError) -> Self {
-        Self::State(error)
-    }
-}
-
-/// A recent block and the ops that undo what it applied, newest last.
-struct WindowBlock {
-    block: BlockRef,
-    inverses: Vec<BillingOp>,
-}
-
-enum Phase {
-    /// Nothing read yet.
-    Start,
-    /// Headerless log reads up to `deep_end`; below `registered_from` only `BilledRpUpdated`.
-    Backfill {
-        cursor: u64,
-        deep_end: u64,
-        registered_from: u64,
-        started: Instant,
-    },
-    /// Following the chain block by block, with every block's header checked.
-    Live,
-}
-
 /// Follows the WIP-107 Billing Contract and emits the host's billing state (WIP-107 §4.8).
 pub struct BillingFollower<S = RpcSource> {
     source: S,
@@ -280,7 +154,6 @@ impl<S: ChainSource> BillingFollower<S> {
         let deep_end = head.number.saturating_sub(self.window_len());
         self.next_expiry = period_end(now);
         if self.config.deploy_block > deep_end {
-            // Everything is recent: follow block by block from the deployment.
             self.tip = match self.config.deploy_block.checked_sub(1) {
                 Some(parent) => self.source.block(parent).await?,
                 None => None,
@@ -297,6 +170,33 @@ impl<S: ChainSource> BillingFollower<S> {
             };
         }
         Ok(None)
+    }
+
+    /// The first block in `from..=head` at or after `timestamp`, else the block after `head`.
+    async fn first_block_at(
+        &self,
+        from: u64,
+        head: BlockRef,
+        timestamp: u64,
+    ) -> Result<u64, StepError> {
+        if head.timestamp < timestamp {
+            return Ok(head.number + 1);
+        }
+        let (mut low, mut high) = (from.min(head.number), head.number);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let block = self
+                .source
+                .block(middle)
+                .await?
+                .ok_or(StepError::ChainMoved)?;
+            if block.timestamp >= timestamp {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        Ok(low)
     }
 
     /// Reads one page of logs below the reorganization window.
@@ -342,6 +242,16 @@ impl<S: ChainSource> BillingFollower<S> {
             return Ok(None);
         }
         Ok((!self.outbox.is_empty()).then(|| self.update(end)))
+    }
+
+    /// The events and inclusive end of the backfill page starting at `cursor`.
+    fn page(&self, cursor: u64, deep_end: u64, registered_from: u64) -> (EventSet, u64) {
+        let end = cursor.saturating_add(self.log_range - 1).min(deep_end);
+        if cursor < registered_from {
+            (EventSet::BilledRps, end.min(registered_from - 1))
+        } else {
+            (EventSet::All, end)
+        }
     }
 
     /// Follows the chain to its latest block, undoing a reorganization first if there was one.
@@ -510,20 +420,16 @@ impl<S: ChainSource> BillingFollower<S> {
         Ok(())
     }
 
-    /// Starts over from an empty state after a fork deeper than the window.
-    fn reset(&mut self) {
-        tracing::error!(
-            reorg_window = self.config.reorg_window,
-            "reorganization deeper than the billing follower's window; starting over"
-        );
-        metrics::counter!(names::RESETS).increment(1);
-        self.state = BillingState::with_limit(self.config.max_registrations);
-        self.window.clear();
-        self.tip = None;
-        self.outbox.clear();
-        self.phase = Phase::Start;
-        self.rebuilding = true;
-        self.announced = false;
+    /// Reads all logs of `from..=to` in pages; nothing is applied until all are read.
+    async fn read_logs_paged(&mut self, from: u64, to: u64) -> Result<Vec<ChainLog>, StepError> {
+        let mut logs = Vec::new();
+        let mut cursor = from;
+        while cursor <= to {
+            let end = cursor.saturating_add(self.log_range - 1).min(to);
+            logs.extend(self.read_logs(cursor, end, EventSet::All).await?);
+            cursor = end + 1;
+        }
+        Ok(logs)
     }
 
     /// Reads logs, halving the page size after a failure and doubling it after a success.
@@ -545,28 +451,6 @@ impl<S: ChainSource> BillingFollower<S> {
                 self.log_range = (self.log_range / 2).max(1);
                 Err(error.into())
             }
-        }
-    }
-
-    /// Reads all logs of `from..=to` in pages; nothing is applied until all are read.
-    async fn read_logs_paged(&mut self, from: u64, to: u64) -> Result<Vec<ChainLog>, StepError> {
-        let mut logs = Vec::new();
-        let mut cursor = from;
-        while cursor <= to {
-            let end = cursor.saturating_add(self.log_range - 1).min(to);
-            logs.extend(self.read_logs(cursor, end, EventSet::All).await?);
-            cursor = end + 1;
-        }
-        Ok(logs)
-    }
-
-    /// The events and inclusive end of the backfill page starting at `cursor`.
-    fn page(&self, cursor: u64, deep_end: u64, registered_from: u64) -> (EventSet, u64) {
-        let end = cursor.saturating_add(self.log_range - 1).min(deep_end);
-        if cursor < registered_from {
-            (EventSet::BilledRps, end.min(registered_from - 1))
-        } else {
-            (EventSet::All, end)
         }
     }
 
@@ -602,33 +486,6 @@ impl<S: ChainSource> BillingFollower<S> {
             }
         };
         Ok(self.state.apply(op)?.map(|inverse| (op, inverse)))
-    }
-
-    /// The first block in `from..=head` at or after `timestamp`, else the block after `head`.
-    async fn first_block_at(
-        &self,
-        from: u64,
-        head: BlockRef,
-        timestamp: u64,
-    ) -> Result<u64, StepError> {
-        if head.timestamp < timestamp {
-            return Ok(head.number + 1);
-        }
-        let (mut low, mut high) = (from.min(head.number), head.number);
-        while low < high {
-            let middle = low + (high - low) / 2;
-            let block = self
-                .source
-                .block(middle)
-                .await?
-                .ok_or(StepError::ChainMoved)?;
-            if block.timestamp >= timestamp {
-                high = middle;
-            } else {
-                low = middle + 1;
-            }
-        }
-        Ok(low)
     }
 
     /// Starts the window at the tip, so a reorganization of the tip itself can be undone.
@@ -696,6 +553,22 @@ impl<S: ChainSource> BillingFollower<S> {
         tokio::time::sleep(delay).await;
     }
 
+    /// Starts over from an empty state after a fork deeper than the window.
+    fn reset(&mut self) {
+        tracing::error!(
+            reorg_window = self.config.reorg_window,
+            "reorganization deeper than the billing follower's window; starting over"
+        );
+        metrics::counter!(names::RESETS).increment(1);
+        self.state = BillingState::with_limit(self.config.max_registrations);
+        self.window.clear();
+        self.tip = None;
+        self.outbox.clear();
+        self.phase = Phase::Start;
+        self.rebuilding = true;
+        self.announced = false;
+    }
+
     /// Drops ended periods' registrations without an op; consumers expire with their own clock.
     fn expire(&mut self) {
         let now = (self.clock)();
@@ -708,6 +581,132 @@ impl<S: ChainSource> BillingFollower<S> {
     fn window_len(&self) -> u64 {
         u64::try_from(self.config.reorg_window.max(1)).unwrap_or(u64::MAX)
     }
+}
+
+/// What and how the follower follows.
+#[derive(Debug, Clone)]
+pub struct FollowerConfig {
+    /// The chain hosting the Billing Contract. [`BillingFollower::with_source`] checks it.
+    pub chain_id: u64,
+    /// The Billing Contract's address. Used by [`BillingFollower::connect`].
+    pub contract: Address,
+    /// The block the Billing Contract was deployed in. `BilledRpUpdated` logs are read from here.
+    pub deploy_block: u64,
+    /// The largest `eth_getLogs` block range; halved after a failure, regrown after successes.
+    pub max_log_range: u64,
+    /// How many recent blocks a reorganization can undo; a deeper fork restarts the follower.
+    pub reorg_window: usize,
+    /// Bound on the registrations the follower holds.
+    pub max_registrations: usize,
+    /// The chain's block time.
+    pub block_time: Duration,
+    /// How often to poll while a new block is due.
+    pub poll_interval: Duration,
+    /// How often to poll once the chain is a whole block late.
+    pub stalled_poll_interval: Duration,
+}
+
+impl FollowerConfig {
+    /// World Chain defaults: 2 s blocks, 100 ms polls, 10,000-block log ranges, 256-block window.
+    #[must_use]
+    pub const fn new(chain_id: u64, contract: Address, deploy_block: u64) -> Self {
+        Self {
+            chain_id,
+            contract,
+            deploy_block,
+            max_log_range: 10_000,
+            reorg_window: 256,
+            max_registrations: 1 << 22,
+            block_time: Duration::from_secs(2),
+            poll_interval: Duration::from_millis(100),
+            stalled_poll_interval: Duration::from_secs(1),
+        }
+    }
+}
+
+/// A change to the billing state, to apply in order to a copy of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingUpdate {
+    /// After a fork deeper than the window: replace the copy with `ops`, a full snapshot.
+    pub reset: bool,
+    /// The state changes, in chain order. Each changes the state.
+    pub ops: Vec<BillingOp>,
+    /// The block the state is current up to.
+    pub head: u64,
+    /// Whether the follower has caught up with the chain since it started or reset.
+    pub backfill_done: bool,
+}
+
+/// Why the follower stopped. Failed chain reads are retried and never end it.
+#[derive(Debug, thiserror::Error)]
+pub enum FollowerError {
+    /// The source serves another chain than the configured one.
+    #[error("the source serves chain {actual}, not chain {expected}")]
+    WrongChain {
+        /// The configured chain.
+        expected: u64,
+        /// The source's chain.
+        actual: u64,
+    },
+    /// No contract at the configured address; its empty logs would read as "nothing billed".
+    #[error("no contract is deployed at the configured Billing Contract address")]
+    NoContract,
+    /// The configured deployment block is past the chain's head.
+    #[error("the deployment block {deploy_block} is past the head {head}")]
+    DeployBlockAhead {
+        /// The configured deployment block.
+        deploy_block: u64,
+        /// The chain's head.
+        head: u64,
+    },
+    /// Reading the chain ID, the head or the contract's code failed.
+    #[error(transparent)]
+    Source(#[from] SourceError),
+    /// The billing state rejected an op: it is full, or the logs registered a nullifier twice.
+    #[error("the billing state rejected an op: {0}")]
+    State(#[from] BillingStateError),
+}
+
+/// Why one step did not finish.
+enum StepError {
+    Source(SourceError),
+    /// The source's view changed during the step; it is retried.
+    ChainMoved,
+    /// A reorganization reached past the window.
+    DeepFork,
+    State(BillingStateError),
+}
+
+impl From<SourceError> for StepError {
+    fn from(error: SourceError) -> Self {
+        Self::Source(error)
+    }
+}
+
+impl From<BillingStateError> for StepError {
+    fn from(error: BillingStateError) -> Self {
+        Self::State(error)
+    }
+}
+
+/// A recent block and the ops that undo what it applied, newest last.
+struct WindowBlock {
+    block: BlockRef,
+    inverses: Vec<BillingOp>,
+}
+
+enum Phase {
+    /// Nothing read yet.
+    Start,
+    /// Headerless log reads up to `deep_end`; below `registered_from` only `BilledRpUpdated`.
+    Backfill {
+        cursor: u64,
+        deep_end: u64,
+        registered_from: u64,
+        started: Instant,
+    },
+    /// Following the chain block by block, with every block's header checked.
+    Live,
 }
 
 /// The end of the billing period containing `now`, or `u64::MAX` if it cannot be computed.

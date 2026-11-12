@@ -120,7 +120,6 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     assert!(mirror.state.is_billed(rp));
     assert!(mirror.state.is_registered(nullifier(1), rp, now()));
 
-    // A live block, then a reorganization that replaces it.
     let snapshot: U256 = provider.raw_request("evm_snapshot".into(), ()).await?;
     let orphaned = send(
         emitter
@@ -148,7 +147,6 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     assert!(mirror.state.is_registered(nullifier(3), rp, now()));
     assert!(mirror.state.is_registered(nullifier(1), rp, now()));
 
-    // A follower started now sees the same state.
     let mut fresh = BillingFollower::connect(anvil.endpoint_url(), config).await?;
     let mut fresh_mirror = Mirror::default();
     fresh_mirror.sync_to(&mut fresh, replacing).await?;

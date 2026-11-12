@@ -119,7 +119,6 @@ async fn backfills_then_follows_new_blocks() {
             .is_registered(nullifier(1), RpId::new(7), now())
     );
 
-    // Once caught up, every new block is reported, with or without changes.
     chain.mine(vec![registered(3, 8)]);
     let update = follower.next().await.unwrap();
     assert_eq!(update.head, chain.head().number);
@@ -191,7 +190,6 @@ async fn undoes_a_reorganization_within_the_window() {
 
         let state = follower.state();
         assert!(state.is_registered(nullifier(9), RpId::new(7), now()));
-        // The undone blocks' changes are gone; the earlier ones remain.
         assert!(state.is_billed(RpId::new(7)));
         assert_eq!(state.registration(nullifier(2)).is_some(), depth < 2);
         assert_eq!(state.registration(nullifier(1)).is_some(), depth < 3);

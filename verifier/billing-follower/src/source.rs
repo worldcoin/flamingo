@@ -5,6 +5,32 @@ use std::future::Future;
 use alloy::primitives::{B256, U256};
 use world_id_primitives::rp::RpId;
 
+/// Reads the Billing Contract's chain; [`crate::RpcSource`] implements it over JSON-RPC.
+pub trait ChainSource: Send + Sync {
+    /// The chain ID.
+    fn chain_id(&self) -> impl Future<Output = Result<u64, SourceError>> + Send;
+
+    /// Whether the Billing Contract's address holds code.
+    fn contract_deployed(&self) -> impl Future<Output = Result<bool, SourceError>> + Send;
+
+    /// The latest block.
+    fn latest(&self) -> impl Future<Output = Result<BlockRef, SourceError>> + Send;
+
+    /// The block at `number`, or `None` if the source does not have it yet.
+    fn block(
+        &self,
+        number: u64,
+    ) -> impl Future<Output = Result<Option<BlockRef>, SourceError>> + Send;
+
+    /// The Billing Contract's logs of `events` in blocks `from..=to`, in chain order.
+    fn logs(
+        &self,
+        from: u64,
+        to: u64,
+        events: EventSet,
+    ) -> impl Future<Output = Result<Vec<ChainLog>, SourceError>> + Send;
+}
+
 /// A block header, as far as the follower needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockRef {
@@ -109,30 +135,4 @@ impl SourceError {
             | Self::Malformed { method, .. } => method,
         }
     }
-}
-
-/// Reads the Billing Contract's chain; [`crate::RpcSource`] implements it over JSON-RPC.
-pub trait ChainSource: Send + Sync {
-    /// The chain ID.
-    fn chain_id(&self) -> impl Future<Output = Result<u64, SourceError>> + Send;
-
-    /// Whether the Billing Contract's address holds code.
-    fn contract_deployed(&self) -> impl Future<Output = Result<bool, SourceError>> + Send;
-
-    /// The latest block.
-    fn latest(&self) -> impl Future<Output = Result<BlockRef, SourceError>> + Send;
-
-    /// The block at `number`, or `None` if the source does not have it yet.
-    fn block(
-        &self,
-        number: u64,
-    ) -> impl Future<Output = Result<Option<BlockRef>, SourceError>> + Send;
-
-    /// The Billing Contract's logs of `events` in blocks `from..=to`, in chain order.
-    fn logs(
-        &self,
-        from: u64,
-        to: u64,
-        events: EventSet,
-    ) -> impl Future<Output = Result<Vec<ChainLog>, SourceError>> + Send;
 }

@@ -51,38 +51,20 @@ impl RpcSource {
             contract,
         }
     }
-
-    /// Awaits `call` within [`CALL_TIMEOUT`].
-    async fn guard<T, E>(
-        method: &'static str,
-        call: impl IntoFuture<Output = Result<T, E>>,
-    ) -> Result<T, SourceError>
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        match tokio::time::timeout(CALL_TIMEOUT, call.into_future()).await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(error)) => Err(SourceError::Rpc {
-                method,
-                source: Box::new(error),
-            }),
-            Err(_) => Err(SourceError::Timeout { method }),
-        }
-    }
 }
 
 impl ChainSource for RpcSource {
     async fn chain_id(&self) -> Result<u64, SourceError> {
-        Self::guard("eth_chainId", self.provider.get_chain_id()).await
+        guard("eth_chainId", self.provider.get_chain_id()).await
     }
 
     async fn contract_deployed(&self) -> Result<bool, SourceError> {
-        let code = Self::guard("eth_getCode", self.provider.get_code_at(self.contract)).await?;
+        let code = guard("eth_getCode", self.provider.get_code_at(self.contract)).await?;
         Ok(!code.is_empty())
     }
 
     async fn latest(&self) -> Result<BlockRef, SourceError> {
-        Self::guard(
+        guard(
             "eth_getBlockByNumber",
             self.provider.get_block_by_number(BlockNumberOrTag::Latest),
         )
@@ -95,7 +77,7 @@ impl ChainSource for RpcSource {
     }
 
     async fn block(&self, number: u64) -> Result<Option<BlockRef>, SourceError> {
-        Ok(Self::guard(
+        Ok(guard(
             "eth_getBlockByNumber",
             self.provider
                 .get_block_by_number(BlockNumberOrTag::Number(number)),
@@ -119,10 +101,28 @@ impl ChainSource for RpcSource {
             .from_block(from)
             .to_block(to)
             .event_signature(signatures);
-        let logs = Self::guard("eth_getLogs", self.provider.get_logs(&filter)).await?;
+        let logs = guard("eth_getLogs", self.provider.get_logs(&filter)).await?;
         let mut decoded = logs.iter().map(chain_log).collect::<Result<Vec<_>, _>>()?;
         decoded.sort_by_key(|log| (log.block_number, log.log_index));
         Ok(decoded)
+    }
+}
+
+/// Awaits `call` within [`CALL_TIMEOUT`].
+async fn guard<T, E>(
+    method: &'static str,
+    call: impl IntoFuture<Output = Result<T, E>>,
+) -> Result<T, SourceError>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match tokio::time::timeout(CALL_TIMEOUT, call.into_future()).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(SourceError::Rpc {
+            method,
+            source: Box::new(error),
+        }),
+        Err(_) => Err(SourceError::Timeout { method }),
     }
 }
 
