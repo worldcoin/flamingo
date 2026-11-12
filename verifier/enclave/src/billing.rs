@@ -126,7 +126,7 @@ impl Inner {
             self.next_expiry = billing_period(now).map_or(u64::MAX, |(_, end)| end);
         }
         if update.seq == 0 {
-            let mut state = State::new(target.max_registrations, self.state.key);
+            let mut state = State::new(target.max_registrations, self.state.digest_key);
             apply_all(&mut state, &update.ops, now).map_err(rejected)?;
             self.state = state;
             self.caught_up = false;
@@ -180,7 +180,7 @@ fn max_registrations(target: Option<BillingTarget>) -> usize {
 fn status(inner: &Inner, max_registrations: usize) -> BillingStatus {
     let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
     BillingStatus {
-        registrations: count(inner.state.len),
+        registrations: count(inner.state.registrations),
         max_registrations: count(max_registrations),
         ready: inner.caught_up,
     }
@@ -191,9 +191,9 @@ struct State {
     billed_rps: HashSet<RpId>,
     /// Registration digests by period, so expiry drops whole periods.
     periods: BTreeMap<u64, Digests>,
-    len: usize,
-    max: usize,
-    key: (u64, u64),
+    registrations: usize,
+    max_registrations: usize,
+    digest_key: (u64, u64),
 }
 
 /// Digests are keyed `SipHash` outputs nobody outside the enclave can choose, so the set needs no
@@ -201,13 +201,13 @@ struct State {
 type Digests = HashSet<u64, BuildHasherDefault<DigestHasher>>;
 
 impl State {
-    fn new(max: usize, key: (u64, u64)) -> Self {
+    fn new(max_registrations: usize, digest_key: (u64, u64)) -> Self {
         Self {
             billed_rps: HashSet::new(),
             periods: BTreeMap::new(),
-            len: 0,
-            max,
-            key,
+            registrations: 0,
+            max_registrations,
+            digest_key,
         }
     }
 
@@ -235,14 +235,14 @@ impl State {
                 if has_ended(registration.period_start, now) || self.holds(digest, registration) {
                     return Ok(None);
                 }
-                if self.len >= self.max {
-                    return Err(BillingStateError::Full(self.max));
+                if self.registrations >= self.max_registrations {
+                    return Err(BillingStateError::Full(self.max_registrations));
                 }
                 self.periods
                     .entry(registration.period_start)
                     .or_default()
                     .insert(digest);
-                self.len += 1;
+                self.registrations += 1;
                 Ok(Some(BillingOp::RemoveRegistration {
                     nullifier,
                     registration,
@@ -262,7 +262,7 @@ impl State {
                 if !removed {
                     return Ok(None);
                 }
-                self.len -= 1;
+                self.registrations -= 1;
                 Ok(Some(BillingOp::AddRegistration {
                     nullifier,
                     registration,
@@ -272,7 +272,7 @@ impl State {
     }
 
     fn digest(&self, nullifier: FieldElement, rp_id: RpId) -> u64 {
-        let mut hasher = SipHasher24::new_with_keys(self.key.0, self.key.1);
+        let mut hasher = SipHasher24::new_with_keys(self.digest_key.0, self.digest_key.1);
         hasher.write(&nullifier.to_be_bytes());
         hasher.write_u64(rp_id.into_inner());
         hasher.finish()
@@ -286,11 +286,11 @@ impl State {
 
     /// Drops the periods that ended by `now`.
     fn expire(&mut self, now: u64) {
-        let len = &mut self.len;
+        let registrations = &mut self.registrations;
         self.periods.retain(|&period_start, digests| {
             let ended = has_ended(period_start, now);
             if ended {
-                *len -= digests.len();
+                *registrations -= digests.len();
             }
             !ended
         });
