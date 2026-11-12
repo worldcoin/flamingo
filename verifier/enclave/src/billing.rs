@@ -2,17 +2,25 @@
 //!
 //! The host follows the Billing Contract and pushes its state as a numbered update stream. A new
 //! stream replaces the state, which serves requests once an update of it carries `backfill_done`.
+//!
+//! Registrations are kept as 64-bit SipHash-2-4 digests of the nullifier and RP, under a key
+//! drawn at boot from the hardware-seeded RNG. Nobody outside the enclave knows the key or sees a
+//! digest, so collisions cannot be searched for; a blind one has a chance of about `n / 2^64`.
 
 use std::{
+    collections::{BTreeMap, HashSet},
     env,
+    hash::Hasher as _,
     sync::{Mutex, PoisonError},
 };
 
-use flamingo_verifier_billing_state::{BillingOp, BillingState, BillingStateError};
+use flamingo_verifier_billing_state::{BillingOp, BillingStateError, Registration};
 use flamingo_verifier_enclave_types::{
     self as enclave_types, BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS,
 };
-use world_id_primitives::billing::billing_period;
+use rand::{RngCore as _, rngs::OsRng};
+use siphasher::sip::SipHasher24;
+use world_id_primitives::{FieldElement, billing::billing_period, rp::RpId};
 
 /// Default bound on the registrations the enclave holds. Reaching the bound fails closed.
 pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
@@ -82,8 +90,116 @@ impl BillingTarget {
     }
 }
 
+/// The billed RPs and the registrations, as the enclave keeps them.
+struct State {
+    billed_rps: HashSet<RpId>,
+    /// Registration digests by period, so expiry drops whole periods.
+    periods: BTreeMap<u64, HashSet<u64>>,
+    len: usize,
+    max: usize,
+    key: (u64, u64),
+}
+
+impl State {
+    fn new(max: usize, key: (u64, u64)) -> Self {
+        Self {
+            billed_rps: HashSet::new(),
+            periods: BTreeMap::new(),
+            len: 0,
+            max,
+            key,
+        }
+    }
+
+    fn digest(&self, nullifier: FieldElement, rp_id: RpId) -> u64 {
+        let mut hasher = SipHasher24::new_with_keys(self.key.0, self.key.1);
+        hasher.write(&nullifier.to_be_bytes());
+        hasher.write_u64(rp_id.into_inner());
+        hasher.finish()
+    }
+
+    /// Applies `op` and returns the op that undoes it, or `None` if it changed nothing.
+    fn apply(&mut self, op: BillingOp) -> Result<Option<BillingOp>, BillingStateError> {
+        match op {
+            BillingOp::SetBilledRp { rp_id, billed } => {
+                let was_billed = if billed {
+                    !self.billed_rps.insert(rp_id)
+                } else {
+                    self.billed_rps.remove(&rp_id)
+                };
+                Ok((was_billed != billed).then_some(BillingOp::SetBilledRp {
+                    rp_id,
+                    billed: was_billed,
+                }))
+            }
+            BillingOp::AddRegistration {
+                nullifier,
+                registration,
+            } => {
+                let digest = self.digest(nullifier, registration.rp_id);
+                if self.holds(digest, registration) {
+                    return Ok(None);
+                }
+                if self.len >= self.max {
+                    return Err(BillingStateError::Full(self.max));
+                }
+                self.periods
+                    .entry(registration.period_start)
+                    .or_default()
+                    .insert(digest);
+                self.len += 1;
+                Ok(Some(BillingOp::RemoveRegistration {
+                    nullifier,
+                    registration,
+                }))
+            }
+            BillingOp::RemoveRegistration {
+                nullifier,
+                registration,
+            } => {
+                let digest = self.digest(nullifier, registration.rp_id);
+                let removed = self
+                    .periods
+                    .get_mut(&registration.period_start)
+                    .is_some_and(|digests| digests.remove(&digest));
+                if !removed {
+                    return Ok(None);
+                }
+                self.len -= 1;
+                Ok(Some(BillingOp::AddRegistration {
+                    nullifier,
+                    registration,
+                }))
+            }
+        }
+    }
+
+    fn holds(&self, digest: u64, registration: Registration) -> bool {
+        self.periods
+            .get(&registration.period_start)
+            .is_some_and(|digests| digests.contains(&digest))
+    }
+
+    /// Drops the periods that ended by `now`.
+    fn expire(&mut self, now: u64) {
+        let len = &mut self.len;
+        self.periods.retain(|&period_start, digests| {
+            // A period is kept until it ends; one not started yet only has overlap registrations.
+            let ended = billing_period(period_start).map_or(true, |(_, end)| now >= end);
+            if ended {
+                *len -= digests.len();
+            }
+            !ended
+        });
+    }
+
+    const fn is_full(&self) -> bool {
+        self.len >= self.max
+    }
+}
+
 struct Inner {
-    state: BillingState,
+    state: State,
     /// The last applied `seq`, or `None` before the first stream.
     last_seq: Option<u64>,
     /// Whether an update of the current stream carried `backfill_done`.
@@ -104,7 +220,7 @@ impl BillingStore {
         Self {
             target,
             inner: Mutex::new(Inner {
-                state: BillingState::with_limit(max_registrations(target)),
+                state: State::new(max_registrations(target), boot_key()),
                 last_seq: None,
                 caught_up: false,
                 next_expiry: 0,
@@ -146,7 +262,7 @@ impl BillingStore {
 
         let mut inner = self.lock();
         if update.seq == 0 {
-            let mut state = BillingState::with_limit(target.max_registrations);
+            let mut state = State::new(target.max_registrations, inner.state.key);
             apply_all(&mut state, &update.ops).map_err(rejected)?;
             inner.state = state;
             inner.caught_up = false;
@@ -174,8 +290,13 @@ impl BillingStore {
     }
 }
 
+/// A `SipHash` key drawn from the kernel RNG, which boot checks is the Nitro hardware RNG.
+fn boot_key() -> (u64, u64) {
+    (OsRng.next_u64(), OsRng.next_u64())
+}
+
 /// Applies `ops` in order, or none of them.
-fn apply_all(state: &mut BillingState, ops: &[BillingOp]) -> Result<(), BillingStateError> {
+fn apply_all(state: &mut State, ops: &[BillingOp]) -> Result<(), BillingStateError> {
     let mut inverses = Vec::with_capacity(ops.len());
     for op in ops {
         match state.apply(*op) {
@@ -198,7 +319,7 @@ fn rejected(error: BillingStateError) -> enclave_types::Error {
 }
 
 /// A full state fails closed: it could be missing the registration a request needs.
-fn ready(inner: &Inner) -> bool {
+const fn ready(inner: &Inner) -> bool {
     inner.caught_up && !inner.state.is_full()
 }
 
@@ -210,7 +331,7 @@ fn max_registrations(target: Option<BillingTarget>) -> usize {
 fn status(inner: &Inner, max_registrations: usize) -> BillingStatus {
     let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
     BillingStatus {
-        registrations: count(inner.state.registration_count()),
+        registrations: count(inner.state.len),
         max_registrations: count(max_registrations),
         ready: ready(inner),
     }
@@ -261,12 +382,17 @@ mod tests {
         }
     }
 
+    /// Whether `nullifier` is registered for RP 7 in any period the store holds.
     fn registered(store: &BillingStore, nullifier: u64) -> bool {
-        store
-            .lock()
+        let inner = store.lock();
+        let digest = inner
             .state
-            .registration(FieldElement::from(nullifier))
-            .is_some()
+            .digest(FieldElement::from(nullifier), RpId::new(7));
+        inner
+            .state
+            .periods
+            .values()
+            .any(|digests| digests.contains(&digest))
     }
 
     #[test]
@@ -332,24 +458,24 @@ mod tests {
 
     #[test]
     fn a_rejected_update_changes_nothing() {
-        let store = BillingStore::new(Some(TARGET));
+        let store = BillingStore::new(Some(BillingTarget {
+            max_registrations: 2,
+            ..TARGET
+        }));
         store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
             .unwrap();
-        // The second op conflicts with the first registration, so the first must not stay.
-        let conflicting = BillingOp::AddRegistration {
-            nullifier: FieldElement::from(1u64),
-            registration: Registration {
-                rp_id: RpId::new(8),
-                period_start: NOV_2026,
-            },
-        };
+        // The second op exceeds the bound, so the first must not stay either.
         assert_eq!(
-            store.apply(&update(1, vec![add(2, NOV_2026), conflicting], true), NOW),
+            store.apply(
+                &update(1, vec![add(2, NOV_2026), add(3, NOV_2026)], true),
+                NOW
+            ),
             Err(enclave_types::Error::BillingRejected)
         );
         assert!(!registered(&store, 2));
-        store.apply(&update(1, Vec::new(), true), NOW).unwrap();
+        let status = store.apply(&update(1, Vec::new(), true), NOW).unwrap();
+        assert_eq!(status.registrations, 1);
     }
 
     #[test]
@@ -413,6 +539,48 @@ mod tests {
         store.apply(&update(2, Vec::new(), true), DEC_2026).unwrap();
         assert!(!registered(&store, 1));
         assert!(registered(&store, 2));
+    }
+
+    #[test]
+    fn a_registration_is_bound_to_its_rp_and_removed_by_its_own_op() {
+        let store = BillingStore::new(Some(TARGET));
+        let for_rp = |rp_id: u64| BillingOp::AddRegistration {
+            nullifier: FieldElement::from(1u64),
+            registration: Registration {
+                rp_id: RpId::new(rp_id),
+                period_start: NOV_2026,
+            },
+        };
+        store.apply(&update(0, vec![for_rp(8)], true), NOW).unwrap();
+        assert!(!registered(&store, 1), "registered for RP 8, not RP 7");
+        store.apply(&update(1, vec![for_rp(7)], true), NOW).unwrap();
+        assert!(registered(&store, 1));
+
+        let remove_for_rp_8 = BillingOp::RemoveRegistration {
+            nullifier: FieldElement::from(1u64),
+            registration: Registration {
+                rp_id: RpId::new(8),
+                period_start: NOV_2026,
+            },
+        };
+        let status = store
+            .apply(&update(2, vec![remove_for_rp_8], true), NOW)
+            .unwrap();
+        assert_eq!(status.registrations, 1);
+        assert!(registered(&store, 1));
+    }
+
+    #[test]
+    fn every_store_draws_its_own_key() {
+        let one = BillingStore::new(Some(TARGET));
+        let other = BillingStore::new(Some(TARGET));
+        let digest = |store: &BillingStore| {
+            store
+                .lock()
+                .state
+                .digest(FieldElement::from(1u64), RpId::new(7))
+        };
+        assert_ne!(digest(&one), digest(&other));
     }
 
     #[test]
