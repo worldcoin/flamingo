@@ -4,6 +4,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use eddsa_babyjubjub::EdDSAPublicKey;
 use flamingo_verifier_api_types::{EnclaveAssignmentResponse, ErrorEnvelope};
+#[cfg(feature = "dev")]
+use flamingo_verifier_sealed_types::ByteBuf;
 use flamingo_verifier_sealed_types::{
     CHANNEL_DOMAIN, DebugReport, FlamingoClaims, FlamingoToken, MatchResult, ReleaseManifest,
 };
@@ -18,10 +20,23 @@ use crate::session::FlamingoVerifierSession;
 /// Error code the host uses for a request that did not open.
 const REASSIGN_REQUIRED: &str = "reassign_required";
 
+/// How the client verifies the enclave's attestations.
+#[derive(Debug)]
+pub enum Attestations {
+    /// Nitro documents, verified by Pontifex.
+    Nitro(Verifier),
+    /// The unsigned documents of a `dev` Verifier, no older than `max_age`.
+    #[cfg(feature = "dev")]
+    Dev {
+        /// How old a document's own timestamp may be.
+        max_age: std::time::Duration,
+    },
+}
+
 /// Verifies an assignment response's attestation, binds it to the supplied public key, and checks
 /// that it attests the release manifest sent with it (WIP-201 §4.6 step 1).
 pub fn verify_assignment(
-    verifier: &Verifier,
+    attestations: &Attestations,
     response: &EnclaveAssignmentResponse,
 ) -> Result<VerifiedAssignment, Error> {
     let document = STANDARD
@@ -30,23 +45,70 @@ pub fn verify_assignment(
     let public_key = STANDARD
         .decode(&response.public_key)
         .map_err(|_| Error::MalformedAssignment)?;
-    let (consumer, attestation) =
-        ChannelConsumer::from_attestation(CHANNEL_DOMAIN, verifier, &document, &public_key)
-            .map_err(Error::Channel)?;
-    let release = attested_release(
-        &response.release_manifest,
-        attestation
-            .document()
-            .user_data
-            .as_ref()
-            .map(|data| data.as_slice()),
-    )?;
+    let (consumer, attestation, user_data) = match attestations {
+        Attestations::Nitro(verifier) => {
+            let (consumer, attestation) =
+                ChannelConsumer::from_attestation(CHANNEL_DOMAIN, verifier, &document, &public_key)
+                    .map_err(Error::Channel)?;
+            let user_data = attestation
+                .document()
+                .user_data
+                .as_ref()
+                .map(|data| data.to_vec());
+            (consumer, Some(attestation), user_data)
+        }
+        #[cfg(feature = "dev")]
+        Attestations::Dev { max_age } => {
+            let (consumer, user_data) = verify_dev_attestation(&document, &public_key, *max_age)?;
+            (consumer, None, user_data)
+        }
+    };
+    let release = attested_release(&response.release_manifest, user_data.as_deref())?;
 
     Ok(VerifiedAssignment {
         attestation,
         consumer,
         release,
     })
+}
+
+/// Checks a `dev` channel document as Pontifex checks a Nitro one, except for the signature: it is
+/// fresh and commits to `public_key`. Returns the consumer and the document's `user_data`.
+#[cfg(feature = "dev")]
+fn verify_dev_attestation(
+    document: &[u8],
+    public_key: &[u8],
+    max_age: std::time::Duration,
+) -> Result<(ChannelConsumer, Option<Vec<u8>>), Error> {
+    use flamingo_verifier_sealed_types::dev::DevAttestation;
+    use pontifex::{ChannelError, attestation};
+
+    let document = DevAttestation::from_cbor(document).map_err(|_| {
+        Error::Channel(ChannelError::Attestation(attestation::Error::ParseError(
+            "not a dev attestation".to_owned(),
+        )))
+    })?;
+    let now_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        });
+    let age_millis = now_millis.saturating_sub(document.timestamp_millis);
+    let max_age = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
+    if age_millis > max_age {
+        return Err(Error::Channel(ChannelError::Attestation(
+            attestation::Error::Stale {
+                age_millis,
+                max_age,
+            },
+        )));
+    }
+    if document.public_key.as_slice() != CHANNEL_DOMAIN.public_key_commitment(public_key) {
+        return Err(Error::Channel(ChannelError::KeyCommitmentMismatch));
+    }
+    let consumer = ChannelConsumer::from_unverified_public_key(CHANNEL_DOMAIN, public_key)
+        .map_err(Error::Channel)?;
+    Ok((consumer, document.user_data.map(ByteBuf::into_vec)))
 }
 
 /// The release manifest `jws`, if the channel attestation's `user_data` is its `release_hash`.
@@ -60,7 +122,7 @@ fn attested_release(jws: &str, user_data: Option<&[u8]>) -> Result<ReleaseManife
 
 /// Opens a sealed match response and verifies the statement it carries, if any.
 pub fn open_verified_match(
-    verifier: &Verifier,
+    attestations: &Attestations,
     ciphertext: &[u8],
     opener: pontifex::ResponseOpener,
 ) -> Result<VerifiedMatchResult, Error> {
@@ -74,21 +136,8 @@ pub fn open_verified_match(
             statement,
             debug_report,
         } => {
-            // Response encryption alone does not authenticate the signing key.
-            let attested =
-                verifier.verify_attestation_document(&statement.signing_key_attestation)?;
-            let signing_key = <[u8; 32]>::try_from(
-                attested
-                    .document()
-                    .public_key
-                    .as_ref()
-                    .ok_or(Error::InvalidSigningKey)?
-                    .as_slice(),
-            )
-            .map_err(|_| Error::InvalidSigningKey)
-            .and_then(|bytes| {
-                EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
-            })?;
+            let signing_key =
+                attested_signing_key(attestations, &statement.signing_key_attestation)?;
 
             let claims = FlamingoToken::from_cwt(&statement.token)
                 .and_then(|token| token.verify(&signing_key).copied())
@@ -106,6 +155,33 @@ pub fn open_verified_match(
             debug_report,
         }),
     }
+}
+
+/// The signing key `document` attests. A `dev` Verifier's document is the raw key.
+fn attested_signing_key(
+    attestations: &Attestations,
+    document: &[u8],
+) -> Result<EdDSAPublicKey, Error> {
+    let attested;
+    let key = match attestations {
+        Attestations::Nitro(verifier) => {
+            // Response encryption alone does not authenticate the signing key.
+            attested = verifier.verify_attestation_document(document)?;
+            attested
+                .document()
+                .public_key
+                .as_ref()
+                .ok_or(Error::InvalidSigningKey)?
+                .as_slice()
+        }
+        #[cfg(feature = "dev")]
+        Attestations::Dev { .. } => document,
+    };
+    <[u8; 32]>::try_from(key)
+        .map_err(|_| Error::InvalidSigningKey)
+        .and_then(|bytes| {
+            EdDSAPublicKey::from_compressed_bytes(bytes).map_err(|_| Error::InvalidSigningKey)
+        })
 }
 
 /// Rejects a verified result whose claims differ from `expected`.
@@ -150,18 +226,18 @@ pub fn classify_envelope(envelope: &ErrorEnvelope) -> Error {
 /// An assignment whose attestation verified and whose encryption key is ready for sealing.
 #[derive(Debug, Clone)]
 pub struct VerifiedAssignment {
-    /// Metadata read from the signed attestation document.
-    attestation: VerifiedAttestation,
+    /// Metadata read from the signed attestation document; `None` for a `dev` Verifier's.
+    attestation: Option<VerifiedAttestation>,
     consumer: ChannelConsumer,
     /// The release whose `release_hash` the attestation carries.
     release: ReleaseManifest,
 }
 
 impl VerifiedAssignment {
-    /// Metadata from the verified channel-key attestation.
+    /// Metadata from the verified channel-key Nitro attestation; `None` for a `dev` Verifier's.
     #[must_use]
-    pub const fn attestation(&self) -> &VerifiedAttestation {
-        &self.attestation
+    pub const fn attestation(&self) -> Option<&VerifiedAttestation> {
+        self.attestation.as_ref()
     }
 
     /// The channel consumer bound to this assignment's verified key.
@@ -239,7 +315,7 @@ impl FlamingoVerifierClient {
         &self,
         request: tokio_tungstenite::tungstenite::ClientRequestBuilder,
     ) -> Result<FlamingoVerifierSession, Error> {
-        crate::session::connect(&self.config, self.config.verifier()?, request).await
+        crate::session::connect(&self.config, self.config.attestations()?, request).await
     }
 }
 
@@ -274,10 +350,15 @@ pub enum VerifiedMatchResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        Error, FlamingoClaims, VerifiedMatch, VerifiedMatchResult, attested_release,
-        ensure_claims_match,
+        Attestations, CHANNEL_DOMAIN, Error, FlamingoClaims, ReleaseManifest, STANDARD,
+        VerifiedMatch, VerifiedMatchResult, attested_release, attested_signing_key,
+        ensure_claims_match, verify_assignment,
     };
-    use flamingo_verifier_sealed_types::{AttestedStatement, DebugReport};
+    use base64::Engine as _;
+    use flamingo_verifier_api_types::EnclaveAssignmentResponse;
+    use flamingo_verifier_sealed_types::{
+        AttestedStatement, ByteBuf, DebugReport, dev::DevAttestation, testing,
+    };
     use world_id_primitives::FieldElement;
 
     fn success(claims: &FlamingoClaims) -> VerifiedMatchResult {
@@ -291,6 +372,118 @@ mod tests {
             }),
             debug_report: DebugReport::NotProduced,
         }
+    }
+
+    /// An assignment for a fresh channel key, attested by a `dev` document built by `attest` from
+    /// the key's commitment and the manifest's `release_hash`.
+    fn dev_assignment(
+        attest: impl FnOnce([u8; 32], Vec<u8>) -> DevAttestation,
+    ) -> EnclaveAssignmentResponse {
+        let enclave = pontifex::ChannelEnclave::generate(CHANNEL_DOMAIN).unwrap();
+        let manifest = testing::manifest(testing::TEST_ENGINE_HASH, 1);
+        let release_hash = ReleaseManifest::from_jws(&manifest).unwrap().release_hash();
+        let document = attest(enclave.public_key_commitment(), release_hash.to_vec());
+        EnclaveAssignmentResponse {
+            attestation: STANDARD.encode(document.to_cbor().unwrap()),
+            public_key: STANDARD.encode(enclave.public_key()),
+            release_manifest: manifest,
+        }
+    }
+
+    fn dev_document(commitment: [u8; 32], user_data: Vec<u8>) -> DevAttestation {
+        DevAttestation {
+            public_key: ByteBuf::from(commitment),
+            user_data: Some(ByteBuf::from(user_data)),
+            timestamp_millis: u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_nitro_policy_rejects_dev_attestations() {
+        let nitro = Attestations::Nitro(
+            crate::Config::dangerously_skip_measurements("http://localhost:8000")
+                .unwrap()
+                .verifier()
+                .unwrap(),
+        );
+        assert!(matches!(
+            verify_assignment(&nitro, &dev_assignment(dev_document)),
+            Err(Error::Channel(_))
+        ));
+        let key = eddsa_babyjubjub::EdDSAPrivateKey::from_bytes([7; 32]).public();
+        assert!(matches!(
+            attested_signing_key(&nitro, &key.to_compressed_bytes().unwrap()),
+            Err(Error::Attestation(_))
+        ));
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_dev_policy_binds_the_channel_key_and_release() {
+        use pontifex::{ChannelError, attestation};
+
+        let Attestations::Dev { max_age } =
+            crate::Config::dangerously_accept_dev_attestation("http://localhost:8000")
+                .unwrap()
+                .attestations()
+                .unwrap()
+        else {
+            panic!("expected a dev policy")
+        };
+        let dev = Attestations::Dev { max_age };
+        let assignment = verify_assignment(&dev, &dev_assignment(dev_document)).unwrap();
+        assert!(assignment.attestation().is_none());
+
+        assert!(matches!(
+            verify_assignment(
+                &dev,
+                &dev_assignment(|_, release_hash| dev_document([0; 32], release_hash))
+            ),
+            Err(Error::Channel(ChannelError::KeyCommitmentMismatch))
+        ));
+        assert!(matches!(
+            verify_assignment(
+                &dev,
+                &dev_assignment(|commitment, _| dev_document(commitment, vec![0; 32]))
+            ),
+            Err(Error::ReleaseNotAttested)
+        ));
+        assert!(matches!(
+            verify_assignment(
+                &dev,
+                &dev_assignment(|commitment, _| DevAttestation {
+                    user_data: None,
+                    ..dev_document(commitment, vec![])
+                })
+            ),
+            Err(Error::ReleaseNotAttested)
+        ));
+        assert!(matches!(
+            verify_assignment(
+                &dev,
+                &dev_assignment(|commitment, release_hash| DevAttestation {
+                    timestamp_millis: 0,
+                    ..dev_document(commitment, release_hash)
+                })
+            ),
+            Err(Error::Channel(ChannelError::Attestation(
+                attestation::Error::Stale { .. }
+            )))
+        ));
+
+        let key = eddsa_babyjubjub::EdDSAPrivateKey::from_bytes([7; 32]).public();
+        let raw = key.to_compressed_bytes().unwrap();
+        assert_eq!(attested_signing_key(&dev, &raw).unwrap(), key);
+        assert!(matches!(
+            attested_signing_key(&dev, &raw[1..]),
+            Err(Error::InvalidSigningKey)
+        ));
     }
 
     #[test]
