@@ -186,7 +186,13 @@ impl Pusher {
                         );
                     }
                     if !retry {
-                        (first_seq, ops) = new_stream(state);
+                        // `state` cannot change during a push, so a snapshot already built is
+                        // still the whole state.
+                        if first_seq == 0 {
+                            metrics::counter!(RESYNCS).increment(1);
+                        } else {
+                            (first_seq, ops) = new_stream(state);
+                        }
                         sent = 0;
                     }
                     tokio::time::sleep(retry_delay(failures)).await;

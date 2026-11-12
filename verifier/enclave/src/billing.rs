@@ -2,6 +2,8 @@
 //!
 //! The host follows the Billing Contract and pushes its state as a numbered update stream. A new
 //! stream replaces the state, which serves requests once an update of it carries `backfill_done`.
+//! A rejected update ends its stream and stops serving until a new stream catches up, so a host
+//! that keeps pushing updates the enclave cannot apply never leaves a stale state in service.
 //!
 //! Registrations are kept as 64-bit SipHash-2-4 digests of the nullifier and RP, under a key
 //! drawn at boot from the hardware-seeded RNG. Nobody outside the enclave knows the key or sees a
@@ -10,7 +12,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     env,
-    hash::Hasher as _,
+    hash::{BuildHasherDefault, Hasher},
     sync::{Mutex, PoisonError},
 };
 
@@ -29,6 +31,297 @@ pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
 const CHAIN_ID_VAR: &str = "FLAMINGO_BILLING_CHAIN_ID";
 const CONTRACT_VAR: &str = "FLAMINGO_BILLING_CONTRACT";
 const MAX_REGISTRATIONS_VAR: &str = "FLAMINGO_BILLING_MAX_REGISTRATIONS";
+
+/// The enclave's copy of the billing state.
+pub struct BillingStore {
+    target: Option<BillingTarget>,
+    inner: Mutex<Inner>,
+}
+
+struct Inner {
+    state: State,
+    /// The last applied `seq`, or `None` before the first stream and after a rejection.
+    last_seq: Option<u64>,
+    /// Whether an update of the current stream carried `backfill_done`, and none was rejected
+    /// since.
+    caught_up: bool,
+    next_expiry: u64,
+}
+
+impl BillingStore {
+    /// A store for `target`, or a store that bills nothing if `target` is `None`.
+    #[must_use]
+    pub fn new(target: Option<BillingTarget>) -> Self {
+        Self {
+            target,
+            inner: Mutex::new(Inner {
+                state: State::new(max_registrations(target), boot_key()),
+                last_seq: None,
+                caught_up: false,
+                next_expiry: 0,
+            }),
+        }
+    }
+
+    /// Whether requests can be served: billing is off, or the state has caught up and no update
+    /// was rejected since.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.target.is_none() || self.lock().caught_up
+    }
+
+    /// Applies one update at the Verifier's time `now`, in Unix seconds.
+    ///
+    /// # Errors
+    /// [`enclave_types::Error::BillingRejected`] for another target, too many ops, an op the
+    /// state rejects or a store that bills nothing, and [`enclave_types::Error::BillingOutOfOrder`]
+    /// for a `seq` that neither follows nor repeats the last one. Neither changes the state. A
+    /// rejection ends the stream and stops serving until a new stream catches up.
+    pub fn apply(
+        &self,
+        update: &BillingUpdateRequest,
+        now: u64,
+    ) -> Result<BillingStatus, enclave_types::Error> {
+        let Some(target) = self.target else {
+            tracing::warn!("billing update for an enclave that does not bill");
+            return Err(enclave_types::Error::BillingRejected);
+        };
+        let mut inner = self.lock();
+        let result = inner.apply(target, update, now);
+        if result == Err(enclave_types::Error::BillingRejected) {
+            // The rejected update's changes are missing, so its stream cannot go on.
+            inner.last_seq = None;
+            inner.caught_up = false;
+        }
+        let status = result.map(|()| status(&inner, target.max_registrations));
+        drop(inner);
+        status
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Inner {
+    fn apply(
+        &mut self,
+        target: BillingTarget,
+        update: &BillingUpdateRequest,
+        now: u64,
+    ) -> Result<(), enclave_types::Error> {
+        if update.chain_id != target.chain_id || update.contract != target.contract {
+            tracing::error!(
+                chain_id = update.chain_id,
+                "billing update for another chain or contract than the image's"
+            );
+            return Err(enclave_types::Error::BillingRejected);
+        }
+        if update.ops.len() > MAX_BILLING_OPS {
+            return Err(enclave_types::Error::BillingRejected);
+        }
+        // Ended periods go first, so they never count against the bound at a rollover.
+        if now >= self.next_expiry {
+            self.state.expire(now);
+            self.next_expiry = billing_period(now).map_or(u64::MAX, |(_, end)| end);
+        }
+        if update.seq == 0 {
+            let mut state = State::new(target.max_registrations, self.state.key);
+            apply_all(&mut state, &update.ops, now).map_err(rejected)?;
+            self.state = state;
+            self.caught_up = false;
+        } else if self.last_seq == Some(update.seq) {
+            // A retry of an update whose answer the host lost.
+            return Ok(());
+        } else if self.last_seq.map(|seq| seq + 1) == Some(update.seq) {
+            apply_all(&mut self.state, &update.ops, now).map_err(rejected)?;
+        } else {
+            return Err(enclave_types::Error::BillingOutOfOrder);
+        }
+        self.last_seq = Some(update.seq);
+        self.caught_up |= update.backfill_done;
+        Ok(())
+    }
+}
+
+/// A `SipHash` key drawn from the kernel RNG, which boot checks is the Nitro hardware RNG.
+fn boot_key() -> (u64, u64) {
+    (OsRng.next_u64(), OsRng.next_u64())
+}
+
+/// Applies `ops` in order at `now`, or none of them.
+fn apply_all(state: &mut State, ops: &[BillingOp], now: u64) -> Result<(), BillingStateError> {
+    let mut inverses = Vec::with_capacity(ops.len());
+    for op in ops {
+        match state.apply(*op, now) {
+            Ok(inverse) => inverses.extend(inverse),
+            Err(error) => {
+                for inverse in inverses.into_iter().rev() {
+                    // An inverse undoes an op just applied, so it cannot fail.
+                    let _ = state.apply(inverse, now);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rejected(error: BillingStateError) -> enclave_types::Error {
+    tracing::error!(%error, "billing update rejected");
+    enclave_types::Error::BillingRejected
+}
+
+/// A store that bills nothing holds no registrations.
+fn max_registrations(target: Option<BillingTarget>) -> usize {
+    target.map_or(0, |target| target.max_registrations)
+}
+
+fn status(inner: &Inner, max_registrations: usize) -> BillingStatus {
+    let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+    BillingStatus {
+        registrations: count(inner.state.len),
+        max_registrations: count(max_registrations),
+        ready: inner.caught_up,
+    }
+}
+
+/// The billed RPs and the registrations, as the enclave keeps them.
+struct State {
+    billed_rps: HashSet<RpId>,
+    /// Registration digests by period, so expiry drops whole periods.
+    periods: BTreeMap<u64, Digests>,
+    len: usize,
+    max: usize,
+    key: (u64, u64),
+}
+
+/// Digests are keyed `SipHash` outputs nobody outside the enclave can choose, so the set needs no
+/// second hash of its own.
+type Digests = HashSet<u64, BuildHasherDefault<DigestHasher>>;
+
+impl State {
+    fn new(max: usize, key: (u64, u64)) -> Self {
+        Self {
+            billed_rps: HashSet::new(),
+            periods: BTreeMap::new(),
+            len: 0,
+            max,
+            key,
+        }
+    }
+
+    /// Applies `op` at `now` and returns the op that undoes it, or `None` if it changed nothing.
+    ///
+    /// A registration of a period that ended by `now` is dropped, as expiry would drop it.
+    fn apply(&mut self, op: BillingOp, now: u64) -> Result<Option<BillingOp>, BillingStateError> {
+        match op {
+            BillingOp::SetBilledRp { rp_id, billed } => {
+                let was_billed = if billed {
+                    !self.billed_rps.insert(rp_id)
+                } else {
+                    self.billed_rps.remove(&rp_id)
+                };
+                Ok((was_billed != billed).then_some(BillingOp::SetBilledRp {
+                    rp_id,
+                    billed: was_billed,
+                }))
+            }
+            BillingOp::AddRegistration {
+                nullifier,
+                registration,
+            } => {
+                let digest = self.digest(nullifier, registration.rp_id);
+                if has_ended(registration.period_start, now) || self.holds(digest, registration) {
+                    return Ok(None);
+                }
+                if self.len >= self.max {
+                    return Err(BillingStateError::Full(self.max));
+                }
+                self.periods
+                    .entry(registration.period_start)
+                    .or_default()
+                    .insert(digest);
+                self.len += 1;
+                Ok(Some(BillingOp::RemoveRegistration {
+                    nullifier,
+                    registration,
+                }))
+            }
+            // A removal naming another registration than the held one finds nothing here. The
+            // host's full `BillingState` rejects it as a conflict before it is ever pushed.
+            BillingOp::RemoveRegistration {
+                nullifier,
+                registration,
+            } => {
+                let digest = self.digest(nullifier, registration.rp_id);
+                let removed = self
+                    .periods
+                    .get_mut(&registration.period_start)
+                    .is_some_and(|digests| digests.remove(&digest));
+                if !removed {
+                    return Ok(None);
+                }
+                self.len -= 1;
+                Ok(Some(BillingOp::AddRegistration {
+                    nullifier,
+                    registration,
+                }))
+            }
+        }
+    }
+
+    fn digest(&self, nullifier: FieldElement, rp_id: RpId) -> u64 {
+        let mut hasher = SipHasher24::new_with_keys(self.key.0, self.key.1);
+        hasher.write(&nullifier.to_be_bytes());
+        hasher.write_u64(rp_id.into_inner());
+        hasher.finish()
+    }
+
+    fn holds(&self, digest: u64, registration: Registration) -> bool {
+        self.periods
+            .get(&registration.period_start)
+            .is_some_and(|digests| digests.contains(&digest))
+    }
+
+    /// Drops the periods that ended by `now`.
+    fn expire(&mut self, now: u64) {
+        let len = &mut self.len;
+        self.periods.retain(|&period_start, digests| {
+            let ended = has_ended(period_start, now);
+            if ended {
+                *len -= digests.len();
+            }
+            !ended
+        });
+    }
+}
+
+/// Whether the period starting at `period_start` ended by `now`. A period not started yet only
+/// holds registrations made during its overlap, so it is kept.
+fn has_ended(period_start: u64, now: u64) -> bool {
+    billing_period(period_start).map_or(true, |(_, end)| now >= end)
+}
+
+/// Passes a digest through as its own hash.
+#[derive(Default)]
+struct DigestHasher(u64);
+
+impl Hasher for DigestHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
 
 /// The Billing Contract this enclave accepts state of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,253 +380,6 @@ impl BillingTarget {
             contract,
             max_registrations,
         })
-    }
-}
-
-/// The billed RPs and the registrations, as the enclave keeps them.
-struct State {
-    billed_rps: HashSet<RpId>,
-    /// Registration digests by period, so expiry drops whole periods.
-    periods: BTreeMap<u64, HashSet<u64>>,
-    len: usize,
-    max: usize,
-    key: (u64, u64),
-}
-
-impl State {
-    fn new(max: usize, key: (u64, u64)) -> Self {
-        Self {
-            billed_rps: HashSet::new(),
-            periods: BTreeMap::new(),
-            len: 0,
-            max,
-            key,
-        }
-    }
-
-    fn digest(&self, nullifier: FieldElement, rp_id: RpId) -> u64 {
-        let mut hasher = SipHasher24::new_with_keys(self.key.0, self.key.1);
-        hasher.write(&nullifier.to_be_bytes());
-        hasher.write_u64(rp_id.into_inner());
-        hasher.finish()
-    }
-
-    /// Applies `op` and returns the op that undoes it, or `None` if it changed nothing.
-    fn apply(&mut self, op: BillingOp) -> Result<Option<BillingOp>, BillingStateError> {
-        match op {
-            BillingOp::SetBilledRp { rp_id, billed } => {
-                let was_billed = if billed {
-                    !self.billed_rps.insert(rp_id)
-                } else {
-                    self.billed_rps.remove(&rp_id)
-                };
-                Ok((was_billed != billed).then_some(BillingOp::SetBilledRp {
-                    rp_id,
-                    billed: was_billed,
-                }))
-            }
-            BillingOp::AddRegistration {
-                nullifier,
-                registration,
-            } => {
-                let digest = self.digest(nullifier, registration.rp_id);
-                if self.holds(digest, registration) {
-                    return Ok(None);
-                }
-                if self.len >= self.max {
-                    return Err(BillingStateError::Full(self.max));
-                }
-                self.periods
-                    .entry(registration.period_start)
-                    .or_default()
-                    .insert(digest);
-                self.len += 1;
-                Ok(Some(BillingOp::RemoveRegistration {
-                    nullifier,
-                    registration,
-                }))
-            }
-            BillingOp::RemoveRegistration {
-                nullifier,
-                registration,
-            } => {
-                let digest = self.digest(nullifier, registration.rp_id);
-                let removed = self
-                    .periods
-                    .get_mut(&registration.period_start)
-                    .is_some_and(|digests| digests.remove(&digest));
-                if !removed {
-                    return Ok(None);
-                }
-                self.len -= 1;
-                Ok(Some(BillingOp::AddRegistration {
-                    nullifier,
-                    registration,
-                }))
-            }
-        }
-    }
-
-    fn holds(&self, digest: u64, registration: Registration) -> bool {
-        self.periods
-            .get(&registration.period_start)
-            .is_some_and(|digests| digests.contains(&digest))
-    }
-
-    /// Drops the periods that ended by `now`.
-    fn expire(&mut self, now: u64) {
-        let len = &mut self.len;
-        self.periods.retain(|&period_start, digests| {
-            // A period is kept until it ends; one not started yet only has overlap registrations.
-            let ended = billing_period(period_start).map_or(true, |(_, end)| now >= end);
-            if ended {
-                *len -= digests.len();
-            }
-            !ended
-        });
-    }
-
-    const fn is_full(&self) -> bool {
-        self.len >= self.max
-    }
-}
-
-struct Inner {
-    state: State,
-    /// The last applied `seq`, or `None` before the first stream.
-    last_seq: Option<u64>,
-    /// Whether an update of the current stream carried `backfill_done`.
-    caught_up: bool,
-    next_expiry: u64,
-}
-
-/// The enclave's copy of the billing state.
-pub struct BillingStore {
-    target: Option<BillingTarget>,
-    inner: Mutex<Inner>,
-}
-
-impl BillingStore {
-    /// A store for `target`, or a store that bills nothing if `target` is `None`.
-    #[must_use]
-    pub fn new(target: Option<BillingTarget>) -> Self {
-        Self {
-            target,
-            inner: Mutex::new(Inner {
-                state: State::new(max_registrations(target), boot_key()),
-                last_seq: None,
-                caught_up: false,
-                next_expiry: 0,
-            }),
-        }
-    }
-
-    /// Whether requests can be served: billing is off, or the state has caught up and is not full.
-    #[must_use]
-    pub fn is_ready(&self) -> bool {
-        self.target.is_none() || ready(&self.lock())
-    }
-
-    /// Applies one update at the Verifier's time `now`, in Unix seconds.
-    ///
-    /// # Errors
-    /// [`enclave_types::Error::BillingRejected`] for another target, too many ops, an op the
-    /// state rejects or a store that bills nothing, and [`enclave_types::Error::BillingOutOfOrder`]
-    /// for a `seq` that neither follows nor repeats the last one. Either leaves the store unchanged.
-    pub fn apply(
-        &self,
-        update: &BillingUpdateRequest,
-        now: u64,
-    ) -> Result<BillingStatus, enclave_types::Error> {
-        let Some(target) = self.target else {
-            tracing::warn!("billing update for an enclave that does not bill");
-            return Err(enclave_types::Error::BillingRejected);
-        };
-        if update.chain_id != target.chain_id || update.contract != target.contract {
-            tracing::error!(
-                chain_id = update.chain_id,
-                "billing update for another chain or contract than the image's"
-            );
-            return Err(enclave_types::Error::BillingRejected);
-        }
-        if update.ops.len() > MAX_BILLING_OPS {
-            return Err(enclave_types::Error::BillingRejected);
-        }
-
-        let mut inner = self.lock();
-        if update.seq == 0 {
-            let mut state = State::new(target.max_registrations, inner.state.key);
-            apply_all(&mut state, &update.ops).map_err(rejected)?;
-            inner.state = state;
-            inner.caught_up = false;
-        } else if inner.last_seq == Some(update.seq) {
-            // A retry of an update whose answer the host lost.
-            return Ok(status(&inner, target.max_registrations));
-        } else if inner.last_seq.map(|seq| seq + 1) == Some(update.seq) {
-            apply_all(&mut inner.state, &update.ops).map_err(rejected)?;
-        } else {
-            return Err(enclave_types::Error::BillingOutOfOrder);
-        }
-        inner.last_seq = Some(update.seq);
-        inner.caught_up |= update.backfill_done;
-        if now >= inner.next_expiry {
-            inner.state.expire(now);
-            inner.next_expiry = billing_period(now).map_or(u64::MAX, |(_, end)| end);
-        }
-        let status = status(&inner, target.max_registrations);
-        drop(inner);
-        Ok(status)
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// A `SipHash` key drawn from the kernel RNG, which boot checks is the Nitro hardware RNG.
-fn boot_key() -> (u64, u64) {
-    (OsRng.next_u64(), OsRng.next_u64())
-}
-
-/// Applies `ops` in order, or none of them.
-fn apply_all(state: &mut State, ops: &[BillingOp]) -> Result<(), BillingStateError> {
-    let mut inverses = Vec::with_capacity(ops.len());
-    for op in ops {
-        match state.apply(*op) {
-            Ok(inverse) => inverses.extend(inverse),
-            Err(error) => {
-                for inverse in inverses.into_iter().rev() {
-                    // An inverse undoes an op just applied, so it cannot fail.
-                    let _ = state.apply(inverse);
-                }
-                return Err(error);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rejected(error: BillingStateError) -> enclave_types::Error {
-    tracing::error!(%error, "billing update rejected");
-    enclave_types::Error::BillingRejected
-}
-
-/// A full state fails closed: it could be missing the registration a request needs.
-const fn ready(inner: &Inner) -> bool {
-    inner.caught_up && !inner.state.is_full()
-}
-
-/// A store that bills nothing holds no registrations.
-fn max_registrations(target: Option<BillingTarget>) -> usize {
-    target.map_or(0, |target| target.max_registrations)
-}
-
-fn status(inner: &Inner, max_registrations: usize) -> BillingStatus {
-    let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
-    BillingStatus {
-        registrations: count(inner.state.len),
-        max_registrations: count(max_registrations),
-        ready: ready(inner),
     }
 }
 
@@ -473,8 +519,12 @@ mod tests {
             Err(enclave_types::Error::BillingRejected)
         );
         assert!(!registered(&store, 2));
-        let status = store.apply(&update(1, Vec::new(), true), NOW).unwrap();
-        assert_eq!(status.registrations, 1);
+        assert_eq!(
+            store.apply(&update(1, Vec::new(), true), NOW),
+            Err(enclave_types::Error::BillingOutOfOrder)
+        );
+        assert!(!store.is_ready());
+        assert!(registered(&store, 1));
     }
 
     #[test]
@@ -505,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_store_is_not_ready() {
+    fn a_rejection_stops_serving_until_a_new_stream_catches_up() {
         let store = BillingStore::new(Some(BillingTarget {
             max_registrations: 1,
             ..TARGET
@@ -513,12 +563,51 @@ mod tests {
         let status = store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
             .unwrap();
-        assert!(!status.ready);
+        assert!(status.ready, "a store at its bound still serves");
         assert_eq!(
             store.apply(&update(1, vec![add(2, NOV_2026)], true), NOW),
             Err(enclave_types::Error::BillingRejected)
         );
         assert!(!store.is_ready());
+        // A new stream the store rejects too keeps the old state out of service.
+        assert_eq!(
+            store.apply(
+                &update(0, vec![add(2, NOV_2026), add(3, NOV_2026)], true),
+                NOW
+            ),
+            Err(enclave_types::Error::BillingRejected)
+        );
+        assert!(!store.is_ready());
+        assert!(registered(&store, 1));
+        store
+            .apply(&update(0, vec![add(2, NOV_2026)], true), NOW)
+            .unwrap();
+        assert!(store.is_ready());
+    }
+
+    #[test]
+    fn ended_periods_do_not_count_against_the_bound_at_a_rollover() {
+        let store = BillingStore::new(Some(BillingTarget {
+            max_registrations: 1,
+            ..TARGET
+        }));
+        store
+            .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
+            .unwrap();
+        let status = store
+            .apply(&update(1, vec![add(2, DEC_2026)], true), DEC_2026)
+            .unwrap();
+        assert_eq!(status.registrations, 1);
+        assert!(registered(&store, 2));
+        // A snapshot may still carry the ended period.
+        let status = store
+            .apply(
+                &update(0, vec![add(1, NOV_2026), add(2, DEC_2026)], true),
+                DEC_2026,
+            )
+            .unwrap();
+        assert_eq!(status.registrations, 1);
+        assert!(status.ready);
     }
 
     #[test]

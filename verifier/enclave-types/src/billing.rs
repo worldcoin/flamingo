@@ -34,7 +34,7 @@ pub struct BillingStatus {
     pub registrations: u64,
     /// The bound on them, from the enclave image. The host's should not be larger.
     pub max_registrations: u64,
-    /// Whether the enclave serves requests: its state has caught up and is not full.
+    /// Whether the enclave serves requests: its state has caught up and no update was rejected since.
     pub ready: bool,
 }
 
