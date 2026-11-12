@@ -51,16 +51,26 @@ impl BillingState {
                         return Err(BillingStateError::Full(limit));
                     }
                     self.registrations.insert(nullifier, registration);
-                    Ok(Some(BillingOp::RemoveRegistration { nullifier }))
+                    Ok(Some(BillingOp::RemoveRegistration {
+                        nullifier,
+                        registration,
+                    }))
                 }
             },
-            BillingOp::RemoveRegistration { nullifier } => Ok(self
-                .registrations
-                .remove(&nullifier)
-                .map(|registration| BillingOp::AddRegistration {
-                    nullifier,
-                    registration,
-                })),
+            BillingOp::RemoveRegistration {
+                nullifier,
+                registration,
+            } => match self.registrations.get(&nullifier) {
+                Some(held) if *held == registration => {
+                    self.registrations.remove(&nullifier);
+                    Ok(Some(BillingOp::AddRegistration {
+                        nullifier,
+                        registration,
+                    }))
+                }
+                Some(_) => Err(BillingStateError::Conflict),
+                None => Ok(None),
+            },
         }
     }
 
@@ -149,6 +159,8 @@ pub enum BillingOp {
     RemoveRegistration {
         /// The registered `billingNullifier`.
         nullifier: FieldElement,
+        /// Its RP and period, so a copy that stores only digests can find it.
+        registration: Registration,
     },
 }
 
@@ -185,13 +197,17 @@ mod tests {
         FieldElement::from(value)
     }
 
+    const fn registration(rp_id: u64, period_start: u64) -> Registration {
+        Registration {
+            rp_id: RpId::new(rp_id),
+            period_start,
+        }
+    }
+
     fn add(value: u64, rp_id: u64, period_start: u64) -> BillingOp {
         BillingOp::AddRegistration {
             nullifier: nullifier(value),
-            registration: Registration {
-                rp_id: RpId::new(rp_id),
-                period_start,
-            },
+            registration: registration(rp_id, period_start),
         }
     }
 
@@ -215,6 +231,7 @@ mod tests {
             bill(8, false),
             BillingOp::RemoveRegistration {
                 nullifier: nullifier(1),
+                registration: registration(7, NOV_2026),
             },
         ];
         let inverses: Vec<_> = ops
@@ -246,7 +263,8 @@ mod tests {
         assert_eq!(state.apply(bill(9, false)), Ok(None));
         assert_eq!(
             state.apply(BillingOp::RemoveRegistration {
-                nullifier: nullifier(2)
+                nullifier: nullifier(2),
+                registration: registration(7, NOV_2026),
             }),
             Ok(None)
         );
@@ -319,12 +337,28 @@ mod tests {
     }
 
     #[test]
+    fn a_removal_must_name_the_held_registration() {
+        let mut state = BillingState::default();
+        state.apply(add(1, 7, NOV_2026)).unwrap();
+        let before = state.clone();
+        assert_eq!(
+            state.apply(BillingOp::RemoveRegistration {
+                nullifier: nullifier(1),
+                registration: registration(8, NOV_2026),
+            }),
+            Err(BillingStateError::Conflict)
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
     fn ops_round_trip_through_serde() {
         for op in [
             bill(7, true),
             add(1, 7, NOV_2026),
             BillingOp::RemoveRegistration {
                 nullifier: nullifier(1),
+                registration: registration(7, NOV_2026),
             },
         ] {
             let json = serde_json::to_string(&op).unwrap();
