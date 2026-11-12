@@ -1,10 +1,10 @@
 //! Follows the WIP-107 Billing Contract and keeps the enclave's billing state current
 //! (WIP-107 §4.8).
 //!
-//! The follower's state is the source of truth. The pusher sends each change to the enclave as
-//! the next update of a numbered stream. It retries an update whose answer it lost, and starts a
-//! new stream from the follower's full state when the enclave rebooted or rejected an update, so
-//! neither costs chain reads.
+//! The enclave holds the billing state. The pusher passes each follower update on as the next
+//! update of a numbered stream, and retries an update whose answer it lost. When the enclave
+//! loses the stream, e.g. after it restarted, the host follows the chain again from the Billing
+//! Contract's deployment, which rebuilds the enclave's state from a new stream.
 
 use std::{fmt, sync::Arc, time::Duration};
 
@@ -13,7 +13,7 @@ use anyhow::Context as _;
 use flamingo_verifier_billing_follower::{
     BillingFollower, BillingUpdate, FollowerConfig, FollowerError,
 };
-use flamingo_verifier_billing_state::{BillingOp, BillingState};
+use flamingo_verifier_billing_state::BillingOp;
 use flamingo_verifier_enclave_types::{
     self as enclave_types, BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS,
 };
@@ -23,7 +23,7 @@ use url::Url;
 use crate::enclave::{self, EnclaveClient};
 
 const PUSHES: &str = "flamingo.billing.pushes";
-const RESYNCS: &str = "flamingo.billing.resyncs";
+const RESTARTS: &str = "flamingo.billing.restarts";
 const PUSHED_BLOCK: &str = "flamingo.billing.pushed_block";
 const ENCLAVE_REGISTRATIONS: &str = "flamingo.billing.enclave_registrations";
 const ENCLAVE_READY: &str = "flamingo.billing.enclave_ready";
@@ -58,7 +58,7 @@ pub struct BillingConfig {
     pub max_registrations: usize,
 }
 
-/// Follows the Billing Contract and pushes its state to the enclave until the follower fails.
+/// Follows the Billing Contract and pushes its changes to the enclave until the follower fails.
 ///
 /// Chain reads and pushes are retried without end, so this returns only when the billing state
 /// itself is broken: the endpoints serve another chain, or the logs register a nullifier twice.
@@ -70,24 +70,42 @@ pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyh
         max_registrations: config.max_registrations,
         ..FollowerConfig::new(config.chain_id, config.contract, config.deploy_block)
     };
-    let mut follower = connect(&config, follower_config).await?;
     let mut pusher = Pusher::new(
         enclave,
         config.chain_id,
         config.contract.into_array(),
         config.max_registrations,
     );
+    // Restarts since a stream last caught up, which back off so an enclave that keeps rejecting
+    // the state does not turn into back-to-back backfills.
+    let mut restarts: u32 = 0;
     loop {
-        let update = follower
-            .next()
-            .await
-            .context("the billing follower stopped")?;
-        // Pushing a partial state would replace the enclave's complete one, so a restarted host
-        // first catches up. The first push after that sends the whole state; a rebuild after a
-        // deep fork arrives complete in one update.
-        if update.backfill_done {
-            pusher.push(&update, follower.state()).await;
-        }
+        let mut follower = connect(&config, follower_config.clone()).await?;
+        let error = loop {
+            let update = follower
+                .next()
+                .await
+                .context("the billing follower stopped")?;
+            match pusher.push(&update).await {
+                Ok(status) => {
+                    if update.backfill_done && status.ready {
+                        restarts = 0;
+                    }
+                }
+                Err(error) => break error,
+            }
+        };
+        restarts += 1;
+        metrics::counter!(RESTARTS).increment(1);
+        let delay = restart_delay(restarts);
+        tracing::warn!(
+            error = ?error,
+            dependency = "enclave",
+            restarts,
+            delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            "the enclave lost the billing stream; following the chain again from the deployment"
+        );
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -109,13 +127,13 @@ async fn connect(
     }
 }
 
-/// Sends the follower's changes to the enclave as one numbered stream.
+/// Passes the follower's updates to the enclave as one numbered stream.
 pub struct Pusher {
     client: Arc<dyn EnclaveClient>,
     chain_id: u64,
     contract: [u8; 20],
-    /// The `seq` of the next update, or `None` if the next push starts a new stream.
-    next_seq: Option<u64>,
+    /// The `seq` of the next update; `0` starts a new stream.
+    next_seq: u64,
     max_registrations: usize,
     warned_capacity: bool,
 }
@@ -133,74 +151,76 @@ impl Pusher {
             client,
             chain_id,
             contract,
-            next_seq: None,
+            next_seq: 0,
             max_registrations,
             warned_capacity: false,
         }
     }
 
-    /// Sends `update` to the enclave, retrying until it is applied. `state` is the follower's state
-    /// after `update`, which a new stream is built from.
-    pub async fn push(&mut self, update: &BillingUpdate, state: &BillingState) {
+    /// Sends `update` to the enclave, retrying a lost answer until it is applied.
+    ///
+    /// # Errors
+    /// When the enclave refuses the update, e.g. it restarted or rejected the state. The stream is
+    /// then lost: the next push starts a new one, which must carry the whole state.
+    pub async fn push(&mut self, update: &BillingUpdate) -> Result<BillingStatus, enclave::Error> {
         if update.reset {
-            self.next_seq = None;
+            self.next_seq = 0;
         }
-        let (mut first_seq, mut ops) = self
-            .next_seq
-            .map_or_else(|| new_stream(state), |seq| (seq, update.ops.clone()));
-        let mut sent = 0;
+        let parts = chunk_count(&update.ops);
+        let mut status = self.send(update, 0, parts).await?;
+        for index in 1..parts {
+            status = self.send(update, index, parts).await?;
+        }
+        metrics::gauge!(PUSHED_BLOCK).set(gauge_value(update.head));
+        Ok(status)
+    }
+
+    /// Sends part `index` of `parts` of `update` as the next update of the stream.
+    async fn send(
+        &mut self,
+        update: &BillingUpdate,
+        index: usize,
+        parts: usize,
+    ) -> Result<BillingStatus, enclave::Error> {
+        let request = BillingUpdateRequest {
+            chain_id: self.chain_id,
+            contract: self.contract,
+            seq: self.next_seq,
+            ops: chunk(&update.ops, index).to_vec(),
+            // An update split in parts is complete only after its last part.
+            backfill_done: update.backfill_done && index + 1 == parts,
+        };
         let mut failures: u32 = 0;
-        while sent < chunk_count(&ops) {
-            let last = sent + 1 == chunk_count(&ops);
-            let request = BillingUpdateRequest {
-                chain_id: self.chain_id,
-                contract: self.contract,
-                seq: first_seq + u64::try_from(sent).unwrap_or(u64::MAX),
-                ops: chunk(&ops, sent).to_vec(),
-                // A new stream serves once complete, so only its last part may say so.
-                backfill_done: update.backfill_done && last,
-            };
-            match self.client.update_billing(request).await {
+        loop {
+            match self.client.update_billing(request.clone()).await {
                 Ok(status) => {
                     metrics::counter!(PUSHES, "result" => "ok").increment(1);
                     self.record(status);
-                    sent += 1;
+                    self.next_seq += 1;
+                    return Ok(status);
                 }
-                Err(error) => {
+                // A lost answer is retried as is; the enclave applies a repeated `seq` once.
+                Err(error @ (enclave::Error::Timeout | enclave::Error::Transport(_))) => {
                     failures += 1;
                     metrics::counter!(PUSHES, "result" => result_label(&error)).increment(1);
-                    // A lost answer is retried as is; the enclave applies a repeated `seq` once.
-                    // Anything else, e.g. a rebooted enclave, needs a new stream.
-                    let retry = matches!(
-                        error,
-                        enclave::Error::Timeout | enclave::Error::Transport(_)
-                    );
-                    if failures == 1 || failures.is_power_of_two() {
+                    if failures.is_power_of_two() {
                         tracing::warn!(
                             error = ?error,
                             dependency = "enclave",
                             failures,
                             head = update.head,
-                            new_stream = !retry,
-                            "billing push failed"
+                            "billing push failed; retrying"
                         );
-                    }
-                    if !retry {
-                        // `state` cannot change during a push, so a snapshot already built is
-                        // still the whole state.
-                        if first_seq == 0 {
-                            metrics::counter!(RESYNCS).increment(1);
-                        } else {
-                            (first_seq, ops) = new_stream(state);
-                        }
-                        sent = 0;
                     }
                     tokio::time::sleep(retry_delay(failures)).await;
                 }
+                Err(error) => {
+                    metrics::counter!(PUSHES, "result" => result_label(&error)).increment(1);
+                    self.next_seq = 0;
+                    return Err(error);
+                }
             }
         }
-        self.next_seq = Some(first_seq + u64::try_from(sent).unwrap_or(u64::MAX));
-        metrics::gauge!(PUSHED_BLOCK).set(gauge_value(update.head));
     }
 }
 
@@ -221,14 +241,8 @@ impl Pusher {
     }
 }
 
-/// The first `seq` and the ops of a new stream: the whole state.
-fn new_stream(state: &BillingState) -> (u64, Vec<BillingOp>) {
-    metrics::counter!(RESYNCS).increment(1);
-    (0, state.snapshot().collect())
-}
-
-/// Updates needed for `ops`: one per [`MAX_BILLING_OPS`], and one even without ops, so a
-/// rebooted enclave answers `BillingOutOfOrder` within a block and gets its state back.
+/// Updates needed for `ops`: one per [`MAX_BILLING_OPS`], and one even without ops, so an
+/// enclave that lost the stream answers `BillingOutOfOrder` within a block.
 const fn chunk_count(ops: &[BillingOp]) -> usize {
     if ops.is_empty() {
         1
@@ -253,9 +267,16 @@ const fn result_label(error: &enclave::Error) -> &'static str {
 
 /// Exponential backoff with equal jitter, from 200 ms to 5 s.
 fn retry_delay(failures: u32) -> Duration {
-    let ceiling = Duration::from_millis(200)
-        .saturating_mul(1 << failures.min(5))
-        .min(Duration::from_secs(5));
+    jittered(Duration::from_millis(200), failures, Duration::from_secs(5))
+}
+
+/// Exponential backoff with equal jitter between restarts, from 1 s to 5 min.
+fn restart_delay(restarts: u32) -> Duration {
+    jittered(Duration::from_secs(1), restarts, Duration::from_secs(300))
+}
+
+fn jittered(base: Duration, attempts: u32, max: Duration) -> Duration {
+    let ceiling = base.saturating_mul(1 << attempts.min(10)).min(max);
     let half = ceiling / 2;
     half + half.mul_f64(rand::thread_rng().gen_range(0.0..=1.0))
 }
@@ -352,11 +373,7 @@ mod tests {
         }
     }
 
-    /// The follower's state after `ops`, and the update that carried them.
-    fn follow(state: &mut BillingState, ops: Vec<BillingOp>, head: u64) -> BillingUpdate {
-        for op in &ops {
-            state.apply(*op).unwrap();
-        }
+    fn update(ops: Vec<BillingOp>, head: u64) -> BillingUpdate {
         BillingUpdate {
             reset: false,
             ops,
@@ -375,43 +392,36 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_first_push_starts_a_stream_from_the_full_state() {
+    async fn updates_pass_through_as_one_stream() {
         let recorder = Arc::new(Recorder::default());
         let mut sync = pusher(&recorder);
-        let mut state = BillingState::default();
-        state.apply(registration(1)).unwrap();
 
-        let update = follow(&mut state, vec![registration(2)], 10);
-        sync.push(&update, &state).await;
-        let heartbeat = follow(&mut state, Vec::new(), 11);
-        sync.push(&heartbeat, &state).await;
+        sync.push(&update(vec![registration(1)], 10)).await.unwrap();
+        sync.push(&update(Vec::new(), 11)).await.unwrap();
 
         let pushes = recorder.pushes();
         assert_eq!(pushes.len(), 2);
         assert_eq!(pushes[0].seq, 0);
-        assert_eq!(
-            pushes[0].ops.len(),
-            2,
-            "the snapshot holds both registrations"
-        );
+        assert_eq!(pushes[0].ops, vec![registration(1)]);
         assert_eq!(
             (pushes[0].chain_id, pushes[0].contract),
             (CHAIN_ID, CONTRACT)
         );
         assert_eq!(pushes[1].seq, 1);
-        assert!(pushes[1].ops.is_empty());
+        assert!(
+            pushes[1].ops.is_empty(),
+            "an update without ops still goes out"
+        );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn large_changes_are_split_and_only_the_last_part_completes_the_stream() {
+    async fn large_updates_are_split_and_only_the_last_part_completes_them() {
         let recorder = Arc::new(Recorder::default());
         let mut sync = pusher(&recorder);
-        let mut state = BillingState::default();
         let ops = (0..=u64::try_from(MAX_BILLING_OPS).unwrap() * 2)
             .map(registration)
             .collect();
-        let update = follow(&mut state, ops, 10);
-        sync.push(&update, &state).await;
+        sync.push(&update(ops, 10)).await.unwrap();
 
         let pushes = recorder.pushes();
         assert_eq!(pushes.len(), 3);
@@ -430,48 +440,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_failed_push_starts_a_new_stream_from_the_current_state() {
+    async fn a_refused_update_ends_the_stream() {
         let recorder = Arc::new(Recorder::default());
         let mut sync = pusher(&recorder);
-        let mut state = BillingState::default();
-        let first = follow(&mut state, vec![registration(1)], 10);
-        sync.push(&first, &state).await;
+        sync.push(&update(vec![registration(1)], 10)).await.unwrap();
 
-        // The enclave rebooted, then the vsock dropped once.
+        // The enclave restarted.
         recorder.answer(Err(enclave::Error::Operation(
             enclave_types::Error::BillingOutOfOrder,
         )));
-        recorder.answer(Err(enclave::Error::Timeout));
-        let second = follow(&mut state, vec![registration(2)], 11);
-        sync.push(&second, &state).await;
+        let refused = sync.push(&update(vec![registration(2)], 11)).await;
+        assert!(matches!(
+            refused,
+            Err(enclave::Error::Operation(
+                enclave_types::Error::BillingOutOfOrder
+            ))
+        ));
 
+        sync.push(&update(vec![registration(3)], 0)).await.unwrap();
         let seqs: Vec<_> = recorder.pushes().iter().map(|push| push.seq).collect();
-        assert_eq!(seqs, [0, 1, 0, 0]);
-        let resync = recorder.pushes().pop().unwrap();
-        assert_eq!(
-            resync.ops.len(),
-            2,
-            "the new stream carries the whole state"
-        );
-        assert!(resync.backfill_done);
-
-        let third = follow(&mut state, Vec::new(), 12);
-        sync.push(&third, &state).await;
-        assert_eq!(recorder.pushes().pop().unwrap().seq, 1);
+        assert_eq!(seqs, [0, 1, 0], "the next push starts a new stream");
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_lost_answer_is_retried_without_a_new_stream() {
+    async fn a_lost_answer_is_retried_with_the_same_seq() {
         let recorder = Arc::new(Recorder::default());
         let mut sync = pusher(&recorder);
-        let mut state = BillingState::default();
-        let first = follow(&mut state, vec![registration(1)], 10);
-        sync.push(&first, &state).await;
+        sync.push(&update(vec![registration(1)], 10)).await.unwrap();
 
         recorder.answer(Err(enclave::Error::Timeout));
         recorder.answer(Err(enclave::Error::Transport("reset".to_owned())));
-        let second = follow(&mut state, vec![registration(2)], 11);
-        sync.push(&second, &state).await;
+        sync.push(&update(vec![registration(2)], 11)).await.unwrap();
 
         let pushes = recorder.pushes();
         let seqs: Vec<_> = pushes.iter().map(|push| push.seq).collect();
@@ -487,9 +486,7 @@ mod tests {
     async fn a_smaller_enclave_bound_is_flagged() {
         let recorder = Arc::new(Recorder::default());
         let mut sync = pusher(&recorder);
-        let mut state = BillingState::default();
-        let update = follow(&mut state, Vec::new(), 10);
-        sync.push(&update, &state).await;
+        sync.push(&update(Vec::new(), 10)).await.unwrap();
         assert!(!sync.warned_capacity);
 
         recorder.answer(Ok(BillingStatus {
@@ -497,8 +494,7 @@ mod tests {
             max_registrations: 1,
             ready: true,
         }));
-        let update = follow(&mut state, Vec::new(), 11);
-        sync.push(&update, &state).await;
+        sync.push(&update(Vec::new(), 11)).await.unwrap();
         assert!(sync.warned_capacity);
     }
 
@@ -506,14 +502,11 @@ mod tests {
     async fn a_follower_reset_starts_a_new_stream() {
         let recorder = Arc::new(Recorder::default());
         let mut sync = pusher(&recorder);
-        let mut state = BillingState::default();
-        let first = follow(&mut state, vec![registration(1)], 10);
-        sync.push(&first, &state).await;
+        sync.push(&update(vec![registration(1)], 10)).await.unwrap();
 
-        let mut state = BillingState::default();
-        let mut reset = follow(&mut state, vec![registration(2)], 12);
+        let mut reset = update(vec![registration(2)], 12);
         reset.reset = true;
-        sync.push(&reset, &state).await;
+        sync.push(&reset).await.unwrap();
 
         let last = recorder.pushes().pop().unwrap();
         assert_eq!(last.seq, 0);
@@ -535,5 +528,12 @@ mod tests {
         assert!(retry_delay(1) <= Duration::from_millis(400));
         assert!(retry_delay(40) >= Duration::from_millis(2500));
         assert!(retry_delay(40) <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn restarts_back_off_up_to_five_minutes() {
+        assert!(restart_delay(1) <= Duration::from_secs(2));
+        assert!(restart_delay(40) >= Duration::from_secs(150));
+        assert!(restart_delay(40) <= Duration::from_secs(300));
     }
 }

@@ -11,8 +11,8 @@ pub const MAX_BILLING_OPS: usize = 8192;
 ///
 /// Updates form a stream. `seq = 0` replaces the copy, and every later update carries the
 /// previous `seq + 1`. Repeating the last `seq` changes nothing, so the host can retry an update
-/// whose answer it lost. A rejected update changes nothing; the host then starts a new stream from
-/// its full state.
+/// whose answer it lost. A rejected update changes nothing; the host then follows the chain again
+/// and starts a new stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingUpdateRequest {
     /// The chain hosting the Billing Contract.
