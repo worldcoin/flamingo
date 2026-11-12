@@ -1,0 +1,16 @@
+[package]
+name = "flamingo-verifier-billing-state"
+description = "WIP-107 billing state the Flamingo host supplies to the enclave"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+world-id-primitives.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
