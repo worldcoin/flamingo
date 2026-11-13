@@ -224,9 +224,13 @@ mod tests {
         }
     }
 
-    async fn exchange(state: &Arc<EnclaveState>, payload: &Payload, nonce: u64) -> MatchResult {
+    async fn exchange(state: &Arc<EnclaveState>, payload: &Payload) -> MatchResult {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_NONCE: AtomicU64 = AtomicU64::new(1);
+        let nonce = NEXT_NONCE.fetch_add(1, Ordering::Relaxed);
         let request = Request::new(
-            1u64.into(),
+            FieldElement::ZERO,
             nonce.into(),
             state.now() + 300,
             FieldElement::ZERO,
@@ -278,8 +282,7 @@ mod tests {
     #[tokio::test]
     async fn strictness_2_signs_and_3_fails() {
         let state = state();
-        let MatchResult::Success { statement, .. } = exchange(&state, &deep_face(2), 1).await
-        else {
+        let MatchResult::Success { statement, .. } = exchange(&state, &deep_face(2)).await else {
             panic!("strictness 2 should pass")
         };
         let document = DevAttestation::from_cbor(&statement.signing_key_attestation).unwrap();
@@ -293,14 +296,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            exchange(&state, &deep_face(3), 2).await,
+            exchange(&state, &deep_face(3)).await,
             MatchResult::Failed {
                 reason: FailureReason::MatchBelowThreshold(ComparisonRole::OrbSelfie),
                 debug_report: flamingo_verifier_sealed_types::DebugReport::NotProduced,
             }
         );
         assert!(matches!(
-            exchange(&state, &gray_badge(), 3).await,
+            exchange(&state, &gray_badge()).await,
             MatchResult::Success { .. }
         ));
     }

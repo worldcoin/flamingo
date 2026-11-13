@@ -531,8 +531,8 @@ mod tests {
     #[cfg(feature = "dev")]
     #[test]
     fn dev_attestations_require_skipping_measurements() {
-        let mut json = serde_json::to_value(Config::new("http://localhost:8000", pcrs()).unwrap())
-            .unwrap();
+        let mut json =
+            serde_json::to_value(Config::new("http://localhost:8000", pcrs()).unwrap()).unwrap();
         json["dangerously_accept_dev_attestation"] = serde_json::json!(true);
         assert!(matches!(
             Config::from_json(&json.to_string()),
