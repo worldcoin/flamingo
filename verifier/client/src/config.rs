@@ -171,6 +171,13 @@ impl Config {
 
     /// Validates the measurement policy before constructing the verifier.
     fn validate(&self) -> Result<(), Error> {
+        #[cfg(feature = "dev")]
+        if self.dangerously_accept_dev_attestation && !self.dangerously_skip_measurements {
+            return Err(Error::InvalidConfig {
+                attribute: "dangerously_accept_dev_attestation".to_owned(),
+                reason: "requires dangerously_skip_measurements".to_owned(),
+            });
+        }
         self.verifier().map(|_| ())
     }
 
@@ -518,6 +525,24 @@ mod tests {
         assert!(matches!(
             Config::from_json(&json.to_string()).unwrap().attestations(),
             Ok(Attestations::Dev { .. })
+        ));
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn dev_attestations_require_skipping_measurements() {
+        let mut json = serde_json::to_value(Config::new("http://localhost:8000", pcrs()).unwrap())
+            .unwrap();
+        json["dangerously_accept_dev_attestation"] = serde_json::json!(true);
+        assert!(matches!(
+            Config::from_json(&json.to_string()),
+            Err(Error::InvalidConfig { .. })
+        ));
+        json["dangerously_skip_measurements"] = serde_json::json!(true);
+        json["allowed_pcr_configs"] = serde_json::json!([]);
+        assert!(matches!(
+            Config::from_json(&json.to_string()).unwrap().attestations(),
+            Ok(crate::client::Attestations::Dev { .. })
         ));
     }
 
