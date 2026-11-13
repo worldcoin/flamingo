@@ -12,12 +12,11 @@ use std::{sync::Arc, time::Duration};
 use alloy::primitives::Address;
 use anyhow::Context as _;
 use flamingo_verifier_billing_follower::{
-    BillingFollower, BillingUpdate, FollowerConfig, FollowerError, RpcUrl,
+    Backoff, BillingFollower, BillingUpdate, FollowerConfig, FollowerError, RpcUrl,
 };
 use flamingo_verifier_enclave_types::{
     self as enclave_types, BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS,
 };
-use rand::Rng as _;
 
 use crate::{
     enclave::{self, EnclaveClient},
@@ -49,7 +48,7 @@ pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyh
         FollowerConfig::new(config.chain_id, config.contract, config.deploy_block);
     // Restarts since a stream last caught up, which back off so an enclave that keeps rejecting
     // the state does not turn into back-to-back backfills.
-    let mut restarts: u32 = 0;
+    let mut restarts = Backoff::new(Duration::from_secs(1), Duration::from_secs(300));
     loop {
         let mut follower = connect(&config, follower_config.clone()).await?;
         let mut pusher = Pusher::new(Arc::clone(&enclave));
@@ -62,20 +61,19 @@ pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyh
             match pusher.push(&update).await {
                 Ok(status) => {
                     if update.backfill_done && status.ready {
-                        restarts = 0;
+                        restarts.reset();
                     }
                 }
                 Err(error) => break StreamLost::Enclave(error),
             }
         };
-        restarts += 1;
         metrics::counter!(names::BILLING_RESTARTS, "cause" => lost.cause()).increment(1);
-        let delay = restart_delay(restarts);
+        let delay = restarts.next_delay();
         tracing::warn!(
             cause = lost.cause(),
             error = ?lost.error(),
             dependency = lost.dependency(),
-            restarts,
+            restarts = restarts.failures(),
             delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             "the billing stream was lost; following the chain again from the deployment"
         );
@@ -119,14 +117,14 @@ async fn connect(
     config: &BillingConfig,
     follower_config: FollowerConfig,
 ) -> anyhow::Result<BillingFollower> {
-    let mut failures: u32 = 0;
+    let mut backoff = retry_backoff();
     loop {
         match BillingFollower::connect(config.rpc_url.clone(), follower_config.clone()).await {
             Ok(follower) => return Ok(follower),
             Err(FollowerError::Source(error)) => {
-                failures += 1;
-                tracing::warn!(%error, dependency = "billing_rpc", failures, "billing follower cannot read the chain ID; retrying");
-                tokio::time::sleep(retry_delay(failures)).await;
+                let delay = backoff.next_delay();
+                tracing::warn!(%error, dependency = "billing_rpc", failures = backoff.failures(), "billing follower cannot read the chain ID; retrying");
+                tokio::time::sleep(delay).await;
             }
             Err(error) => return Err(error).context("the billing follower cannot start"),
         }
@@ -182,7 +180,7 @@ impl Pusher {
         request: BillingUpdateRequest,
         head: u64,
     ) -> Result<BillingStatus, enclave::Error> {
-        let mut failures: u32 = 0;
+        let mut backoff = retry_backoff();
         loop {
             match self.client.update_billing(request.clone()).await {
                 Ok(status) => {
@@ -193,9 +191,10 @@ impl Pusher {
                 }
                 // A lost answer is retried as is; the enclave applies a repeated `seq` once.
                 Err(error @ (enclave::Error::Timeout | enclave::Error::Transport(_))) => {
-                    failures += 1;
                     metrics::counter!(names::BILLING_PUSHES, "result" => result_label(&error))
                         .increment(1);
+                    let delay = backoff.next_delay();
+                    let failures = backoff.failures();
                     if failures.is_power_of_two() {
                         tracing::warn!(
                             error = ?error,
@@ -205,7 +204,7 @@ impl Pusher {
                             "billing push failed; retrying"
                         );
                     }
-                    tokio::time::sleep(retry_delay(failures)).await;
+                    tokio::time::sleep(delay).await;
                 }
                 Err(error) => {
                     metrics::counter!(names::BILLING_PUSHES, "result" => result_label(&error))
@@ -234,20 +233,9 @@ const fn result_label(error: &enclave::Error) -> &'static str {
     }
 }
 
-/// Exponential backoff with equal jitter, from 200 ms to 5 s.
-fn retry_delay(failures: u32) -> Duration {
-    jittered(Duration::from_millis(200), failures, Duration::from_secs(5))
-}
-
-/// Exponential backoff with equal jitter between restarts, from 1 s to 5 min.
-fn restart_delay(restarts: u32) -> Duration {
-    jittered(Duration::from_secs(1), restarts, Duration::from_secs(300))
-}
-
-fn jittered(base: Duration, attempts: u32, max: Duration) -> Duration {
-    let ceiling = base.saturating_mul(1 << attempts.min(10)).min(max);
-    let half = ceiling / 2;
-    half + half.mul_f64(rand::thread_rng().gen_range(0.0..=1.0))
+/// Backoff for chain reads and lost answers, from 200 ms to 5 s.
+const fn retry_backoff() -> Backoff {
+    Backoff::new(Duration::from_millis(200), Duration::from_secs(5))
 }
 
 #[cfg(test)]
@@ -429,19 +417,5 @@ mod tests {
                 .iter()
                 .all(|push| push.ops == vec![registration(2)])
         );
-    }
-
-    #[test]
-    fn retries_back_off_up_to_five_seconds() {
-        assert!(retry_delay(1) <= Duration::from_millis(400));
-        assert!(retry_delay(40) >= Duration::from_millis(2500));
-        assert!(retry_delay(40) <= Duration::from_secs(5));
-    }
-
-    #[test]
-    fn restarts_back_off_up_to_five_minutes() {
-        assert!(restart_delay(1) <= Duration::from_secs(2));
-        assert!(restart_delay(40) >= Duration::from_secs(150));
-        assert!(restart_delay(40) <= Duration::from_secs(300));
     }
 }

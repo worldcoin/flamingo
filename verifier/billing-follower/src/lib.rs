@@ -10,4 +10,5 @@ mod testing;
 
 pub use follower::{BillingFollower, BillingUpdate, FollowerConfig, FollowerError};
 pub use rpc::{RpcSource, RpcUrl};
+pub use schedule::Backoff;
 pub use source::{BillingEvent, BlockRef, ChainLog, ChainSource, EventSet, SourceError};
