@@ -7,8 +7,8 @@ use crate::state::EnclaveState;
 
 /// Reports broker availability and liveness of the initialized worker, and whether the enclave
 /// can run a request: it needs a loaded release manifest, room in its replay set, an Engine
-/// that has not overrun a response slot and, if it bills, a caught-up billing state that is not
-/// full (WIP-107 §4.8).
+/// that has not overrun a response slot and, if it bills, a caught-up billing state (WIP-107
+/// §4.8).
 #[allow(clippy::unused_async, reason = "uniform async route interface")]
 pub async fn handler(
     state: Arc<EnclaveState>,
@@ -35,20 +35,16 @@ mod tests {
 
     use super::handler;
     use crate::{
-        billing::BillingTarget,
+        billing::BillingConfig,
         test_support::{UnusedBiometricEngine, loaded_billing_state, loaded_state},
     };
 
-    const TARGET: BillingTarget = BillingTarget {
-        chain_id: 480,
-        contract: [0x11; 20],
+    const CONFIG: BillingConfig = BillingConfig {
         max_registrations: 1,
     };
 
     fn update(backfill_done: bool) -> BillingUpdateRequest {
         BillingUpdateRequest {
-            chain_id: TARGET.chain_id,
-            contract: TARGET.contract,
             seq: 0,
             ops: Vec::new(),
             backfill_done,
@@ -57,7 +53,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_billing_enclave_is_ready_once_its_state_has_caught_up() {
-        let state = loaded_billing_state(TARGET);
+        let state = loaded_billing_state(CONFIG);
         assert_eq!(
             handler(Arc::clone(&state), HealthRequest).await,
             Err(enclave_types::Error::NotReady)

@@ -15,10 +15,6 @@ pub const MAX_BILLING_OPS: usize = 8192;
 /// and starts a new stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingUpdateRequest {
-    /// The chain hosting the Billing Contract.
-    pub chain_id: u64,
-    /// The Billing Contract's address.
-    pub contract: [u8; 20],
     /// The update's position in its stream.
     pub seq: u64,
     /// The state changes, in chain order. At most [`MAX_BILLING_OPS`].

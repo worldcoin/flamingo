@@ -22,8 +22,8 @@ pub enum Error {
     Internal,
     /// The release manifest is malformed, breaks a WIP-201 rule, or names another Engine bundle.
     ReleaseRejected,
-    /// The billing update names another chain or contract, carries too many ops or an op the
-    /// state rejects, or the enclave does not bill. The host starts a new stream.
+    /// The billing update carries too many ops or an op the state rejects, or the enclave does
+    /// not bill. The host starts a new stream.
     BillingRejected,
     /// The billing update's `seq` does not follow the stream's last one, e.g. after the enclave
     /// rebooted. The host starts a new stream.

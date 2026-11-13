@@ -79,8 +79,8 @@ The host reads every setting from an environment variable and an equivalent CLI 
 | `--ws-idle-timeout-secs` | `WS_IDLE_TIMEOUT_SECS` | `30` | Idle deadline for each WebSocket session phase. |
 | `--ws-max-connections` | `WS_MAX_CONNECTIONS` | `100` | Concurrent WebSocket sessions per host process. |
 | `--billing-rpc-url` | `BILLING_RPC_URL` | unset | JSON-RPC endpoint of the Billing Contract's chain; unset turns billing off. Never logged. |
-| `--billing-chain-id` | `BILLING_CHAIN_ID` | unset | The Billing Contract's chain; must match the enclave image. |
-| `--billing-contract` | `BILLING_CONTRACT` | unset | The Billing Contract's address; must match the enclave image. |
+| `--billing-chain-id` | `BILLING_CHAIN_ID` | unset | The Billing Contract's chain; the follower fails on another one. |
+| `--billing-contract` | `BILLING_CONTRACT` | unset | The Billing Contract's address. |
 | `--billing-deploy-block` | `BILLING_DEPLOY_BLOCK` | unset | The block the Billing Contract was deployed in. |
 | `--billing-max-registrations` | `BILLING_MAX_REGISTRATIONS` | `4194304` | Registrations the host follows; keep it at most the enclave image's `FLAMINGO_BILLING_MAX_REGISTRATIONS`. |
 

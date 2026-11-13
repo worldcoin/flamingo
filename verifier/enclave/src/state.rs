@@ -14,7 +14,7 @@ use world_id_flamingo::ReleaseManifest;
 
 use crate::{
     attestation::{AttestedKey, Attestor, MAX_CACHED_AGE, VerifierClock},
-    billing::{BillingStore, BillingTarget},
+    billing::{BillingConfig, BillingStore},
     biometric_engine::BiometricEngine,
     keys::SigningKey,
     replay::ReplayGuard,
@@ -63,7 +63,7 @@ impl EnclaveState {
         attestor: Arc<dyn Attestor>,
         engine: Box<dyn BiometricEngine>,
         engine_hash: [u8; 48],
-        billing: Option<BillingTarget>,
+        billing: Option<BillingConfig>,
     ) -> Result<Self, enclave_types::Error> {
         let channel = ChannelEnclave::generate(CHANNEL_DOMAIN).map_err(|error| {
             tracing::error!(?error, "failed to generate channel key");

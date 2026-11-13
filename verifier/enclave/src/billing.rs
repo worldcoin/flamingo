@@ -24,17 +24,13 @@ use rand::{RngCore as _, rngs::OsRng};
 use siphasher::sip::SipHasher24;
 use world_id_primitives::{FieldElement, billing::billing_period, rp::RpId};
 
-/// Default bound on the registrations the enclave holds. Reaching the bound fails closed.
-pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
-
-/// The chain this measurement bills on, from the EIF's environment, so the host cannot change it.
-const CHAIN_ID_VAR: &str = "FLAMINGO_BILLING_CHAIN_ID";
-const CONTRACT_VAR: &str = "FLAMINGO_BILLING_CONTRACT";
+/// Bound on the registrations the enclave holds, from the EIF's environment, so it is measured.
+/// Billing is on with this bound if it is set, and off otherwise. Reaching the bound fails closed.
 const MAX_REGISTRATIONS_VAR: &str = "FLAMINGO_BILLING_MAX_REGISTRATIONS";
 
 /// The enclave's copy of the billing state.
 pub struct BillingStore {
-    target: Option<BillingTarget>,
+    config: Option<BillingConfig>,
     inner: Mutex<Inner>,
 }
 
@@ -49,13 +45,16 @@ struct Inner {
 }
 
 impl BillingStore {
-    /// A store for `target`, or a store that bills nothing if `target` is `None`.
+    /// A store billing with `config`, or a store that bills nothing if `config` is `None`.
     #[must_use]
-    pub fn new(target: Option<BillingTarget>) -> Self {
+    pub fn new(config: Option<BillingConfig>) -> Self {
         Self {
-            target,
+            config,
             inner: Mutex::new(Inner {
-                state: State::new(max_registrations(target), boot_key()),
+                state: State::new(
+                    config.map_or(0, |config| config.max_registrations),
+                    boot_key(),
+                ),
                 last_seq: None,
                 caught_up: false,
                 next_expiry: 0,
@@ -67,14 +66,14 @@ impl BillingStore {
     /// was rejected since.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.target.is_none() || self.lock().caught_up
+        self.config.is_none() || self.lock().caught_up
     }
 
     /// Applies one update at the Verifier's time `now`, in Unix seconds.
     ///
     /// # Errors
-    /// [`enclave_types::Error::BillingRejected`] for another target, too many ops, an op the
-    /// state rejects or a store that bills nothing, and [`enclave_types::Error::BillingOutOfOrder`]
+    /// [`enclave_types::Error::BillingRejected`] for too many ops, an op the state rejects or a
+    /// store that bills nothing, and [`enclave_types::Error::BillingOutOfOrder`]
     /// for a `seq` that neither follows nor repeats the last one. Neither changes the state. A
     /// rejection ends the stream and stops serving until a new stream catches up.
     pub fn apply(
@@ -82,18 +81,18 @@ impl BillingStore {
         update: &BillingUpdateRequest,
         now: u64,
     ) -> Result<BillingStatus, enclave_types::Error> {
-        let Some(target) = self.target else {
+        let Some(config) = self.config else {
             tracing::warn!("billing update for an enclave that does not bill");
             return Err(enclave_types::Error::BillingRejected);
         };
         let mut inner = self.lock();
-        let result = inner.apply(target, update, now);
+        let result = inner.apply(config, update, now);
         if result == Err(enclave_types::Error::BillingRejected) {
             // The rejected update's changes are missing, so its stream cannot go on.
             inner.last_seq = None;
             inner.caught_up = false;
         }
-        let status = result.map(|()| status(&inner, target.max_registrations));
+        let status = result.map(|()| status(&inner, config.max_registrations));
         drop(inner);
         status
     }
@@ -106,17 +105,10 @@ impl BillingStore {
 impl Inner {
     fn apply(
         &mut self,
-        target: BillingTarget,
+        config: BillingConfig,
         update: &BillingUpdateRequest,
         now: u64,
     ) -> Result<(), enclave_types::Error> {
-        if update.chain_id != target.chain_id || update.contract != target.contract {
-            tracing::error!(
-                chain_id = update.chain_id,
-                "billing update for another chain or contract than the image's"
-            );
-            return Err(enclave_types::Error::BillingRejected);
-        }
         if update.ops.len() > MAX_BILLING_OPS {
             return Err(enclave_types::Error::BillingRejected);
         }
@@ -126,7 +118,7 @@ impl Inner {
             self.next_expiry = billing_period(now).map_or(u64::MAX, |(_, end)| end);
         }
         if update.seq == 0 {
-            let mut state = State::new(target.max_registrations, self.state.digest_key);
+            let mut state = State::new(config.max_registrations, self.state.digest_key);
             apply_all(&mut state, &update.ops, now).map_err(rejected)?;
             self.state = state;
             self.caught_up = false;
@@ -170,11 +162,6 @@ fn apply_all(state: &mut State, ops: &[BillingOp], now: u64) -> Result<(), Billi
 fn rejected(error: BillingStateError) -> enclave_types::Error {
     tracing::error!(%error, "billing update rejected");
     enclave_types::Error::BillingRejected
-}
-
-/// A store that bills nothing holds no registrations.
-fn max_registrations(target: Option<BillingTarget>) -> usize {
-    target.map_or(0, |target| target.max_registrations)
 }
 
 fn status(inner: &Inner, max_registrations: usize) -> BillingStatus {
@@ -323,63 +310,32 @@ impl Hasher for DigestHasher {
     }
 }
 
-/// The Billing Contract this enclave accepts state of.
+/// How the enclave bills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BillingTarget {
-    /// The chain hosting the Billing Contract.
-    pub chain_id: u64,
-    /// The Billing Contract's address.
-    pub contract: [u8; 20],
+pub struct BillingConfig {
     /// Bound on the registrations the enclave holds.
     pub max_registrations: usize,
 }
 
-impl BillingTarget {
-    /// The target set in the EIF's environment, or `None` if billing is off.
+impl BillingConfig {
+    /// The config set in the EIF's environment, or `None` if billing is off.
     ///
     /// # Errors
-    /// If only one of chain and contract is set, or a variable is malformed: a broken image must
-    /// not boot. The bound defaults to [`DEFAULT_MAX_REGISTRATIONS`].
+    /// If the bound is malformed: a broken image must not boot.
     pub fn from_env() -> Result<Option<Self>, String> {
-        let chain_id = env::var(CHAIN_ID_VAR).ok();
-        let contract = env::var(CONTRACT_VAR).ok();
-        let max_registrations = env::var(MAX_REGISTRATIONS_VAR).ok();
-        match (chain_id, contract) {
-            (None, None) => Ok(None),
-            (Some(chain_id), Some(contract)) => {
-                Self::parse(&chain_id, &contract, max_registrations.as_deref()).map(Some)
-            }
-            _ => Err(format!(
-                "set both {CHAIN_ID_VAR} and {CONTRACT_VAR}, or neither"
-            )),
-        }
+        env::var(MAX_REGISTRATIONS_VAR)
+            .ok()
+            .map(|value| Self::parse(&value))
+            .transpose()
     }
 
-    fn parse(
-        chain_id: &str,
-        contract: &str,
-        max_registrations: Option<&str>,
-    ) -> Result<Self, String> {
-        let chain_id = chain_id
+    fn parse(max_registrations: &str) -> Result<Self, String> {
+        max_registrations
             .parse()
-            .map_err(|_| format!("{CHAIN_ID_VAR} is not a chain ID"))?;
-        let contract = hex::decode(contract.strip_prefix("0x").unwrap_or(contract))
             .ok()
-            .and_then(|bytes| <[u8; 20]>::try_from(bytes).ok())
-            .ok_or_else(|| format!("{CONTRACT_VAR} is not a 20-byte hex address"))?;
-        let max_registrations =
-            max_registrations.map_or(Ok(DEFAULT_MAX_REGISTRATIONS), |value| {
-                value
-                    .parse()
-                    .ok()
-                    .filter(|&bound| bound > 0)
-                    .ok_or_else(|| format!("{MAX_REGISTRATIONS_VAR} is not a positive count"))
-            })?;
-        Ok(Self {
-            chain_id,
-            contract,
-            max_registrations,
-        })
+            .filter(|&bound| bound > 0)
+            .map(|max_registrations| Self { max_registrations })
+            .ok_or_else(|| format!("{MAX_REGISTRATIONS_VAR} is not a positive count"))
     }
 }
 
@@ -394,10 +350,8 @@ mod tests {
     const NOV_2026: u64 = 1_793_534_400;
     const DEC_2026: u64 = 1_796_126_400;
     const NOW: u64 = NOV_2026 + 86_400;
-    const TARGET: BillingTarget = BillingTarget {
-        chain_id: 480,
-        contract: [0x11; 20],
-        max_registrations: DEFAULT_MAX_REGISTRATIONS,
+    const CONFIG: BillingConfig = BillingConfig {
+        max_registrations: 1 << 22,
     };
 
     fn add(nullifier: u64, period_start: u64) -> BillingOp {
@@ -419,8 +373,6 @@ mod tests {
 
     fn update(seq: u64, ops: Vec<BillingOp>, backfill_done: bool) -> BillingUpdateRequest {
         BillingUpdateRequest {
-            chain_id: TARGET.chain_id,
-            contract: TARGET.contract,
             seq,
             ops,
             backfill_done,
@@ -442,7 +394,7 @@ mod tests {
 
     #[test]
     fn a_stream_serves_once_it_has_caught_up() {
-        let store = BillingStore::new(Some(TARGET));
+        let store = BillingStore::new(Some(CONFIG));
         assert!(!store.is_ready());
         store
             .apply(&update(0, vec![bill(true), add(1, NOV_2026)], false), NOW)
@@ -464,7 +416,7 @@ mod tests {
 
     #[test]
     fn a_new_stream_replaces_the_state() {
-        let store = BillingStore::new(Some(TARGET));
+        let store = BillingStore::new(Some(CONFIG));
         store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
             .unwrap();
@@ -480,7 +432,7 @@ mod tests {
 
     #[test]
     fn updates_must_follow_their_stream_and_may_repeat_the_last() {
-        let store = BillingStore::new(Some(TARGET));
+        let store = BillingStore::new(Some(CONFIG));
         assert_eq!(
             store.apply(&update(1, Vec::new(), true), NOW),
             Err(enclave_types::Error::BillingOutOfOrder)
@@ -503,9 +455,8 @@ mod tests {
 
     #[test]
     fn a_rejected_update_changes_nothing() {
-        let store = BillingStore::new(Some(BillingTarget {
+        let store = BillingStore::new(Some(BillingConfig {
             max_registrations: 2,
-            ..TARGET
         }));
         store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
@@ -528,24 +479,17 @@ mod tests {
     }
 
     #[test]
-    fn another_target_or_too_many_ops_is_rejected() {
-        let store = BillingStore::new(Some(TARGET));
-        let mut other_chain = update(0, Vec::new(), true);
-        other_chain.chain_id += 1;
-        let mut other_contract = update(0, Vec::new(), true);
-        other_contract.contract = [0x22; 20];
-        let too_many = update(0, vec![bill(true); MAX_BILLING_OPS + 1], true);
-        for update in [other_chain, other_contract, too_many] {
-            assert_eq!(
-                store.apply(&update, NOW),
-                Err(enclave_types::Error::BillingRejected)
-            );
-        }
+    fn too_many_ops_are_rejected() {
+        let store = BillingStore::new(Some(CONFIG));
+        assert_eq!(
+            store.apply(&update(0, vec![bill(true); MAX_BILLING_OPS + 1], true), NOW),
+            Err(enclave_types::Error::BillingRejected)
+        );
         assert!(!store.is_ready());
     }
 
     #[test]
-    fn an_enclave_without_a_target_bills_nothing() {
+    fn an_enclave_without_a_config_bills_nothing() {
         let store = BillingStore::new(None);
         assert!(store.is_ready());
         assert_eq!(
@@ -556,9 +500,8 @@ mod tests {
 
     #[test]
     fn a_rejection_stops_serving_until_a_new_stream_catches_up() {
-        let store = BillingStore::new(Some(BillingTarget {
+        let store = BillingStore::new(Some(BillingConfig {
             max_registrations: 1,
-            ..TARGET
         }));
         let status = store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
@@ -587,9 +530,8 @@ mod tests {
 
     #[test]
     fn ended_periods_do_not_count_against_the_bound_at_a_rollover() {
-        let store = BillingStore::new(Some(BillingTarget {
+        let store = BillingStore::new(Some(BillingConfig {
             max_registrations: 1,
-            ..TARGET
         }));
         store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
@@ -612,7 +554,7 @@ mod tests {
 
     #[test]
     fn registrations_expire_with_the_verifier_clock() {
-        let store = BillingStore::new(Some(TARGET));
+        let store = BillingStore::new(Some(CONFIG));
         store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
             .unwrap();
@@ -631,7 +573,7 @@ mod tests {
 
     #[test]
     fn a_registration_is_bound_to_its_rp_and_removed_by_its_own_op() {
-        let store = BillingStore::new(Some(TARGET));
+        let store = BillingStore::new(Some(CONFIG));
         let for_rp = |rp_id: u64| BillingOp::AddRegistration {
             nullifier: FieldElement::from(1u64),
             registration: Registration {
@@ -660,8 +602,8 @@ mod tests {
 
     #[test]
     fn every_store_draws_its_own_key() {
-        let one = BillingStore::new(Some(TARGET));
-        let other = BillingStore::new(Some(TARGET));
+        let one = BillingStore::new(Some(CONFIG));
+        let other = BillingStore::new(Some(CONFIG));
         let digest = |store: &BillingStore| {
             store
                 .lock()
@@ -672,20 +614,15 @@ mod tests {
     }
 
     #[test]
-    fn the_target_needs_valid_values_and_defaults_its_bound() {
-        const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
-        assert_eq!(BillingTarget::parse("480", CONTRACT, None), Ok(TARGET));
+    fn the_bound_must_be_a_positive_count() {
         assert_eq!(
-            BillingTarget::parse("480", &CONTRACT[2..], Some("5")),
-            Ok(BillingTarget {
-                max_registrations: 5,
-                ..TARGET
+            BillingConfig::parse("5"),
+            Ok(BillingConfig {
+                max_registrations: 5
             })
         );
-        assert!(BillingTarget::parse("world", CONTRACT, None).is_err());
-        assert!(BillingTarget::parse("480", "0x11", None).is_err());
         for bound in ["0", "-1", "many"] {
-            assert!(BillingTarget::parse("480", CONTRACT, Some(bound)).is_err());
+            assert!(BillingConfig::parse(bound).is_err());
         }
     }
 }

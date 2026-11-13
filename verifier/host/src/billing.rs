@@ -47,9 +47,9 @@ impl fmt::Debug for RpcUrl {
 pub struct BillingConfig {
     /// The endpoint the follower reads the chain from.
     pub rpc_url: RpcUrl,
-    /// The chain hosting the Billing Contract. The enclave rejects state of another chain.
+    /// The chain hosting the Billing Contract. The follower fails on another chain.
     pub chain_id: u64,
-    /// The Billing Contract. The enclave rejects state of another contract.
+    /// The Billing Contract.
     pub contract: Address,
     /// The block the Billing Contract was deployed in.
     pub deploy_block: u64,
@@ -70,12 +70,7 @@ pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyh
         max_registrations: config.max_registrations,
         ..FollowerConfig::new(config.chain_id, config.contract, config.deploy_block)
     };
-    let mut pusher = Pusher::new(
-        enclave,
-        config.chain_id,
-        config.contract.into_array(),
-        config.max_registrations,
-    );
+    let mut pusher = Pusher::new(enclave, config.max_registrations);
     // Restarts since a stream last caught up, which back off so an enclave that keeps rejecting
     // the state does not turn into back-to-back backfills.
     let mut restarts: u32 = 0;
@@ -130,8 +125,6 @@ async fn connect(
 /// Passes the follower's updates to the enclave as one numbered stream.
 pub struct Pusher {
     client: Arc<dyn EnclaveClient>,
-    chain_id: u64,
-    contract: [u8; 20],
     /// The `seq` of the next update; `0` starts a new stream.
     next_seq: u64,
     max_registrations: usize,
@@ -141,16 +134,9 @@ pub struct Pusher {
 impl Pusher {
     /// A pusher whose first push starts a new stream.
     #[must_use]
-    pub const fn new(
-        client: Arc<dyn EnclaveClient>,
-        chain_id: u64,
-        contract: [u8; 20],
-        max_registrations: usize,
-    ) -> Self {
+    pub const fn new(client: Arc<dyn EnclaveClient>, max_registrations: usize) -> Self {
         Self {
             client,
-            chain_id,
-            contract,
             next_seq: 0,
             max_registrations,
             warned_capacity: false,
@@ -183,8 +169,6 @@ impl Pusher {
         parts: usize,
     ) -> Result<BillingStatus, enclave::Error> {
         let request = BillingUpdateRequest {
-            chain_id: self.chain_id,
-            contract: self.contract,
             seq: self.next_seq,
             ops: chunk(&update.ops, index).to_vec(),
             // An update split in parts is complete only after its last part.
@@ -303,9 +287,6 @@ mod tests {
 
     use super::*;
 
-    const CHAIN_ID: u64 = 480;
-    const CONTRACT: [u8; 20] = [0x11; 20];
-
     /// Records billing pushes and answers them from a script, then with `ready`.
     #[derive(Default)]
     struct Recorder {
@@ -385,8 +366,6 @@ mod tests {
     fn pusher(recorder: &Arc<Recorder>) -> Pusher {
         Pusher::new(
             Arc::clone(recorder) as Arc<dyn EnclaveClient>,
-            CHAIN_ID,
-            CONTRACT,
             DEFAULT_MAX_REGISTRATIONS,
         )
     }
@@ -403,10 +382,6 @@ mod tests {
         assert_eq!(pushes.len(), 2);
         assert_eq!(pushes[0].seq, 0);
         assert_eq!(pushes[0].ops, vec![registration(1)]);
-        assert_eq!(
-            (pushes[0].chain_id, pushes[0].contract),
-            (CHAIN_ID, CONTRACT)
-        );
         assert_eq!(pushes[1].seq, 1);
         assert!(
             pushes[1].ops.is_empty(),
