@@ -1,5 +1,5 @@
-//! The unsigned stand-in for a Nitro channel-key attestation that a `dev` Verifier serves. No
-//! enclave produces it, and only a client built with its own `dev` feature accepts it.
+//! The unsigned stand-in for a Nitro attestation that a `dev` Verifier serves for both its keys.
+//! No enclave produces it, and only a client built with its own `dev` feature accepts it.
 
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -10,9 +10,9 @@ use crate::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DevAttestation {
-    /// The attested key binding: the channel key commitment.
+    /// The attested key binding: the raw signing key or the channel key commitment.
     pub public_key: ByteBuf,
-    /// The loaded `release_hash`, once a release is loaded.
+    /// The loaded `release_hash` for the channel key, once a release is loaded; none otherwise.
     pub user_data: Option<ByteBuf>,
     /// When the document was produced, in milliseconds since the Unix epoch.
     pub timestamp_millis: u64,

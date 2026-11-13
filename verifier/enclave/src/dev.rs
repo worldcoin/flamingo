@@ -29,8 +29,8 @@ pub const DEV_SCORE: f64 = 0.92;
 
 /// A Verifier with the stub Engine and `manifest` loaded, billing nothing.
 ///
-/// Its signing key attestation is the raw 32-byte compressed key. Its channel key attestation is
-/// a CBOR [`DevAttestation`] carrying the loaded `release_hash`.
+/// Both keys are attested by an unsigned CBOR [`DevAttestation`], the channel key's carrying the
+/// loaded `release_hash`.
 ///
 /// # Errors
 /// Returns [`enclave_types::Error::ReleaseRejected`] for a manifest the Verifier rejects.
@@ -39,9 +39,8 @@ pub fn verifier(manifest: &str) -> Result<Arc<EnclaveState>, enclave_types::Erro
         .map_err(|_| enclave_types::Error::ReleaseRejected)?
         .payload()
         .engine_hash;
-    let state = EnclaveState::generate_with(
-        Arc::new(SigningKeyAttestor),
-        Arc::new(ChannelKeyAttestor),
+    let state = EnclaveState::generate(
+        Arc::new(DevAttestor),
         Box::new(StubEngine),
         engine_hash,
         None,
@@ -101,30 +100,10 @@ pub async fn update_billing(
     routes::billing::handler(state, request).await
 }
 
-/// Attests the signing key as the key itself.
-struct SigningKeyAttestor;
+/// Attests a key binding in an unsigned [`DevAttestation`].
+struct DevAttestor;
 
-impl Attestor for SigningKeyAttestor {
-    fn attest(
-        &self,
-        public_key: &[u8],
-        user_data: Option<&[u8]>,
-    ) -> Result<Attestation, enclave_types::Error> {
-        if user_data.is_some() {
-            tracing::error!("the dev signing key attestation carries no user_data");
-            return Err(enclave_types::Error::AttestationFailed);
-        }
-        Ok(Attestation {
-            document: public_key.to_vec(),
-            timestamp_millis: now_millis()?,
-        })
-    }
-}
-
-/// Attests the channel key commitment in a [`DevAttestation`].
-struct ChannelKeyAttestor;
-
-impl Attestor for ChannelKeyAttestor {
+impl Attestor for DevAttestor {
     fn attest(
         &self,
         public_key: &[u8],
@@ -288,10 +267,12 @@ mod tests {
             state.release().unwrap().release_hash()
         );
         assert_eq!(document.timestamp_millis / 1000, state.now());
+        let signing = DevAttestation::from_cbor(&state.signing_key_attestation()).unwrap();
         assert_eq!(
-            state.signing_key_attestation(),
+            signing.public_key.as_slice(),
             state.signing_public_key().to_compressed_bytes().unwrap()
         );
+        assert_eq!(signing.user_data, None);
     }
 
     #[tokio::test]
@@ -301,8 +282,9 @@ mod tests {
         else {
             panic!("strictness 2 should pass")
         };
+        let document = DevAttestation::from_cbor(&statement.signing_key_attestation).unwrap();
         let signing_key = EdDSAPublicKey::from_compressed_bytes(
-            statement.signing_key_attestation.try_into().unwrap(),
+            document.public_key.as_slice().try_into().unwrap(),
         )
         .unwrap();
         FlamingoToken::from_cwt(&statement.token)

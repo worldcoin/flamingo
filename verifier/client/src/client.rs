@@ -80,14 +80,29 @@ fn verify_dev_attestation(
     public_key: &[u8],
     max_age: std::time::Duration,
 ) -> Result<(ChannelConsumer, Option<Vec<u8>>), Error> {
-    use flamingo_verifier_sealed_types::dev::DevAttestation;
-    use pontifex::{ChannelError, attestation};
+    use pontifex::ChannelError;
 
-    let document = DevAttestation::from_cbor(document).map_err(|_| {
-        Error::Channel(ChannelError::Attestation(attestation::Error::ParseError(
-            "not a dev attestation".to_owned(),
-        )))
-    })?;
+    let document = fresh_dev_attestation(document, max_age)
+        .map_err(|error| Error::Channel(ChannelError::Attestation(error)))?;
+    if document.public_key.as_slice() != CHANNEL_DOMAIN.public_key_commitment(public_key) {
+        return Err(Error::Channel(ChannelError::KeyCommitmentMismatch));
+    }
+    let consumer = ChannelConsumer::from_unverified_public_key(CHANNEL_DOMAIN, public_key)
+        .map_err(Error::Channel)?;
+    Ok((consumer, document.user_data.map(ByteBuf::into_vec)))
+}
+
+/// Decodes a `dev` document and checks that it is no older than `max_age`.
+#[cfg(feature = "dev")]
+fn fresh_dev_attestation(
+    document: &[u8],
+    max_age: std::time::Duration,
+) -> Result<flamingo_verifier_sealed_types::dev::DevAttestation, pontifex::attestation::Error> {
+    use flamingo_verifier_sealed_types::dev::DevAttestation;
+    use pontifex::attestation;
+
+    let document = DevAttestation::from_cbor(document)
+        .map_err(|_| attestation::Error::ParseError("not a dev attestation".to_owned()))?;
     let now_millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -96,19 +111,12 @@ fn verify_dev_attestation(
     let age_millis = now_millis.saturating_sub(document.timestamp_millis);
     let max_age = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
     if age_millis > max_age {
-        return Err(Error::Channel(ChannelError::Attestation(
-            attestation::Error::Stale {
-                age_millis,
-                max_age,
-            },
-        )));
+        return Err(attestation::Error::Stale {
+            age_millis,
+            max_age,
+        });
     }
-    if document.public_key.as_slice() != CHANNEL_DOMAIN.public_key_commitment(public_key) {
-        return Err(Error::Channel(ChannelError::KeyCommitmentMismatch));
-    }
-    let consumer = ChannelConsumer::from_unverified_public_key(CHANNEL_DOMAIN, public_key)
-        .map_err(Error::Channel)?;
-    Ok((consumer, document.user_data.map(ByteBuf::into_vec)))
+    Ok(document)
 }
 
 /// The release manifest `jws`, if the channel attestation's `user_data` is its `release_hash`.
@@ -157,12 +165,14 @@ pub fn open_verified_match(
     }
 }
 
-/// The signing key `document` attests. A `dev` Verifier's document is the raw key.
+/// The signing key `document` attests.
 fn attested_signing_key(
     attestations: &Attestations,
     document: &[u8],
 ) -> Result<EdDSAPublicKey, Error> {
     let attested;
+    #[cfg(feature = "dev")]
+    let dev;
     let key = match attestations {
         Attestations::Nitro(verifier) => {
             // Response encryption alone does not authenticate the signing key.
@@ -175,7 +185,14 @@ fn attested_signing_key(
                 .as_slice()
         }
         #[cfg(feature = "dev")]
-        Attestations::Dev { .. } => document,
+        Attestations::Dev { max_age } => {
+            dev = fresh_dev_attestation(document, *max_age)?;
+            // Only the channel key's document carries `user_data`.
+            if dev.user_data.is_some() {
+                return Err(Error::InvalidSigningKey);
+            }
+            dev.public_key.as_slice()
+        }
     };
     <[u8; 32]>::try_from(key)
         .map_err(|_| Error::InvalidSigningKey)
@@ -479,10 +496,35 @@ mod tests {
 
         let key = eddsa_babyjubjub::EdDSAPrivateKey::from_bytes([7; 32]).public();
         let raw = key.to_compressed_bytes().unwrap();
-        assert_eq!(attested_signing_key(&dev, &raw).unwrap(), key);
+        let signing = |public_key: &[u8], user_data: Option<Vec<u8>>, timestamp_millis| {
+            DevAttestation {
+                public_key: ByteBuf::from(public_key),
+                user_data: user_data.map(ByteBuf::from),
+                timestamp_millis,
+            }
+            .to_cbor()
+            .unwrap()
+        };
+        let now = dev_document([0; 32], vec![]).timestamp_millis;
+        assert_eq!(
+            attested_signing_key(&dev, &signing(&raw, None, now)).unwrap(),
+            key
+        );
         assert!(matches!(
-            attested_signing_key(&dev, &raw[1..]),
+            attested_signing_key(&dev, &raw),
+            Err(Error::Attestation(attestation::Error::ParseError(_)))
+        ));
+        assert!(matches!(
+            attested_signing_key(&dev, &signing(&raw[1..], None, now)),
             Err(Error::InvalidSigningKey)
+        ));
+        assert!(matches!(
+            attested_signing_key(&dev, &signing(&raw, Some(vec![0; 32]), now)),
+            Err(Error::InvalidSigningKey)
+        ));
+        assert!(matches!(
+            attested_signing_key(&dev, &signing(&raw, None, 0)),
+            Err(Error::Attestation(attestation::Error::Stale { .. }))
         ));
     }
 
