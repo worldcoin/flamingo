@@ -1,0 +1,45 @@
+# Its own workspace, so world-id-protocol's test services never reach the Verifier's lockfile.
+# Cargo.lock starts from world-id-protocol's at the rev: a fresh resolution splits taceo-nodes-common.
+[workspace]
+members = ["."]
+resolver = "3"
+
+[package]
+name = "flamingo-wip202-e2e"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+publish = false
+
+[dev-dependencies]
+alloy-primitives = "1.5.7"
+async-trait = "0.1"
+axum = "0.8"
+eyre = "0.6"
+flamingo-verifier-client = { path = "../verifier/client", features = ["dev"] }
+flamingo-verifier-enclave = { path = "../verifier/enclave", features = ["dev"] }
+flamingo-verifier-enclave-types = { path = "../verifier/enclave-types" }
+flamingo-verifier-host = { path = "../verifier/host" }
+flamingo-verifier-sealed-types = { path = "../verifier/sealed-types", features = ["dev", "testing"] }
+tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread"] }
+world-id-core = { git = "https://github.com/worldcoin/world-id-protocol", rev = "fd72333f6533d4f2ca4c0ff8d4a308374af584cb", default-features = false, features = [
+    "authenticator",
+    "rp",
+    "embed-zkeys",
+    "embed-embedding-similarity-prover",
+    "embed-embedding-similarity-verifier",
+] }
+world-id-flamingo = "0.22.0"
+world-id-test-utils = { git = "https://github.com/worldcoin/world-id-protocol", rev = "fd72333f6533d4f2ca4c0ff8d4a308374af584cb", features = ["embedding-similarity"] }
+
+# One copy of the World ID types: the main workspace's crates.io versions, from the pinned rev.
+# `check-versions.sh` keeps the main workspace's versions equal to the rev's.
+[patch.crates-io]
+world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", rev = "fd72333f6533d4f2ca4c0ff8d4a308374af584cb" }
+world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "fd72333f6533d4f2ca4c0ff8d4a308374af584cb" }
+world-id-registries = { git = "https://github.com/worldcoin/world-id-protocol", rev = "fd72333f6533d4f2ca4c0ff8d4a308374af584cb" }
+
+# Arkworks key loading and proving are prohibitively slow unoptimized.
+[profile.dev.package."*"]
+opt-level = 2
