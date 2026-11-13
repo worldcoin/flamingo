@@ -59,6 +59,8 @@ pub struct Backoff {
 }
 
 impl Backoff {
+    /// Waits from about `base` up to `max`.
+    #[must_use]
     pub const fn new(base: Duration, max: Duration) -> Self {
         Self {
             base,
@@ -83,6 +85,7 @@ impl Backoff {
         self.failures
     }
 
+    /// Starts over from `base`, e.g. after a success.
     pub const fn reset(&mut self) {
         self.failures = 0;
     }

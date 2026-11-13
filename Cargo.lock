@@ -1580,6 +1580,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cadence"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca08f6db9f0c963249cf23a27820f9d973d2acaad4d6bfaeb858b58ebd58a6a"
+dependencies = [
+ "crossbeam-channel",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2562,7 +2571,6 @@ version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror 2.0.20",
  "world-id-primitives",
 ]
 
@@ -2614,6 +2622,7 @@ dependencies = [
  "ciborium",
  "coset",
  "flamingo-verifier-api-types",
+ "flamingo-verifier-billing-state",
  "flamingo-verifier-enclave-types",
  "flamingo-verifier-sandbox-client",
  "flamingo-verifier-sealed-types",
@@ -2623,6 +2632,7 @@ dependencies = [
  "rand 0.8.8",
  "serde",
  "serde_json",
+ "siphasher",
  "tabernaculum",
  "taceo-eddsa-babyjubjub",
  "tokio",
@@ -2637,6 +2647,7 @@ name = "flamingo-verifier-enclave-types"
 version = "0.11.0"
 dependencies = [
  "bytes",
+ "flamingo-verifier-billing-state",
  "pontifex",
  "serde",
  "serde_bytes",
@@ -2646,15 +2657,19 @@ dependencies = [
 name = "flamingo-verifier-host"
 version = "0.11.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "clap",
  "flamingo-verifier-api-types",
+ "flamingo-verifier-billing-follower",
+ "flamingo-verifier-billing-state",
  "flamingo-verifier-enclave-types",
  "futures-util",
  "http-body-util",
+ "metrics",
  "pontifex",
  "serde",
  "serde_json",
@@ -2665,7 +2680,9 @@ dependencies = [
  "tower",
  "tracing",
  "tungstenite",
+ "url",
  "world-id-flamingo",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -3770,6 +3787,17 @@ checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
 dependencies = [
  "portable-atomic",
  "rapidhash",
+]
+
+[[package]]
+name = "metrics-exporter-statsd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57971e32cdee88619fb6c673fd89cfd37c12f2dd7c187fb400b7aae0ede0ed9e"
+dependencies = [
+ "cadence",
+ "metrics",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -5756,6 +5784,7 @@ dependencies = [
  "eyre",
  "http",
  "metrics",
+ "metrics-exporter-statsd",
  "opentelemetry",
  "opentelemetry-datadog",
  "opentelemetry-http",

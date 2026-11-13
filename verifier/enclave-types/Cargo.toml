@@ -10,3 +10,4 @@ bytes.workspace = true
 pontifex.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+flamingo-verifier-billing-state.workspace = true

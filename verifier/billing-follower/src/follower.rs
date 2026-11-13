@@ -1,23 +1,23 @@
 //! Follows the Billing Contract at the latest block and turns its logs into billing ops.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use alloy::primitives::Address;
-use flamingo_verifier_billing_state::{BillingOp, BillingState, BillingStateError, Registration};
+use flamingo_verifier_billing_state::{BillingOp, Registration};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use tokio::time::Instant;
-use url::Url;
 use world_id_primitives::{
     FieldElement,
-    billing::{PERIOD_OVERLAP, billing_period, is_period_active, period_start},
+    billing::{PERIOD_OVERLAP, is_period_active, period_start},
+    rp::RpId,
 };
 
 use crate::{
     metrics::{self as names, gauge_value},
-    rpc::RpcSource,
+    rpc::{RpcSource, RpcUrl},
     schedule::{Backoff, PollSchedule},
     source::{BillingEvent, BlockRef, ChainLog, ChainSource, EventSet, SourceError},
 };
@@ -26,30 +26,30 @@ use crate::{
 const HEADER_READS_IN_FLIGHT: usize = 16;
 
 /// Follows the WIP-107 Billing Contract and emits the host's billing state (WIP-107 §4.8).
+///
+/// The follower keeps no registrations. The Contract emits `Registered` once per nullifier, so the
+/// op undoing a registration is its removal; only the billed RPs are kept, to undo their updates.
 pub struct BillingFollower<S = RpcSource> {
     source: S,
     config: FollowerConfig,
-    state: BillingState,
+    billed_rps: HashSet<RpId>,
     phase: Phase,
     window: VecDeque<WindowBlock>,
     tip: Option<BlockRef>,
     next_block: u64,
     /// Applied ops not yet returned.
     outbox: Vec<BillingOp>,
-    /// Rebuilding after a deep fork: updates are held back until a full snapshot is ready.
-    rebuilding: bool,
     announced: bool,
     log_range: u64,
     schedule: PollSchedule,
     last_poll: Instant,
     backoff: Backoff,
-    next_expiry: u64,
     clock: fn() -> u64,
 }
 
 impl BillingFollower<RpcSource> {
     /// Follows `config.contract` over the HTTP endpoint `url`; fails as [`Self::with_source`] does.
-    pub async fn connect(url: Url, config: FollowerConfig) -> Result<Self, FollowerError> {
+    pub async fn connect(url: RpcUrl, config: FollowerConfig) -> Result<Self, FollowerError> {
         let source = RpcSource::new(url, config.contract);
         Self::with_source(source, config).await
     }
@@ -83,31 +83,27 @@ impl<S: ChainSource> BillingFollower<S> {
         );
         Ok(Self {
             source,
-            state: BillingState::with_limit(config.max_registrations),
+            billed_rps: HashSet::new(),
             phase: Phase::Start,
             window: VecDeque::new(),
             tip: None,
             next_block: 0,
             outbox: Vec::new(),
-            rebuilding: false,
             announced: false,
             log_range: config.max_log_range.max(1),
             schedule,
             last_poll: Instant::now(),
             backoff: Backoff::new(Duration::from_millis(200), Duration::from_secs(10)),
-            next_expiry: 0,
             clock: unix_now,
             config,
         })
     }
 
-    /// The follower's billing state, current up to the last returned update.
-    #[must_use]
-    pub const fn state(&self) -> &BillingState {
-        &self.state
-    }
-
-    /// The next state change: per log page in backfill, then per new block; errs only on a bad op.
+    /// The next state change: per log page in backfill, then per new block.
+    ///
+    /// # Errors
+    /// [`FollowerError::DeepFork`] after a fork deeper than the window: the consumer's copy can
+    /// only be rebuilt by following the chain again from the deployment.
     pub async fn next(&mut self) -> Result<BillingUpdate, FollowerError> {
         loop {
             let step = match self.phase {
@@ -132,10 +128,13 @@ impl<S: ChainSource> BillingFollower<S> {
                         tokio::time::sleep(self.config.poll_interval).await;
                     }
                 }
-                Err(StepError::DeepFork) => self.reset(),
-                Err(StepError::State(error)) => {
-                    tracing::error!(%error, "billing state rejected an op");
-                    return Err(error.into());
+                Err(StepError::DeepFork) => {
+                    metrics::counter!(names::DEEP_FORKS).increment(1);
+                    tracing::error!(
+                        reorg_window = self.config.reorg_window,
+                        "reorganization deeper than the billing follower's window"
+                    );
+                    return Err(FollowerError::DeepFork);
                 }
             }
         }
@@ -152,7 +151,6 @@ impl<S: ChainSource> BillingFollower<S> {
             .first_block_at(self.config.deploy_block, head, registrations_from)
             .await?;
         let deep_end = head.number.saturating_sub(self.window_len());
-        self.next_expiry = period_end(now);
         if self.config.deploy_block > deep_end {
             self.tip = match self.config.deploy_block.checked_sub(1) {
                 Some(parent) => self.source.block(parent).await?,
@@ -226,7 +224,7 @@ impl<S: ChainSource> BillingFollower<S> {
         let (events, end) = self.page(cursor, deep_end, registered_from);
         let logs = self.read_logs(cursor, end, events).await?;
         for log in &logs {
-            if let Some((op, _)) = self.apply_event(log.event)? {
+            if let Some((op, _)) = self.apply_event(log.event) {
                 self.outbox.push(op);
             }
         }
@@ -236,11 +234,6 @@ impl<S: ChainSource> BillingFollower<S> {
             registered_from,
             started,
         };
-        if self.rebuilding {
-            // The snapshot sent once live carries these.
-            self.outbox.clear();
-            return Ok(None);
-        }
         Ok((!self.outbox.is_empty()).then(|| self.update(end)))
     }
 
@@ -258,7 +251,6 @@ impl<S: ChainSource> BillingFollower<S> {
     async fn live_round(&mut self) -> Result<Option<BillingUpdate>, StepError> {
         let head = self.source.latest().await?;
         metrics::gauge!(names::HEAD_BLOCK).set(gauge_value(head.number));
-        self.expire();
 
         if let Some(tip) = self.tip {
             if head.hash == tip.hash {
@@ -347,7 +339,7 @@ impl<S: ChainSource> BillingFollower<S> {
         for (block, logs) in headers.into_iter().zip(by_block) {
             let mut inverses = Vec::new();
             for log in logs {
-                if let Some((op, inverse)) = self.apply_event(log.event)? {
+                if let Some((op, inverse)) = self.apply_event(log.event) {
                     self.outbox.push(op);
                     inverses.push(inverse);
                 }
@@ -370,7 +362,7 @@ impl<S: ChainSource> BillingFollower<S> {
             let end = cursor.saturating_add(self.log_range - 1).min(to);
             let logs = self.read_logs(cursor, end, EventSet::All).await?;
             for log in &logs {
-                if let Some((op, _)) = self.apply_event(log.event)? {
+                if let Some((op, _)) = self.apply_event(log.event) {
                     self.outbox.push(op);
                 }
             }
@@ -401,7 +393,9 @@ impl<S: ChainSource> BillingFollower<S> {
             // Queued with its inverses applied, so a failed read leaves a state to continue from.
             let undone = self.window.pop_back().expect("checked above");
             for inverse in undone.inverses.into_iter().rev() {
-                self.state.apply(inverse)?;
+                if let BillingOp::SetBilledRp { rp_id, billed } = inverse {
+                    self.set_billed(rp_id, billed);
+                }
                 self.outbox.push(inverse);
             }
             self.next_block = undone.block.number;
@@ -454,14 +448,19 @@ impl<S: ChainSource> BillingFollower<S> {
         }
     }
 
-    /// Applies one event and returns the op and its inverse; inactive registrations are skipped.
-    fn apply_event(
-        &mut self,
-        event: BillingEvent,
-    ) -> Result<Option<(BillingOp, BillingOp)>, StepError> {
-        let op = match event {
+    /// Applies one event and returns the op and its inverse; no-ops and inactive registrations are
+    /// skipped.
+    fn apply_event(&mut self, event: BillingEvent) -> Option<(BillingOp, BillingOp)> {
+        match event {
             BillingEvent::BilledRpUpdated { rp_id, billed } => {
-                BillingOp::SetBilledRp { rp_id, billed }
+                let was_billed = self.set_billed(rp_id, billed);
+                (was_billed != billed).then_some((
+                    BillingOp::SetBilledRp { rp_id, billed },
+                    BillingOp::SetBilledRp {
+                        rp_id,
+                        billed: was_billed,
+                    },
+                ))
             }
             BillingEvent::Registered {
                 rp_id,
@@ -469,23 +468,38 @@ impl<S: ChainSource> BillingFollower<S> {
                 nullifier,
             } => {
                 if !is_period_active(period_start, (self.clock)()) {
-                    return Ok(None);
+                    return None;
                 }
                 let Ok(nullifier) = FieldElement::try_from(nullifier) else {
                     metrics::counter!(names::INVALID_EVENTS).increment(1);
                     tracing::error!(%nullifier, "Registered nullifier outside the field");
-                    return Ok(None);
+                    return None;
                 };
-                BillingOp::AddRegistration {
-                    nullifier,
-                    registration: Registration {
-                        rp_id,
-                        period_start,
+                let registration = Registration {
+                    rp_id,
+                    period_start,
+                };
+                Some((
+                    BillingOp::AddRegistration {
+                        nullifier,
+                        registration,
                     },
-                }
+                    BillingOp::RemoveRegistration {
+                        nullifier,
+                        registration,
+                    },
+                ))
             }
-        };
-        Ok(self.state.apply(op)?.map(|inverse| (op, inverse)))
+        }
+    }
+
+    /// Sets whether `rp_id` is billed and returns whether it was.
+    fn set_billed(&mut self, rp_id: RpId, billed: bool) -> bool {
+        if billed {
+            !self.billed_rps.insert(rp_id)
+        } else {
+            self.billed_rps.remove(&rp_id)
+        }
     }
 
     /// Starts the window at the tip, so a reorganization of the tip itself can be undone.
@@ -505,26 +519,17 @@ impl<S: ChainSource> BillingFollower<S> {
 
     fn update(&mut self, head: u64) -> BillingUpdate {
         BillingUpdate {
-            reset: false,
             ops: std::mem::take(&mut self.outbox),
             head,
             backfill_done: matches!(self.phase, Phase::Live),
         }
     }
 
-    fn finish(&mut self, mut update: BillingUpdate) -> BillingUpdate {
-        // The consumer keeps its old copy until this one replaces it in a single update.
-        if std::mem::take(&mut self.rebuilding) {
-            update.reset = true;
-            update.ops = self.state.snapshot().collect();
-        }
+    fn finish(&mut self, update: BillingUpdate) -> BillingUpdate {
         self.announced |= update.backfill_done;
         metrics::gauge!(names::SYNCED_BLOCK).set(gauge_value(update.head));
-        metrics::gauge!(names::REGISTRATIONS).set(gauge_value(
-            u64::try_from(self.state.registration_count()).unwrap_or(u64::MAX),
-        ));
         metrics::gauge!(names::BILLED_RPS).set(gauge_value(
-            u64::try_from(self.state.billed_rp_count()).unwrap_or(u64::MAX),
+            u64::try_from(self.billed_rps.len()).unwrap_or(u64::MAX),
         ));
         update
     }
@@ -553,31 +558,6 @@ impl<S: ChainSource> BillingFollower<S> {
         tokio::time::sleep(delay).await;
     }
 
-    /// Starts over from an empty state after a fork deeper than the window.
-    fn reset(&mut self) {
-        tracing::error!(
-            reorg_window = self.config.reorg_window,
-            "reorganization deeper than the billing follower's window; starting over"
-        );
-        metrics::counter!(names::RESETS).increment(1);
-        self.state = BillingState::with_limit(self.config.max_registrations);
-        self.window.clear();
-        self.tip = None;
-        self.outbox.clear();
-        self.phase = Phase::Start;
-        self.rebuilding = true;
-        self.announced = false;
-    }
-
-    /// Drops ended periods' registrations without an op; consumers expire with their own clock.
-    fn expire(&mut self) {
-        let now = (self.clock)();
-        if now >= self.next_expiry {
-            self.state.expire(now);
-            self.next_expiry = period_end(now);
-        }
-    }
-
     fn window_len(&self) -> u64 {
         u64::try_from(self.config.reorg_window.max(1)).unwrap_or(u64::MAX)
     }
@@ -594,10 +574,8 @@ pub struct FollowerConfig {
     pub deploy_block: u64,
     /// The largest `eth_getLogs` block range; halved after a failure, regrown after successes.
     pub max_log_range: u64,
-    /// How many recent blocks a reorganization can undo; a deeper fork restarts the follower.
+    /// How many recent blocks a reorganization can undo; a deeper fork stops the follower.
     pub reorg_window: usize,
-    /// Bound on the registrations the follower holds.
-    pub max_registrations: usize,
     /// The chain's block time.
     pub block_time: Duration,
     /// How often to poll while a new block is due.
@@ -616,7 +594,6 @@ impl FollowerConfig {
             deploy_block,
             max_log_range: 10_000,
             reorg_window: 256,
-            max_registrations: 1 << 22,
             block_time: Duration::from_secs(2),
             poll_interval: Duration::from_millis(100),
             stalled_poll_interval: Duration::from_secs(1),
@@ -627,13 +604,11 @@ impl FollowerConfig {
 /// A change to the billing state, to apply in order to a copy of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BillingUpdate {
-    /// After a fork deeper than the window: replace the copy with `ops`, a full snapshot.
-    pub reset: bool,
     /// The state changes, in chain order. Each changes the state.
     pub ops: Vec<BillingOp>,
     /// The block the state is current up to.
     pub head: u64,
-    /// Whether the follower has caught up with the chain since it started or reset.
+    /// Whether the follower has caught up with the chain since it started.
     pub backfill_done: bool,
 }
 
@@ -662,9 +637,9 @@ pub enum FollowerError {
     /// Reading the chain ID, the head or the contract's code failed.
     #[error(transparent)]
     Source(#[from] SourceError),
-    /// The billing state rejected an op: it is full, or the logs registered a nullifier twice.
-    #[error("the billing state rejected an op: {0}")]
-    State(#[from] BillingStateError),
+    /// A reorganization reached past the window; follow the chain again from the deployment.
+    #[error("a reorganization reached past the billing follower's window")]
+    DeepFork,
 }
 
 /// Why one step did not finish.
@@ -674,18 +649,11 @@ enum StepError {
     ChainMoved,
     /// A reorganization reached past the window.
     DeepFork,
-    State(BillingStateError),
 }
 
 impl From<SourceError> for StepError {
     fn from(error: SourceError) -> Self {
         Self::Source(error)
-    }
-}
-
-impl From<BillingStateError> for StepError {
-    fn from(error: BillingStateError) -> Self {
-        Self::State(error)
     }
 }
 
@@ -707,11 +675,6 @@ enum Phase {
     },
     /// Following the chain block by block, with every block's header checked.
     Live,
-}
-
-/// The end of the billing period containing `now`, or `u64::MAX` if it cannot be computed.
-fn period_end(now: u64) -> u64 {
-    billing_period(now).map_or(u64::MAX, |(_, end)| end)
 }
 
 fn unix_now() -> u64 {

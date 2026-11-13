@@ -23,7 +23,7 @@ pub async fn handler(
     request: MatchRequest,
 ) -> Result<MatchResponse, enclave_types::Error> {
     let arrival = Instant::now();
-    if state.release().is_none() || state.engine_overran() {
+    if state.release().is_none() || state.engine_overran() || !state.billing().is_ready() {
         return Err(enclave_types::Error::NotReady);
     }
     // Rejected before opening: the Verifier's size limit holds whatever the host relays.
@@ -234,11 +234,16 @@ async fn sign(
 mod tests {
     use super::*;
     use crate::{
+        billing::BillingConfig,
         biometric_engine::{BiometricEngine, DeepFaceScores, GrayBadgeScores, LiveCapture},
         pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE_LIGHTGUARD},
-        test_support::{TEST_NOW, UnusedBiometricEngine, loaded_state, loaded_state_with_slots},
+        test_support::{
+            TEST_NOW, UnusedBiometricEngine, loaded_billing_state, loaded_state,
+            loaded_state_with_slots,
+        },
     };
     use eddsa_babyjubjub::EdDSAPrivateKey;
+    use flamingo_verifier_enclave_types::BillingUpdateRequest;
     use flamingo_verifier_sealed_types::{AatInputs, CHANNEL_DOMAIN, Entry, Payload};
     use pontifex::ChannelConsumer;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -679,6 +684,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refuses_requests_until_billing_has_caught_up() {
+        let state = loaded_billing_state(BillingConfig {
+            max_registrations: 1,
+        });
+        let request = MatchRequest {
+            body: vec![0; 2048].into(),
+        };
+        assert_eq!(
+            handler(Arc::clone(&state), request.clone()).await,
+            Err(enclave_types::Error::NotReady)
+        );
+        state
+            .billing()
+            .apply(
+                &BillingUpdateRequest {
+                    seq: 0,
+                    ops: Vec::new(),
+                    backfill_done: false,
+                },
+                state.now(),
+            )
+            .unwrap();
+        assert_eq!(
+            handler(Arc::clone(&state), request.clone()).await,
+            Err(enclave_types::Error::NotReady)
+        );
+        state
+            .billing()
+            .apply(
+                &BillingUpdateRequest {
+                    seq: 1,
+                    ops: Vec::new(),
+                    backfill_done: true,
+                },
+                state.now(),
+            )
+            .unwrap();
+        // Past the readiness gate: the body is not a sealed request.
+        assert_eq!(
+            handler(state, request).await,
+            Err(enclave_types::Error::RequestNotOpened)
+        );
+    }
+
+    #[tokio::test]
     async fn a_processed_request_never_runs_again() {
         let failing = engine(0.5);
         let calls = Arc::clone(&failing.calls);
@@ -788,8 +838,13 @@ mod tests {
         let calls = Arc::clone(&slow.calls);
         let terminated = Arc::clone(&slow.terminated);
         let state = Arc::new(
-            EnclaveState::generate(Arc::new(EchoAttestor), Box::new(slow), TEST_ENGINE_HASH)
-                .unwrap(),
+            EnclaveState::generate(
+                Arc::new(EchoAttestor),
+                Box::new(slow),
+                TEST_ENGINE_HASH,
+                None,
+            )
+            .unwrap(),
         );
         // DeepFace has time to finish, but the queued GrayBadge request expires first.
         let manifest = manifest_with_slots(TEST_ENGINE_HASH, 1, SLOTS);

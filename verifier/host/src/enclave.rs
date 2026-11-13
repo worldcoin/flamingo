@@ -5,7 +5,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use flamingo_verifier_enclave_types as enclave_types;
 use flamingo_verifier_enclave_types::{
-    GetEncryptionKeyRequest, HealthRequest, KeyAttestation, MatchRequest, MatchResponse,
+    BillingStatus, BillingUpdateRequest, GetEncryptionKeyRequest, HealthRequest, KeyAttestation,
+    MatchRequest, MatchResponse,
 };
 use pontifex::Request;
 use pontifex::client::ConnectionDetails;
@@ -35,6 +36,9 @@ pub trait EnclaveClient: Send + Sync {
 
     /// Runs a match inside the enclave.
     async fn run_match(&self, request: MatchRequest) -> Result<MatchResponse, Error>;
+
+    /// Applies one WIP-107 billing state update to the enclave's copy.
+    async fn update_billing(&self, request: BillingUpdateRequest) -> Result<BillingStatus, Error>;
 }
 
 /// Pontifex-backed enclave client.
@@ -83,5 +87,9 @@ impl EnclaveClient for PontifexEnclaveClient {
             Duration::from_millis(metadata.max_response_slot_millis) + Duration::from_secs(5),
         )
         .await
+    }
+
+    async fn update_billing(&self, request: BillingUpdateRequest) -> Result<BillingStatus, Error> {
+        self.call(request, CONTROL_REQUEST_TIMEOUT).await
     }
 }

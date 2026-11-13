@@ -5,9 +5,12 @@ use std::{
     sync::Arc,
 };
 
-use crate::PublishedMetadata;
+use alloy::primitives::Address;
+
+use crate::{PublishedMetadata, billing::BillingConfig};
 
 use clap::{Parser, ValueEnum};
+use flamingo_verifier_billing_follower::RpcUrl;
 
 const DEFAULT_PORT: u16 = 8000;
 const DEFAULT_WS_IDLE_TIMEOUT_SECS: u64 = 30;
@@ -68,6 +71,54 @@ pub struct HostConfig {
     /// Maximum WebSocket sessions served at once, per host process.
     #[arg(long = "ws-max-connections", env = "WS_MAX_CONNECTIONS", default_value_t = default_ws_max_connections())]
     pub ws_max_connections: NonZeroUsize,
+
+    /// The JSON-RPC endpoint of the chain hosting the WIP-107 Billing Contract. Unset turns
+    /// billing off, which an enclave image that bills never becomes ready under.
+    #[arg(
+        long = "billing-rpc-url",
+        env = "BILLING_RPC_URL",
+        value_parser = RpcUrlParser,
+        hide_env_values = true,
+        requires_all = ["billing_chain_id", "billing_contract", "billing_deploy_block"],
+    )]
+    pub billing_rpc_url: Option<RpcUrl>,
+
+    /// The chain hosting the Billing Contract. Must match the enclave image's.
+    #[arg(
+        long = "billing-chain-id",
+        env = "BILLING_CHAIN_ID",
+        requires = "billing_rpc_url"
+    )]
+    pub billing_chain_id: Option<u64>,
+
+    /// The Billing Contract's address. Must match the enclave image's.
+    #[arg(
+        long = "billing-contract",
+        env = "BILLING_CONTRACT",
+        requires = "billing_rpc_url"
+    )]
+    pub billing_contract: Option<Address>,
+
+    /// The block the Billing Contract was deployed in.
+    #[arg(
+        long = "billing-deploy-block",
+        env = "BILLING_DEPLOY_BLOCK",
+        requires = "billing_rpc_url"
+    )]
+    pub billing_deploy_block: Option<u64>,
+}
+
+impl HostConfig {
+    /// The billing configuration, or `None` if billing is off. Parsing sets all of it or none.
+    #[must_use]
+    pub fn billing(&self) -> Option<BillingConfig> {
+        Some(BillingConfig {
+            rpc_url: self.billing_rpc_url.clone()?,
+            chain_id: self.billing_chain_id?,
+            contract: self.billing_contract?,
+            deploy_block: self.billing_deploy_block?,
+        })
+    }
 }
 
 impl Default for HostConfig {
@@ -80,7 +131,38 @@ impl Default for HostConfig {
             port: default_port(),
             ws_idle_timeout: default_ws_idle_timeout(),
             ws_max_connections: default_ws_max_connections(),
+            billing_rpc_url: None,
+            billing_chain_id: None,
+            billing_contract: None,
+            billing_deploy_block: None,
         }
+    }
+}
+
+#[derive(Clone)]
+struct RpcUrlParser;
+
+impl clap::builder::TypedValueParser for RpcUrlParser {
+    type Value = RpcUrl;
+
+    fn parse_ref(
+        &self,
+        _: &clap::Command,
+        _: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        // Clap's default error echoes the input, which carries the provider's API key.
+        let url = value
+            .to_str()
+            .and_then(|value| value.parse::<url::Url>().ok())
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+            .ok_or_else(|| {
+                clap::Error::raw(
+                    clap::error::ErrorKind::ValueValidation,
+                    "BILLING_RPC_URL must be an HTTP or HTTPS URL",
+                )
+            })?;
+        Ok(RpcUrl(url))
     }
 }
 
@@ -129,6 +211,49 @@ mod tests {
     use clap::Parser as _;
 
     use super::{Environment, HostConfig};
+
+    const BILLING: [&str; 8] = [
+        "--billing-rpc-url",
+        "https://one.example.com/v2/key-one",
+        "--billing-chain-id",
+        "480",
+        "--billing-contract",
+        "0x1111111111111111111111111111111111111111",
+        "--billing-deploy-block",
+        "42",
+    ];
+
+    #[test]
+    fn billing_is_set_in_full_or_not_at_all() {
+        let base = ["host", "--enclave-cid", "16", "--enclave-port", "1000"];
+        assert!(parse(&base).unwrap().billing().is_none());
+
+        let billing = parse(&[base.as_slice(), &BILLING].concat())
+            .unwrap()
+            .billing()
+            .expect("billing is configured");
+        assert_eq!(billing.rpc_url.0.host_str(), Some("one.example.com"));
+        assert_eq!(billing.chain_id, 480);
+        assert_eq!(billing.deploy_block, 42);
+
+        for missing in [0, 2, 4, 6] {
+            let mut partial = BILLING.to_vec();
+            partial.drain(missing..missing + 2);
+            assert!(parse(&[base.as_slice(), &partial].concat()).is_err());
+        }
+    }
+
+    #[test]
+    fn billing_urls_are_never_echoed() {
+        let base = ["host", "--enclave-cid", "16", "--enclave-port", "1000"];
+        let config = parse(&[base.as_slice(), &BILLING].concat()).unwrap();
+        assert!(!format!("{config:?}").contains("key-one"));
+
+        let mut invalid = BILLING.to_vec();
+        invalid[1] = "ftp://secret-key@example.com";
+        let error = parse(&[base.as_slice(), &invalid].concat()).unwrap_err();
+        assert!(!error.to_string().contains("secret-key"));
+    }
 
     fn parse(args: &[&str]) -> Result<HostConfig, clap::Error> {
         HostConfig::try_parse_from(args)

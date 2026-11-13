@@ -55,6 +55,7 @@ metrics = "0.24"
 pontifex = { version = "3.1.0", default-features = false }
 poseidon2 = { package = "taceo-poseidon2", version = "0.3" }
 rand = "0.8"
+siphasher = "1.0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls", "stream"] }
 serde = { version = "1.0", features = ["derive"] }

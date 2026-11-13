@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flamingo_verifier_enclave_types::{KeyAttestation, MatchRequest, MatchResponse};
+use flamingo_verifier_enclave_types::{
+    BillingStatus, BillingUpdateRequest, KeyAttestation, MatchRequest, MatchResponse,
+};
 use flamingo_verifier_host::enclave::{self, EnclaveClient};
 use flamingo_verifier_host::{AppState, HostConfig};
 
@@ -44,6 +46,13 @@ impl EnclaveClient for StubEnclaveClient {
         self.match_result
             .clone()
             .expect("route ran a match but the stub was not configured to answer")
+    }
+
+    async fn update_billing(
+        &self,
+        _: BillingUpdateRequest,
+    ) -> Result<BillingStatus, enclave::Error> {
+        panic!("no route pushes billing state")
     }
 }
 

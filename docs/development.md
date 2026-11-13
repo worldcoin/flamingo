@@ -78,8 +78,12 @@ The host reads every setting from an environment variable and an equivalent CLI 
 | `--port` | `PORT` | `8000` | API listen port. |
 | `--ws-idle-timeout-secs` | `WS_IDLE_TIMEOUT_SECS` | `30` | Idle deadline for each WebSocket session phase. |
 | `--ws-max-connections` | `WS_MAX_CONNECTIONS` | `100` | Concurrent WebSocket sessions per host process. |
+| `--billing-rpc-url` | `BILLING_RPC_URL` | unset | JSON-RPC endpoint of the Billing Contract's chain; unset turns billing off. Never logged. |
+| `--billing-chain-id` | `BILLING_CHAIN_ID` | unset | The Billing Contract's chain; the follower fails on another one. |
+| `--billing-contract` | `BILLING_CONTRACT` | unset | The Billing Contract's address. |
+| `--billing-deploy-block` | `BILLING_DEPLOY_BLOCK` | unset | The block the Billing Contract was deployed in. |
 
-`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The API host publishes configured provider metadata but does not provision enclave manifests. The enclave accepts only a manifest whose `engine_hash` matches the SHA-384 of its worker executable and reports not ready until the provisioner has loaded it.
+`PORT`, `WS_IDLE_TIMEOUT_SECS`, and `WS_MAX_CONNECTIONS` reject zero. The four billing settings without a default are set together or not at all. The API host publishes configured provider metadata but does not provision enclave manifests. The enclave accepts only a manifest whose `engine_hash` matches the SHA-384 of its worker executable and reports not ready until the provisioner has loaded it.
 
 ```bash
 RUST_LOG=info ENCLAVE_CID=16 ENCLAVE_PORT=1000 \

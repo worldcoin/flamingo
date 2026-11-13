@@ -11,12 +11,14 @@
     dead_code
 )]
 
+mod billing;
 mod error;
 mod health;
 mod keys;
 mod matches;
 mod release;
 
+pub use billing::{BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS};
 pub use error::Error;
 pub use health::HealthRequest;
 pub use keys::{GetEncryptionKeyRequest, KeyAttestation};

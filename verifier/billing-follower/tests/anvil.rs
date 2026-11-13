@@ -1,6 +1,9 @@
 //! The follower on anvil, with `BillingEventEmitter`'s events; run with `-- --ignored`.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use alloy::{
     network::EthereumWallet,
@@ -11,8 +14,8 @@ use alloy::{
     sol,
 };
 use eyre::{Result, eyre};
-use flamingo_verifier_billing_follower::{BillingFollower, BillingUpdate, FollowerConfig};
-use flamingo_verifier_billing_state::BillingState;
+use flamingo_verifier_billing_follower::{BillingFollower, BillingUpdate, FollowerConfig, RpcUrl};
+use flamingo_verifier_billing_state::{BillingOp, Registration};
 use world_id_primitives::{FieldElement, billing::period_start, rp::RpId};
 
 sol!(
@@ -31,6 +34,45 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// The billed RPs and registrations, built only from the follower's updates.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BillingState {
+    billed_rps: HashSet<RpId>,
+    registrations: HashMap<FieldElement, Registration>,
+}
+
+impl BillingState {
+    fn apply(&mut self, op: BillingOp) {
+        match op {
+            BillingOp::SetBilledRp { rp_id, billed } if billed => {
+                self.billed_rps.insert(rp_id);
+            }
+            BillingOp::SetBilledRp { rp_id, .. } => {
+                self.billed_rps.remove(&rp_id);
+            }
+            BillingOp::AddRegistration {
+                nullifier,
+                registration,
+            } => {
+                self.registrations.insert(nullifier, registration);
+            }
+            BillingOp::RemoveRegistration { nullifier, .. } => {
+                self.registrations.remove(&nullifier);
+            }
+        }
+    }
+
+    fn is_billed(&self, rp_id: RpId) -> bool {
+        self.billed_rps.contains(&rp_id)
+    }
+
+    fn is_registered(&self, nullifier: FieldElement, rp_id: RpId) -> bool {
+        self.registrations
+            .get(&nullifier)
+            .is_some_and(|registration| registration.rp_id == rp_id)
+    }
+}
+
 /// A copy of the state built only from the follower's updates.
 #[derive(Default)]
 struct Mirror {
@@ -41,11 +83,8 @@ struct Mirror {
 
 impl Mirror {
     fn apply(&mut self, update: BillingUpdate) {
-        if update.reset {
-            self.state = BillingState::default();
-        }
         for op in update.ops {
-            self.state.apply(op).expect("ops apply to the copy");
+            self.state.apply(op);
         }
         self.head = update.head;
         self.backfill_done = update.backfill_done;
@@ -114,11 +153,12 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
         stalled_poll_interval: Duration::from_millis(200),
         ..FollowerConfig::new(ANVIL_CHAIN_ID, *emitter.address(), deploy_block)
     };
-    let mut follower = BillingFollower::connect(anvil.endpoint_url(), config.clone()).await?;
+    let mut follower =
+        BillingFollower::connect(RpcUrl(anvil.endpoint_url()), config.clone()).await?;
     let mut mirror = Mirror::default();
     mirror.sync_to(&mut follower, backfilled).await?;
     assert!(mirror.state.is_billed(rp));
-    assert!(mirror.state.is_registered(nullifier(1), rp, now()));
+    assert!(mirror.state.is_registered(nullifier(1), rp));
 
     let snapshot: U256 = provider.raw_request("evm_snapshot".into(), ()).await?;
     let orphaned = send(
@@ -128,7 +168,7 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     )
     .await?;
     mirror.sync_to(&mut follower, orphaned).await?;
-    assert!(mirror.state.is_registered(nullifier(2), rp, now()));
+    assert!(mirror.state.is_registered(nullifier(2), rp));
 
     let reverted: bool = provider
         .raw_request("evm_revert".into(), (snapshot,))
@@ -143,15 +183,14 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     )
     .await?;
     mirror.sync_to(&mut follower, replacing).await?;
-    assert!(!mirror.state.is_registered(nullifier(2), rp, now()));
-    assert!(mirror.state.is_registered(nullifier(3), rp, now()));
-    assert!(mirror.state.is_registered(nullifier(1), rp, now()));
+    assert!(!mirror.state.is_registered(nullifier(2), rp));
+    assert!(mirror.state.is_registered(nullifier(3), rp));
+    assert!(mirror.state.is_registered(nullifier(1), rp));
 
-    let mut fresh = BillingFollower::connect(anvil.endpoint_url(), config).await?;
+    let mut fresh = BillingFollower::connect(RpcUrl(anvil.endpoint_url()), config).await?;
     let mut fresh_mirror = Mirror::default();
     fresh_mirror.sync_to(&mut fresh, replacing).await?;
     assert_eq!(fresh_mirror.state, mirror.state);
-    assert_eq!(fresh.state(), follower.state());
 
     Ok(())
 }

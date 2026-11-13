@@ -158,8 +158,13 @@ pub use flamingo_verifier_sealed_types::testing::{
 /// Builds state whose biometric engine must not be called.
 pub fn state_with(attestor: Arc<dyn Attestor>) -> Arc<EnclaveState> {
     Arc::new(
-        EnclaveState::generate(attestor, Box::new(UnusedBiometricEngine), TEST_ENGINE_HASH)
-            .expect("boot state should generate"),
+        EnclaveState::generate(
+            attestor,
+            Box::new(UnusedBiometricEngine),
+            TEST_ENGINE_HASH,
+            None,
+        )
+        .expect("boot state should generate"),
     )
 }
 
@@ -173,10 +178,30 @@ pub fn loaded_state_with_slots(
     engine: impl BiometricEngine + 'static,
     slots: &[u64],
 ) -> Arc<EnclaveState> {
-    let state = EnclaveState::generate(Arc::new(EchoAttestor), Box::new(engine), TEST_ENGINE_HASH)
-        .expect("boot state should generate");
+    let state = EnclaveState::generate(
+        Arc::new(EchoAttestor),
+        Box::new(engine),
+        TEST_ENGINE_HASH,
+        None,
+    )
+    .expect("boot state should generate");
     state
         .load_release(&manifest_with_slots(TEST_ENGINE_HASH, 1, slots))
+        .expect("the test manifest should load");
+    Arc::new(state)
+}
+
+/// A loaded state that bills with `config`, with an Engine that must not be called.
+pub fn loaded_billing_state(config: crate::billing::BillingConfig) -> Arc<EnclaveState> {
+    let state = EnclaveState::generate(
+        Arc::new(EchoAttestor),
+        Box::new(UnusedBiometricEngine),
+        TEST_ENGINE_HASH,
+        Some(config),
+    )
+    .expect("boot state should generate");
+    state
+        .load_release(&manifest(TEST_ENGINE_HASH, 1))
         .expect("the test manifest should load");
     Arc::new(state)
 }
