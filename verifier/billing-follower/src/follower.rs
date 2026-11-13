@@ -9,7 +9,6 @@ use alloy::primitives::Address;
 use flamingo_verifier_billing_state::{BillingOp, BillingState, BillingStateError, Registration};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use tokio::time::Instant;
-use url::Url;
 use world_id_primitives::{
     FieldElement,
     billing::{PERIOD_OVERLAP, billing_period, is_period_active, period_start},
@@ -17,7 +16,7 @@ use world_id_primitives::{
 
 use crate::{
     metrics::{self as names, gauge_value},
-    rpc::RpcSource,
+    rpc::{RpcSource, RpcUrl},
     schedule::{Backoff, PollSchedule},
     source::{BillingEvent, BlockRef, ChainLog, ChainSource, EventSet, SourceError},
 };
@@ -49,7 +48,7 @@ pub struct BillingFollower<S = RpcSource> {
 
 impl BillingFollower<RpcSource> {
     /// Follows `config.contract` over the HTTP endpoint `url`; fails as [`Self::with_source`] does.
-    pub async fn connect(url: Url, config: FollowerConfig) -> Result<Self, FollowerError> {
+    pub async fn connect(url: RpcUrl, config: FollowerConfig) -> Result<Self, FollowerError> {
         let source = RpcSource::new(url, config.contract);
         Self::with_source(source, config).await
     }

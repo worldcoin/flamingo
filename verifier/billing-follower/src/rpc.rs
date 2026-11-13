@@ -1,6 +1,6 @@
 //! [`ChainSource`] over JSON-RPC.
 
-use std::{future::IntoFuture, time::Duration};
+use std::{fmt, future::IntoFuture, time::Duration};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -28,26 +28,48 @@ const RATE_LIMIT_BACKOFF_MS: u64 = 200;
 /// The compute-unit budget the transport paces rate-limit retries against.
 const COMPUTE_UNITS_PER_SECOND: u64 = 330;
 
+/// A JSON-RPC endpoint. `Debug` shows only its host: provider URLs often carry API keys.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RpcUrl(pub Url);
+
+impl fmt::Debug for RpcUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0.host_str().unwrap_or("?"))
+    }
+}
+
 /// Reads the Billing Contract over one JSON-RPC endpoint; failover belongs in front of it.
-#[derive(Debug)]
 pub struct RpcSource {
     provider: RootProvider<Ethereum>,
+    url: RpcUrl,
     contract: Address,
+}
+
+/// Written by hand: the provider's own `Debug` prints the full URL.
+impl fmt::Debug for RpcSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RpcSource")
+            .field("url", &self.url)
+            .field("contract", &self.contract)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RpcSource {
     /// Reads the Billing Contract at `contract` over the HTTP endpoint `url`.
     #[must_use]
-    pub fn new(url: Url, contract: Address) -> Self {
+    pub fn new(url: RpcUrl, contract: Address) -> Self {
         let client = RpcClient::builder()
             .layer(RetryBackoffLayer::new(
                 RATE_LIMIT_RETRIES,
                 RATE_LIMIT_BACKOFF_MS,
                 COMPUTE_UNITS_PER_SECOND,
             ))
-            .http(url);
+            .http(url.0.clone());
         Self {
             provider: RootProvider::new(client),
+            url,
             contract,
         }
     }
@@ -189,5 +211,18 @@ mod tests {
         );
         assert_eq!(Registered::SIGNATURE, "Registered(uint64,uint64,uint256)");
         assert_eq!(BilledRpUpdated::SIGNATURE, "BilledRpUpdated(uint64,bool)");
+    }
+
+    #[test]
+    fn debug_shows_only_the_endpoint_host() {
+        let url = RpcUrl(
+            "https://worldchain.example.com/v2/secret-key"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(format!("{url:?}"), "worldchain.example.com");
+        let source = format!("{:?}", RpcSource::new(url, Address::ZERO));
+        assert!(source.contains("worldchain.example.com"));
+        assert!(!source.contains("secret-key"));
     }
 }

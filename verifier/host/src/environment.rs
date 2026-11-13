@@ -7,12 +7,10 @@ use std::{
 
 use alloy::primitives::Address;
 
-use crate::{
-    PublishedMetadata,
-    billing::{BillingConfig, RpcUrl},
-};
+use crate::{PublishedMetadata, billing::BillingConfig};
 
 use clap::{Parser, ValueEnum};
+use flamingo_verifier_billing_follower::RpcUrl;
 
 const DEFAULT_PORT: u16 = 8000;
 const DEFAULT_WS_IDLE_TIMEOUT_SECS: u64 = 30;

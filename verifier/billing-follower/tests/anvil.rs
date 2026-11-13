@@ -11,7 +11,7 @@ use alloy::{
     sol,
 };
 use eyre::{Result, eyre};
-use flamingo_verifier_billing_follower::{BillingFollower, BillingUpdate, FollowerConfig};
+use flamingo_verifier_billing_follower::{BillingFollower, BillingUpdate, FollowerConfig, RpcUrl};
 use flamingo_verifier_billing_state::BillingState;
 use world_id_primitives::{FieldElement, billing::period_start, rp::RpId};
 
@@ -114,7 +114,8 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
         stalled_poll_interval: Duration::from_millis(200),
         ..FollowerConfig::new(ANVIL_CHAIN_ID, *emitter.address(), deploy_block)
     };
-    let mut follower = BillingFollower::connect(anvil.endpoint_url(), config.clone()).await?;
+    let mut follower =
+        BillingFollower::connect(RpcUrl(anvil.endpoint_url()), config.clone()).await?;
     let mut mirror = Mirror::default();
     mirror.sync_to(&mut follower, backfilled).await?;
     assert!(mirror.state.is_billed(rp));
@@ -147,7 +148,7 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     assert!(mirror.state.is_registered(nullifier(3), rp, now()));
     assert!(mirror.state.is_registered(nullifier(1), rp, now()));
 
-    let mut fresh = BillingFollower::connect(anvil.endpoint_url(), config).await?;
+    let mut fresh = BillingFollower::connect(RpcUrl(anvil.endpoint_url()), config).await?;
     let mut fresh_mirror = Mirror::default();
     fresh_mirror.sync_to(&mut fresh, replacing).await?;
     assert_eq!(fresh_mirror.state, mirror.state);

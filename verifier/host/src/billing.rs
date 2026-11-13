@@ -6,19 +6,18 @@
 //! loses the stream, e.g. after it restarted, the host follows the chain again from the Billing
 //! Contract's deployment, which rebuilds the enclave's state from a new stream.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use alloy::primitives::Address;
 use anyhow::Context as _;
 use flamingo_verifier_billing_follower::{
-    BillingFollower, BillingUpdate, FollowerConfig, FollowerError,
+    BillingFollower, BillingUpdate, FollowerConfig, FollowerError, RpcUrl,
 };
 use flamingo_verifier_billing_state::BillingOp;
 use flamingo_verifier_enclave_types::{
     self as enclave_types, BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS,
 };
 use rand::Rng as _;
-use url::Url;
 
 use crate::{
     enclave::{self, EnclaveClient},
@@ -27,16 +26,6 @@ use crate::{
 
 /// Default bound on the registrations the host follows; the enclave image's should match.
 pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
-
-/// A JSON-RPC endpoint. `Debug` shows only its host: provider URLs often carry API keys.
-#[derive(Clone, PartialEq, Eq)]
-pub struct RpcUrl(pub Url);
-
-impl fmt::Debug for RpcUrl {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0.host_str().unwrap_or("?"))
-    }
-}
 
 /// What the host follows and where it reads it.
 #[derive(Debug, Clone)]
@@ -106,7 +95,7 @@ async fn connect(
 ) -> anyhow::Result<BillingFollower> {
     let mut failures: u32 = 0;
     loop {
-        match BillingFollower::connect(config.rpc_url.0.clone(), follower_config.clone()).await {
+        match BillingFollower::connect(config.rpc_url.clone(), follower_config.clone()).await {
             Ok(follower) => return Ok(follower),
             Err(FollowerError::Source(error)) => {
                 failures += 1;
@@ -478,16 +467,6 @@ mod tests {
         let last = recorder.pushes().pop().unwrap();
         assert_eq!(last.seq, 0);
         assert_eq!(last.ops, vec![registration(2)]);
-    }
-
-    #[test]
-    fn the_rpc_url_debug_shows_only_its_host() {
-        let url = RpcUrl(
-            "https://worldchain.example.com/v2/secret-key"
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(format!("{url:?}"), "worldchain.example.com");
     }
 
     #[test]
