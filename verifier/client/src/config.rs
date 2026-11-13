@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::client::Attestations;
 use crate::error::Error;
 use url::Url;
 
@@ -44,6 +45,10 @@ pub struct Config {
     /// Explicit development-only bypass of all PCR measurement checks.
     #[serde(default)]
     dangerously_skip_measurements: bool,
+    /// Test-only acceptance of the unsigned attestations of a `dev` Verifier instead of Nitro's.
+    #[cfg(feature = "dev")]
+    #[serde(default)]
+    dangerously_accept_dev_attestation: bool,
     /// How old an attestation document's own timestamp may be.
     #[serde(default = "default_max_attestation_age_millis")]
     max_attestation_age_millis: u64,
@@ -88,6 +93,22 @@ impl Config {
         Self::new_inner(host_url, vec![], true)
     }
 
+    /// Creates a configuration that accepts only the unsigned attestations of an in-process `dev`
+    /// Verifier, with the channel key commitment and `release_hash` bound as for Nitro documents.
+    ///
+    /// # Warning
+    /// Nothing proves the Verifier runs in an enclave. Use only in tests, never in production.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `host_url` is not a valid URL.
+    #[cfg(feature = "dev")]
+    pub fn dangerously_accept_dev_attestation(host_url: &str) -> Result<Self, Error> {
+        let mut config = Self::new_inner(host_url, vec![], true)?;
+        config.dangerously_accept_dev_attestation = true;
+        Ok(config)
+    }
+
     fn new_inner(
         host_url: &str,
         allowed_pcr_configs: Vec<Vec<PcrMeasurement>>,
@@ -102,6 +123,8 @@ impl Config {
             host_url,
             allowed_pcr_configs,
             dangerously_skip_measurements,
+            #[cfg(feature = "dev")]
+            dangerously_accept_dev_attestation: false,
             max_attestation_age_millis: default_max_attestation_age_millis(),
             connect_timeout_millis: default_connect_timeout_millis(),
             request_timeout_millis: default_request_timeout_millis(),
@@ -148,6 +171,13 @@ impl Config {
 
     /// Validates the measurement policy before constructing the verifier.
     fn validate(&self) -> Result<(), Error> {
+        #[cfg(feature = "dev")]
+        if self.dangerously_accept_dev_attestation && !self.dangerously_skip_measurements {
+            return Err(Error::InvalidConfig {
+                attribute: "dangerously_accept_dev_attestation".to_owned(),
+                reason: "requires dangerously_skip_measurements".to_owned(),
+            });
+        }
         self.verifier().map(|_| ())
     }
 
@@ -219,6 +249,19 @@ impl Config {
             configs.push(config);
         }
         Ok(Verifier::new(configs, max_age))
+    }
+
+    /// How the client verifies the enclave's attestations, after [`Self::verifier`] validated the
+    /// configuration.
+    pub(crate) fn attestations(&self) -> Result<Attestations, Error> {
+        let verifier = self.verifier()?;
+        #[cfg(feature = "dev")]
+        if self.dangerously_accept_dev_attestation {
+            return Ok(Attestations::Dev {
+                max_age: Duration::from_millis(self.max_attestation_age_millis),
+            });
+        }
+        Ok(Attestations::Nitro(verifier))
     }
 
     /// The host to call.
@@ -456,6 +499,51 @@ mod tests {
             .remove("dangerously_skip_measurements");
         json["allow_debug_measurements"] = serde_json::json!(true);
         assert!(Config::from_json(&json.to_string()).is_err());
+    }
+
+    #[cfg(not(feature = "dev"))]
+    #[test]
+    fn dev_attestations_need_the_dev_feature() {
+        let mut json = serde_json::to_value(
+            Config::dangerously_skip_measurements("http://localhost:8000").unwrap(),
+        )
+        .unwrap();
+        json["dangerously_accept_dev_attestation"] = serde_json::json!(true);
+        assert!(Config::from_json(&json.to_string()).is_err());
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn dev_attestations_are_explicit_and_survive_json_round_trip() {
+        use crate::client::Attestations;
+
+        let nitro = Config::dangerously_skip_measurements("http://localhost:8000").unwrap();
+        assert!(matches!(nitro.attestations(), Ok(Attestations::Nitro(_))));
+        let config = Config::dangerously_accept_dev_attestation("http://localhost:8000").unwrap();
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json["dangerously_accept_dev_attestation"], true);
+        assert!(matches!(
+            Config::from_json(&json.to_string()).unwrap().attestations(),
+            Ok(Attestations::Dev { .. })
+        ));
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn dev_attestations_require_skipping_measurements() {
+        let mut json =
+            serde_json::to_value(Config::new("http://localhost:8000", pcrs()).unwrap()).unwrap();
+        json["dangerously_accept_dev_attestation"] = serde_json::json!(true);
+        assert!(matches!(
+            Config::from_json(&json.to_string()),
+            Err(Error::InvalidConfig { .. })
+        ));
+        json["dangerously_skip_measurements"] = serde_json::json!(true);
+        json["allowed_pcr_configs"] = serde_json::json!([]);
+        assert!(matches!(
+            Config::from_json(&json.to_string()).unwrap().attestations(),
+            Ok(crate::client::Attestations::Dev { .. })
+        ));
     }
 
     #[test]

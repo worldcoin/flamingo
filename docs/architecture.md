@@ -10,6 +10,8 @@ The enclave generates encryption and signing keys at boot. Keys stay in memory a
 
 The enclave caches attestations and refreshes them every 10 minutes. Requests receive the last successful document while a refresh runs. If a refresh fails and the cached document is at least an hour old, the enclave exits.
 
+Tests run the Verifier in-process with the enclave's `dev` feature: a stub Engine, unsigned attestations and no vsock. Only a client built with its own `dev` feature and configured with `Config::dangerously_accept_dev_attestation` accepts them. The enclave binary does not compile with `dev` in release builds and refuses to start in debug builds.
+
 ## Flamingo Tokens
 
 The enclave validates request bounds, expiry, pipeline, match strictness and optional AAT against the loaded release and its own time, and rejects replays. Its interim adapter interprets `pipeline_id`, positions in `compare`, `pipeline_inputs` and LightGuard entry metadata to select the Engine operation and image roles; the Engine processes the image contents. A token signs the enclave's time, `R(SHA-256(data))` of each compared entry, the RP's `aud` and `nonce`, `compare_sources`, `engine_config_hash` over the loaded `release_hash`, pipeline and match strictness, and `billing_nullifier = 0`, since the enclave bills no RP yet. It carries no score. Binding the Credential image to a Credential is the job of the downstream proof (WIP-202). The request and token formats come from [`world-id-flamingo`](https://github.com/worldcoin/world-id-protocol/tree/main/crates/flamingo).

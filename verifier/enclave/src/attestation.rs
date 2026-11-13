@@ -19,7 +19,7 @@ pub const MAX_SERVABLE_AGE: Duration = Duration::from_hours(1);
 /// A document and the time it states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attestation {
-    /// The raw `COSE_Sign1` document.
+    /// The attestation document: `COSE_Sign1` from Nitro.
     pub document: Vec<u8>,
     /// The document's `timestamp`, in milliseconds since the Unix epoch.
     pub timestamp_millis: u64,

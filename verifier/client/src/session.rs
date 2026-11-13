@@ -14,7 +14,6 @@ use flamingo_verifier_api_types::{
 };
 use flamingo_verifier_sealed_types::{FailureReason, ReleaseManifest, Request, expected_claims};
 use futures_util::{SinkExt, StreamExt};
-use pontifex::attestation::Verifier;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -25,7 +24,7 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::client::{
-    VerifiedAssignment, VerifiedMatchResult, classify_envelope, ensure_claims_match,
+    Attestations, VerifiedAssignment, VerifiedMatchResult, classify_envelope, ensure_claims_match,
     open_verified_match, verify_assignment,
 };
 use crate::config::Config;
@@ -41,7 +40,7 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub struct FlamingoVerifierSession {
     socket: Socket,
     assignment: VerifiedAssignment,
-    verifier: Verifier,
+    attestations: Attestations,
     request_timeout: Duration,
     max_response_slots: usize,
 }
@@ -71,7 +70,7 @@ impl FlamingoVerifierSession {
             self.assignment.release(),
             self.max_response_slots,
             request,
-            &self.verifier,
+            &self.attestations,
             self.request_timeout,
         )
         .await;
@@ -95,7 +94,7 @@ pub fn build_request(config: &Config) -> Result<ClientRequestBuilder, Error> {
 /// Opens the WebSocket and verifies the assignment the host delivers on it.
 pub async fn connect(
     config: &Config,
-    verifier: Verifier,
+    attestations: Attestations,
     request: ClientRequestBuilder,
 ) -> Result<FlamingoVerifierSession, Error> {
     let socket_config = WebSocketConfig::default()
@@ -119,12 +118,13 @@ pub async fn connect(
         other => Error::WebSocket(other),
     })?;
 
-    let assignment = request_assignment(&mut socket, &verifier, config.request_timeout()).await?;
+    let assignment =
+        request_assignment(&mut socket, &attestations, config.request_timeout()).await?;
 
     Ok(FlamingoVerifierSession {
         socket,
         assignment,
-        verifier,
+        attestations,
         request_timeout: config.request_timeout(),
         max_response_slots: config.max_response_slots(),
     })
@@ -173,7 +173,7 @@ fn websocket_url(host: &Url) -> Result<Url, Error> {
 /// Sends the assignment request and returns the verified assignment.
 async fn request_assignment(
     socket: &mut Socket,
-    verifier: &Verifier,
+    attestations: &Attestations,
     request_timeout: Duration,
 ) -> Result<VerifiedAssignment, Error> {
     // One absolute deadline bounds the whole phase: ignored pings and the send do not extend it.
@@ -186,7 +186,7 @@ async fn request_assignment(
         match read_message(socket, deadline).await? {
             Message::Text(text) => {
                 let response = decode_assignment(text.as_str())?;
-                return verify_assignment(verifier, &response);
+                return verify_assignment(attestations, &response);
             }
             Message::Binary(_) => return Err(Error::MalformedMessage),
             Message::Close(_) => return Err(Error::ConnectionClosed),
@@ -202,7 +202,7 @@ async fn exchange_match(
     release: &ReleaseManifest,
     max_response_slots: usize,
     request: &Request,
-    verifier: &Verifier,
+    attestations: &Attestations,
     request_timeout: Duration,
 ) -> Result<VerifiedMatchResult, Error> {
     // Checks the bounds, the release, its timing budget and the AAT before any biometric data
@@ -241,7 +241,7 @@ async fn exchange_match(
                 if ciphertext.len() > MAX_MATCH_RESPONSE_BYTES {
                     return Err(Error::MalformedResult);
                 }
-                let result = open_verified_match(verifier, &ciphertext, opener)?;
+                let result = open_verified_match(attestations, &ciphertext, opener)?;
                 ensure_claims_match(&expected, request.billing_nullifier, &result)?;
                 return Ok(result);
             }
@@ -326,8 +326,11 @@ mod tests {
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
-    fn verifier() -> super::Verifier {
-        super::Verifier::new(vec![PcrConfig::new([0xab; 48])], Duration::from_mins(1))
+    fn verifier() -> super::Attestations {
+        super::Attestations::Nitro(pontifex::attestation::Verifier::new(
+            vec![PcrConfig::new([0xab; 48])],
+            Duration::from_mins(1),
+        ))
     }
 
     /// The client's default slot budget; the test manifest lists 4 slots.
