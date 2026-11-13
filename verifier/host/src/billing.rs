@@ -4,8 +4,8 @@
 //! The enclave holds the billing state. The pusher passes each follower update on as the next
 //! update of a numbered stream, and retries an update whose answer it lost. When the enclave
 //! loses the stream, e.g. after it restarted, or the follower meets a fork deeper than its window,
-//! the host follows the chain again from the Billing Contract's deployment, which rebuilds the
-//! enclave's state from a new stream.
+//! the host first clears the enclave's state so it stops serving, then follows the chain again from
+//! the Billing Contract's deployment and rebuilds from a new stream.
 
 use std::{sync::Arc, time::Duration};
 
@@ -68,6 +68,15 @@ pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyh
             }
         };
         metrics::counter!(names::BILLING_RESTARTS, "cause" => lost.cause()).increment(1);
+        // Drop any fork or partly applied state before the restart backoff, so the enclave does
+        // not keep serving while we rebuild.
+        if let Err(error) = invalidate(Arc::clone(&enclave)).await {
+            tracing::warn!(
+                error = ?error,
+                dependency = "enclave",
+                "could not clear the enclave's billing state after the stream was lost"
+            );
+        }
         let delay = restarts.next_delay();
         tracing::warn!(
             cause = lost.cause(),
@@ -129,6 +138,21 @@ async fn connect(
             Err(error) => return Err(error).context("the billing follower cannot start"),
         }
     }
+}
+
+/// Replaces the enclave's billing state with an empty stream that has not caught up, so it stops
+/// serving until a rebuild does.
+async fn invalidate(enclave: Arc<dyn EnclaveClient>) -> Result<BillingStatus, enclave::Error> {
+    Pusher::new(enclave)
+        .send(
+            BillingUpdateRequest {
+                seq: 0,
+                ops: Vec::new(),
+                backfill_done: false,
+            },
+            0,
+        )
+        .await
 }
 
 /// Passes one follower's updates to the enclave as one numbered stream.
@@ -416,6 +440,30 @@ mod tests {
             pushes[1..]
                 .iter()
                 .all(|push| push.ops == vec![registration(2)])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clearing_after_a_lost_stream_starts_an_empty_not_ready_stream() {
+        let recorder = Arc::new(Recorder::default());
+        recorder.answer(Err(enclave::Error::Timeout));
+        recorder.answer(Ok(BillingStatus {
+            registrations: 0,
+            max_registrations: 1 << 22,
+            ready: false,
+        }));
+
+        let status = invalidate(Arc::clone(&recorder) as Arc<dyn EnclaveClient>)
+            .await
+            .unwrap();
+        assert!(!status.ready);
+
+        let pushes = recorder.pushes();
+        assert_eq!(pushes.len(), 2);
+        assert!(
+            pushes
+                .iter()
+                .all(|push| { push.seq == 0 && push.ops.is_empty() && !push.backfill_done })
         );
     }
 }
