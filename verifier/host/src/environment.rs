@@ -106,10 +106,6 @@ pub struct HostConfig {
         requires = "billing_rpc_url"
     )]
     pub billing_deploy_block: Option<u64>,
-
-    /// Bound on the registrations the host follows. The enclave image's should not be smaller.
-    #[arg(long = "billing-max-registrations", env = "BILLING_MAX_REGISTRATIONS", default_value_t = default_max_registrations())]
-    pub billing_max_registrations: NonZeroUsize,
 }
 
 impl HostConfig {
@@ -121,7 +117,6 @@ impl HostConfig {
             chain_id: self.billing_chain_id?,
             contract: self.billing_contract?,
             deploy_block: self.billing_deploy_block?,
-            max_registrations: self.billing_max_registrations.get(),
         })
     }
 }
@@ -140,7 +135,6 @@ impl Default for HostConfig {
             billing_chain_id: None,
             billing_contract: None,
             billing_deploy_block: None,
-            billing_max_registrations: default_max_registrations(),
         }
     }
 }
@@ -208,11 +202,6 @@ const fn default_ws_idle_timeout() -> NonZeroU64 {
     NonZeroU64::new(DEFAULT_WS_IDLE_TIMEOUT_SECS).expect("default idle timeout is nonzero")
 }
 
-const fn default_max_registrations() -> NonZeroUsize {
-    NonZeroUsize::new(crate::billing::DEFAULT_MAX_REGISTRATIONS)
-        .expect("the default bound is nonzero")
-}
-
 const fn default_ws_max_connections() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_WS_MAX_CONNECTIONS).expect("default connection limit is nonzero")
 }
@@ -246,7 +235,6 @@ mod tests {
         assert_eq!(billing.rpc_url.0.host_str(), Some("one.example.com"));
         assert_eq!(billing.chain_id, 480);
         assert_eq!(billing.deploy_block, 42);
-        assert_eq!(billing.max_registrations, 1 << 22);
 
         for missing in [0, 2, 4, 6] {
             let mut partial = BILLING.to_vec();

@@ -11,20 +11,10 @@ use world_id_primitives::{FieldElement, billing::is_period_active, rp::RpId};
 pub struct BillingState {
     billed_rps: HashSet<RpId>,
     registrations: HashMap<FieldElement, Registration>,
-    max_registrations: Option<usize>,
 }
 
 impl BillingState {
-    /// An empty state that holds at most `max_registrations` registrations.
-    #[must_use]
-    pub fn with_limit(max_registrations: usize) -> Self {
-        Self {
-            max_registrations: Some(max_registrations),
-            ..Self::default()
-        }
-    }
-
-    /// Applies `op` and returns its undo op, or `None` for a no-op; errs when full or conflicting.
+    /// Applies `op` and returns its undo op, or `None` for a no-op; errs when conflicting.
     pub fn apply(&mut self, op: BillingOp) -> Result<Option<BillingOp>, BillingStateError> {
         match op {
             BillingOp::SetBilledRp { rp_id, billed } => {
@@ -45,11 +35,6 @@ impl BillingState {
                 Some(held) if *held == registration => Ok(None),
                 Some(_) => Err(BillingStateError::Conflict),
                 None => {
-                    if let Some(limit) = self.max_registrations
-                        && self.registrations.len() >= limit
-                    {
-                        return Err(BillingStateError::Full(limit));
-                    }
                     self.registrations.insert(nullifier, registration);
                     Ok(Some(BillingOp::RemoveRegistration {
                         nullifier,
@@ -102,22 +87,6 @@ impl BillingState {
         before - self.registrations.len()
     }
 
-    /// The ops that rebuild this state from an empty one, e.g. for a Verifier that rebooted.
-    pub fn snapshot(&self) -> impl Iterator<Item = BillingOp> + '_ {
-        let billed = self.billed_rps.iter().map(|&rp_id| BillingOp::SetBilledRp {
-            rp_id,
-            billed: true,
-        });
-        let registered = self
-            .registrations
-            .iter()
-            .map(|(&nullifier, &registration)| BillingOp::AddRegistration {
-                nullifier,
-                registration,
-            });
-        billed.chain(registered)
-    }
-
     /// The number of billed RPs.
     #[must_use]
     pub fn billed_rp_count(&self) -> usize {
@@ -128,13 +97,6 @@ impl BillingState {
     #[must_use]
     pub fn registration_count(&self) -> usize {
         self.registrations.len()
-    }
-
-    /// Whether the state holds its maximum number of registrations.
-    #[must_use]
-    pub fn is_full(&self) -> bool {
-        self.max_registrations
-            .is_some_and(|limit| self.registrations.len() >= limit)
     }
 }
 
@@ -282,21 +244,6 @@ mod tests {
     }
 
     #[test]
-    fn the_limit_bounds_registrations_only() {
-        let mut state = BillingState::with_limit(1);
-        state.apply(add(1, 7, NOV_2026)).unwrap();
-        assert!(state.is_full());
-        assert_eq!(
-            state.apply(add(2, 7, NOV_2026)),
-            Err(BillingStateError::Full(1))
-        );
-        assert_eq!(state.apply(add(1, 7, NOV_2026)), Ok(None));
-        state.apply(bill(7, true)).unwrap();
-        assert_eq!(state.registration_count(), 1);
-        assert_eq!(state.billed_rp_count(), 1);
-    }
-
-    #[test]
     fn registrations_count_only_for_their_rp_while_active() {
         let mut state = BillingState::default();
         state.apply(add(1, 7, DEC_2026)).unwrap();
@@ -318,22 +265,6 @@ mod tests {
         assert_eq!(state.expire(DEC_2026), 1);
         assert_eq!(state.registration(nullifier(1)), None);
         assert!(state.registration(nullifier(2)).is_some());
-    }
-
-    #[test]
-    fn a_snapshot_rebuilds_an_equal_state() {
-        let mut state = BillingState::with_limit(10);
-        state.apply(bill(7, true)).unwrap();
-        state.apply(bill(9, true)).unwrap();
-        state.apply(bill(9, false)).unwrap();
-        state.apply(add(1, 7, NOV_2026)).unwrap();
-        state.apply(add(2, 8, DEC_2026)).unwrap();
-
-        let mut rebuilt = BillingState::with_limit(10);
-        for op in state.snapshot() {
-            rebuilt.apply(op).unwrap();
-        }
-        assert_eq!(rebuilt, state);
     }
 
     #[test]

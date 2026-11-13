@@ -41,9 +41,6 @@ struct Mirror {
 
 impl Mirror {
     fn apply(&mut self, update: BillingUpdate) {
-        if update.reset {
-            self.state = BillingState::default();
-        }
         for op in update.ops {
             self.state.apply(op).expect("ops apply to the copy");
         }
@@ -152,7 +149,6 @@ async fn follows_backfill_live_blocks_and_a_reorganization() -> Result<()> {
     let mut fresh_mirror = Mirror::default();
     fresh_mirror.sync_to(&mut fresh, replacing).await?;
     assert_eq!(fresh_mirror.state, mirror.state);
-    assert_eq!(fresh.state(), follower.state());
 
     Ok(())
 }

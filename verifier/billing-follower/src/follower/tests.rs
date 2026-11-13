@@ -56,17 +56,12 @@ async fn follower(chain: &FakeChain, config: FollowerConfig) -> BillingFollower<
 #[derive(Default)]
 struct Mirror {
     state: BillingState,
-    resets: usize,
     head: u64,
     backfill_done: bool,
 }
 
 impl Mirror {
     fn apply(&mut self, update: BillingUpdate) {
-        if update.reset {
-            self.state = BillingState::default();
-            self.resets += 1;
-        }
         for op in update.ops {
             assert!(
                 self.state.apply(op).unwrap().is_some(),
@@ -84,12 +79,12 @@ impl Mirror {
         }
     }
 
-    fn assert_matches(&self, follower: &BillingFollower<FakeChain>) {
-        let mut rebuilt = BillingState::default();
-        for op in follower.state().snapshot() {
-            rebuilt.apply(op).unwrap();
-        }
-        assert_eq!(self.state, rebuilt);
+    /// Asserts the copy equals one built by a new follower from the chain as it is now.
+    async fn assert_matches(&self, chain: &FakeChain, config: FollowerConfig) {
+        let mut fresh = follower(chain, config).await;
+        let mut rebuilt = Self::default();
+        rebuilt.sync(&mut fresh, chain).await;
+        assert_eq!(self.state, rebuilt.state);
     }
 }
 
@@ -110,12 +105,12 @@ async fn backfills_then_follows_new_blocks() {
     let mut follower = follower(&chain, config(4)).await;
     let mut mirror = Mirror::default();
     mirror.sync(&mut follower, &chain).await;
-    mirror.assert_matches(&follower);
-    assert!(!follower.state().is_billed(RpId::new(7)));
-    assert!(follower.state().is_billed(RpId::new(8)));
+    mirror.assert_matches(&chain, config(4)).await;
+    assert!(!mirror.state.is_billed(RpId::new(7)));
+    assert!(mirror.state.is_billed(RpId::new(8)));
     assert!(
-        follower
-            .state()
+        mirror
+            .state
             .is_registered(nullifier(1), RpId::new(7), now())
     );
 
@@ -131,7 +126,7 @@ async fn backfills_then_follows_new_blocks() {
     assert_eq!(update.head, chain.head().number);
     assert!(update.ops.is_empty());
     mirror.apply(update);
-    mirror.assert_matches(&follower);
+    mirror.assert_matches(&chain, config(4)).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -150,9 +145,9 @@ async fn reads_registrations_only_from_the_active_periods() {
     let mut follower = follower(&chain, config(2)).await;
     let mut mirror = Mirror::default();
     mirror.sync(&mut follower, &chain).await;
-    mirror.assert_matches(&follower);
+    mirror.assert_matches(&chain, config(2)).await;
 
-    let state = follower.state();
+    let state = &mirror.state;
     assert!(state.is_billed(RpId::new(7)));
     assert_eq!(state.registration(nullifier(1)), None);
     assert!(state.is_registered(nullifier(2), RpId::new(7), now()));
@@ -186,15 +181,14 @@ async fn undoes_a_reorganization_within_the_window() {
         chain.mine(vec![registered(9, 7)]);
         chain.mine_empty(depth);
         mirror.sync(&mut follower, &chain).await;
-        mirror.assert_matches(&follower);
+        mirror.assert_matches(&chain, config(5)).await;
 
-        let state = follower.state();
+        let state = &mirror.state;
         assert!(state.is_registered(nullifier(9), RpId::new(7), now()));
         assert!(state.is_billed(RpId::new(7)));
         assert_eq!(state.registration(nullifier(2)).is_some(), depth < 2);
         assert_eq!(state.registration(nullifier(1)).is_some(), depth < 3);
         assert_eq!(state.is_billed(RpId::new(8)), depth < 3);
-        assert_eq!(mirror.resets, 0);
     }
 }
 
@@ -218,21 +212,21 @@ async fn waits_for_a_lagging_source_instead_of_undoing_blocks() {
         "a lagging source must not produce an update: {waited:?}"
     );
     assert!(
-        follower
-            .state()
+        mirror
+            .state
             .is_registered(nullifier(1), RpId::new(7), now())
     );
     assert!(
-        follower
-            .state()
+        mirror
+            .state
             .is_registered(nullifier(2), RpId::new(7), now())
     );
 
     chain.lag(0);
     chain.mine(vec![registered(3, 7)]);
     mirror.sync(&mut follower, &chain).await;
-    mirror.assert_matches(&follower);
-    assert_eq!(follower.state().registration_count(), 3);
+    mirror.assert_matches(&chain, config(5)).await;
+    assert_eq!(mirror.state.registration_count(), 3);
 }
 
 #[tokio::test(start_paused = true)]
@@ -257,8 +251,8 @@ async fn undoes_a_reorganization_onto_a_shorter_fork_at_once() {
         .unwrap();
     mirror.apply(update);
     mirror.sync(&mut follower, &chain).await;
-    mirror.assert_matches(&follower);
-    let state = follower.state();
+    mirror.assert_matches(&chain, config(6)).await;
+    let state = &mirror.state;
     for orphaned in [1, 2, 3] {
         assert_eq!(state.registration(nullifier(orphaned)), None);
     }
@@ -266,7 +260,7 @@ async fn undoes_a_reorganization_onto_a_shorter_fork_at_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn starts_over_after_a_fork_deeper_than_the_window() {
+async fn stops_after_a_fork_deeper_than_the_window() {
     let chain = FakeChain::new(NOV_2026 + DAY);
     chain.mine(vec![billed(7, true)]);
     chain.mine(vec![registered(1, 7)]);
@@ -279,18 +273,12 @@ async fn starts_over_after_a_fork_deeper_than_the_window() {
     chain.reorg(6);
     chain.mine(vec![registered(2, 8)]);
     chain.mine_empty(6);
-    // The consumer keeps its copy until one update replaces it with the rebuilt state.
-    let update = follower.next().await.unwrap();
-    assert!(update.reset && update.backfill_done, "{update:?}");
-    mirror.apply(update);
-    mirror.sync(&mut follower, &chain).await;
-    mirror.assert_matches(&follower);
-
-    assert_eq!(mirror.resets, 1);
-    let state = follower.state();
-    assert!(!state.is_billed(RpId::new(7)));
-    assert_eq!(state.registration(nullifier(1)), None);
-    assert!(state.is_registered(nullifier(2), RpId::new(8), now()));
+    let error = loop {
+        if let Err(error) = follower.next().await {
+            break error;
+        }
+    };
+    assert!(matches!(error, FollowerError::DeepFork), "{error:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -303,10 +291,10 @@ async fn retries_failed_reads() {
     chain.fail("eth_getLogs", 3);
     let mut mirror = Mirror::default();
     mirror.sync(&mut follower, &chain).await;
-    mirror.assert_matches(&follower);
+    mirror.assert_matches(&chain, config(3)).await;
     assert!(
-        follower
-            .state()
+        mirror
+            .state
             .is_registered(nullifier(1), RpId::new(7), now())
     );
 }
@@ -324,13 +312,13 @@ async fn shrinks_log_ranges_the_source_rejects() {
         max_log_range: 16,
         ..config(4)
     };
-    let mut follower = follower(&chain, config).await;
+    let mut follower = follower(&chain, config.clone()).await;
     let mut mirror = Mirror::default();
     mirror.sync(&mut follower, &chain).await;
-    mirror.assert_matches(&follower);
+    mirror.assert_matches(&chain, config).await;
     assert!(
-        follower
-            .state()
+        mirror
+            .state
             .is_registered(nullifier(1), RpId::new(7), now())
     );
 }
@@ -349,24 +337,7 @@ async fn skips_a_nullifier_outside_the_field() {
     let mut follower = follower(&chain, config(4)).await;
     let mut mirror = Mirror::default();
     mirror.sync(&mut follower, &chain).await;
-    assert_eq!(follower.state().registration_count(), 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn stops_on_a_nullifier_registered_twice() {
-    let chain = FakeChain::new(NOV_2026 + DAY);
-    chain.mine(vec![registered(1, 7), registered(1, 8)]);
-    let mut follower = follower(&chain, config(4)).await;
-    let error = loop {
-        match follower.next().await {
-            Ok(_) => {}
-            Err(error) => break error,
-        }
-    };
-    assert!(matches!(
-        error,
-        FollowerError::State(BillingStateError::Conflict)
-    ));
+    assert_eq!(mirror.state.registration_count(), 1);
 }
 
 #[tokio::test(start_paused = true)]

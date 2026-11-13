@@ -236,7 +236,7 @@ impl State {
                 }))
             }
             // A removal naming another registration than the held one finds nothing here. The
-            // host's full `BillingState` rejects it as a conflict before it is ever pushed.
+            // Billing Contract registers each nullifier once, for one RP and period.
             BillingOp::RemoveRegistration {
                 nullifier,
                 registration,

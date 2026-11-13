@@ -3,8 +3,9 @@
 //!
 //! The enclave holds the billing state. The pusher passes each follower update on as the next
 //! update of a numbered stream, and retries an update whose answer it lost. When the enclave
-//! loses the stream, e.g. after it restarted, the host follows the chain again from the Billing
-//! Contract's deployment, which rebuilds the enclave's state from a new stream.
+//! loses the stream, e.g. after it restarted, or the follower meets a fork deeper than its window,
+//! the host follows the chain again from the Billing Contract's deployment, which rebuilds the
+//! enclave's state from a new stream.
 
 use std::{sync::Arc, time::Duration};
 
@@ -24,9 +25,6 @@ use crate::{
     metrics::{self as names, gauge_value},
 };
 
-/// Default bound on the registrations the host follows; the enclave image's should match.
-pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
-
 /// What the host follows and where it reads it.
 #[derive(Debug, Clone)]
 pub struct BillingConfig {
@@ -38,54 +36,83 @@ pub struct BillingConfig {
     pub contract: Address,
     /// The block the Billing Contract was deployed in.
     pub deploy_block: u64,
-    /// Bound on the registrations the follower holds. Above the enclave's, the enclave fills up
-    /// and stops serving first.
-    pub max_registrations: usize,
 }
 
 /// Follows the Billing Contract and pushes its changes to the enclave until the follower fails.
 ///
-/// Chain reads and pushes are retried without end, so this returns only when the billing state
-/// itself is broken: the endpoints serve another chain, or the logs register a nullifier twice.
+/// Chain reads and pushes are retried without end, so this returns only when the follower cannot
+/// start or stops: the endpoints serve another chain or no contract.
 ///
 /// # Errors
-/// When the follower stops: the endpoints serve another chain, or the billing state rejects an op.
+/// When the follower cannot start or stops for another reason than a deep fork.
 pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyhow::Result<()> {
-    let follower_config = FollowerConfig {
-        max_registrations: config.max_registrations,
-        ..FollowerConfig::new(config.chain_id, config.contract, config.deploy_block)
-    };
-    let mut pusher = Pusher::new(enclave, config.max_registrations);
+    let follower_config =
+        FollowerConfig::new(config.chain_id, config.contract, config.deploy_block);
     // Restarts since a stream last caught up, which back off so an enclave that keeps rejecting
     // the state does not turn into back-to-back backfills.
     let mut restarts: u32 = 0;
     loop {
         let mut follower = connect(&config, follower_config.clone()).await?;
-        let error = loop {
-            let update = follower
-                .next()
-                .await
-                .context("the billing follower stopped")?;
+        let mut pusher = Pusher::new(Arc::clone(&enclave));
+        let lost = loop {
+            let update = match follower.next().await {
+                Ok(update) => update,
+                Err(FollowerError::DeepFork) => break StreamLost::DeepFork,
+                Err(error) => return Err(error).context("the billing follower stopped"),
+            };
             match pusher.push(&update).await {
                 Ok(status) => {
                     if update.backfill_done && status.ready {
                         restarts = 0;
                     }
                 }
-                Err(error) => break error,
+                Err(error) => break StreamLost::Enclave(error),
             }
         };
         restarts += 1;
-        metrics::counter!(names::BILLING_RESTARTS).increment(1);
+        metrics::counter!(names::BILLING_RESTARTS, "cause" => lost.cause()).increment(1);
         let delay = restart_delay(restarts);
         tracing::warn!(
-            error = ?error,
-            dependency = "enclave",
+            cause = lost.cause(),
+            error = ?lost.error(),
+            dependency = lost.dependency(),
             restarts,
             delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-            "the enclave lost the billing stream; following the chain again from the deployment"
+            "the billing stream was lost; following the chain again from the deployment"
         );
         tokio::time::sleep(delay).await;
+    }
+}
+
+/// Why the host follows the chain again from the deployment.
+#[derive(Debug)]
+enum StreamLost {
+    /// The follower met a fork deeper than its window.
+    DeepFork,
+    /// The enclave refused an update, e.g. after it restarted.
+    Enclave(enclave::Error),
+}
+
+impl StreamLost {
+    const fn cause(&self) -> &'static str {
+        match self {
+            Self::DeepFork => "deep_fork",
+            Self::Enclave(_) => "enclave",
+        }
+    }
+
+    const fn error(&self) -> Option<&enclave::Error> {
+        match self {
+            Self::DeepFork => None,
+            Self::Enclave(error) => Some(error),
+        }
+    }
+
+    const fn dependency(&self) -> &'static str {
+        match self {
+            Self::DeepFork => "billing_rpc",
+            Self::Enclave(_) => "enclave",
+        }
     }
 }
 
@@ -107,24 +134,20 @@ async fn connect(
     }
 }
 
-/// Passes the follower's updates to the enclave as one numbered stream.
+/// Passes one follower's updates to the enclave as one numbered stream.
 pub struct Pusher {
     client: Arc<dyn EnclaveClient>,
-    /// The `seq` of the next update; `0` starts a new stream.
+    /// The `seq` of the next update; `0` starts the stream.
     next_seq: u64,
-    max_registrations: usize,
-    warned_capacity: bool,
 }
 
 impl Pusher {
     /// A pusher whose first push starts a new stream.
     #[must_use]
-    pub const fn new(client: Arc<dyn EnclaveClient>, max_registrations: usize) -> Self {
+    pub const fn new(client: Arc<dyn EnclaveClient>) -> Self {
         Self {
             client,
             next_seq: 0,
-            max_registrations,
-            warned_capacity: false,
         }
     }
 
@@ -132,11 +155,8 @@ impl Pusher {
     ///
     /// # Errors
     /// When the enclave refuses the update, e.g. it restarted or rejected the state. The stream is
-    /// then lost: the next push starts a new one, which must carry the whole state.
+    /// then lost: only a new follower and pusher, from the deployment, can rebuild the state.
     pub async fn push(&mut self, update: &BillingUpdate) -> Result<BillingStatus, enclave::Error> {
-        if update.reset {
-            self.next_seq = 0;
-        }
         let parts = chunk_count(&update.ops);
         let mut status = self.send(update, 0, parts).await?;
         for index in 1..parts {
@@ -164,7 +184,7 @@ impl Pusher {
             match self.client.update_billing(request.clone()).await {
                 Ok(status) => {
                     metrics::counter!(names::BILLING_PUSHES, "result" => "ok").increment(1);
-                    self.record(status);
+                    record(status);
                     self.next_seq += 1;
                     return Ok(status);
                 }
@@ -187,7 +207,6 @@ impl Pusher {
                 Err(error) => {
                     metrics::counter!(names::BILLING_PUSHES, "result" => result_label(&error))
                         .increment(1);
-                    self.next_seq = 0;
                     return Err(error);
                 }
             }
@@ -195,23 +214,11 @@ impl Pusher {
     }
 }
 
-impl Pusher {
-    fn record(&mut self, status: BillingStatus) {
-        metrics::gauge!(names::BILLING_ENCLAVE_REGISTRATIONS)
-            .set(gauge_value(status.registrations));
-        metrics::gauge!(names::BILLING_ENCLAVE_MAX_REGISTRATIONS)
-            .set(gauge_value(status.max_registrations));
-        metrics::gauge!(names::BILLING_ENCLAVE_READY).set(if status.ready { 1.0 } else { 0.0 });
-        let own = u64::try_from(self.max_registrations).unwrap_or(u64::MAX);
-        if own > status.max_registrations && !self.warned_capacity {
-            self.warned_capacity = true;
-            tracing::warn!(
-                host_max_registrations = own,
-                enclave_max_registrations = status.max_registrations,
-                "the enclave holds fewer registrations than the host follows; it stops serving once full"
-            );
-        }
-    }
+fn record(status: BillingStatus) {
+    metrics::gauge!(names::BILLING_ENCLAVE_REGISTRATIONS).set(gauge_value(status.registrations));
+    metrics::gauge!(names::BILLING_ENCLAVE_MAX_REGISTRATIONS)
+        .set(gauge_value(status.max_registrations));
+    metrics::gauge!(names::BILLING_ENCLAVE_READY).set(if status.ready { 1.0 } else { 0.0 });
 }
 
 /// Updates needed for `ops`: one per [`MAX_BILLING_OPS`], and one even without ops, so an
@@ -337,7 +344,6 @@ mod tests {
 
     fn update(ops: Vec<BillingOp>, head: u64) -> BillingUpdate {
         BillingUpdate {
-            reset: false,
             ops,
             head,
             backfill_done: true,
@@ -345,10 +351,7 @@ mod tests {
     }
 
     fn pusher(recorder: &Arc<Recorder>) -> Pusher {
-        Pusher::new(
-            Arc::clone(recorder) as Arc<dyn EnclaveClient>,
-            DEFAULT_MAX_REGISTRATIONS,
-        )
+        Pusher::new(Arc::clone(recorder) as Arc<dyn EnclaveClient>)
     }
 
     #[tokio::test(start_paused = true)]
@@ -412,10 +415,11 @@ mod tests {
                 enclave_types::Error::BillingOutOfOrder
             ))
         ));
-
-        sync.push(&update(vec![registration(3)], 0)).await.unwrap();
-        let seqs: Vec<_> = recorder.pushes().iter().map(|push| push.seq).collect();
-        assert_eq!(seqs, [0, 1, 0], "the next push starts a new stream");
+        assert_eq!(
+            recorder.pushes().len(),
+            2,
+            "a refused update is not retried"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -436,37 +440,6 @@ mod tests {
                 .iter()
                 .all(|push| push.ops == vec![registration(2)])
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_smaller_enclave_bound_is_flagged() {
-        let recorder = Arc::new(Recorder::default());
-        let mut sync = pusher(&recorder);
-        sync.push(&update(Vec::new(), 10)).await.unwrap();
-        assert!(!sync.warned_capacity);
-
-        recorder.answer(Ok(BillingStatus {
-            registrations: 0,
-            max_registrations: 1,
-            ready: true,
-        }));
-        sync.push(&update(Vec::new(), 11)).await.unwrap();
-        assert!(sync.warned_capacity);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_follower_reset_starts_a_new_stream() {
-        let recorder = Arc::new(Recorder::default());
-        let mut sync = pusher(&recorder);
-        sync.push(&update(vec![registration(1)], 10)).await.unwrap();
-
-        let mut reset = update(vec![registration(2)], 12);
-        reset.reset = true;
-        sync.push(&reset).await.unwrap();
-
-        let last = recorder.pushes().pop().unwrap();
-        assert_eq!(last.seq, 0);
-        assert_eq!(last.ops, vec![registration(2)]);
     }
 
     #[test]
