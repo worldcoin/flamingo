@@ -16,7 +16,7 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use flamingo_verifier_billing_state::{BillingOp, BillingStateError, Registration};
+use flamingo_verifier_billing_state::{BillingOp, Registration};
 use flamingo_verifier_enclave_types::{
     self as enclave_types, BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS,
 };
@@ -74,7 +74,7 @@ impl BillingStore {
     /// # Errors
     /// [`enclave_types::Error::BillingRejected`] for too many ops, an op the state rejects or a
     /// store that bills nothing, and [`enclave_types::Error::BillingOutOfOrder`]
-    /// for a `seq` that neither follows nor repeats the last one. Neither changes the state. A
+    /// for a `seq` that neither follows nor repeats the last one, which changes nothing. A
     /// rejection ends the stream and stops serving until a new stream catches up.
     pub fn apply(
         &self,
@@ -119,14 +119,15 @@ impl Inner {
         }
         if update.seq == 0 {
             let mut state = State::new(config.max_registrations, self.state.digest_key);
-            apply_all(&mut state, &update.ops, now).map_err(rejected)?;
+            apply_all(&mut state, &update.ops, now)?;
             self.state = state;
             self.caught_up = false;
         } else if self.last_seq == Some(update.seq) {
             // A retry of an update whose answer the host lost.
             return Ok(());
         } else if self.last_seq.map(|seq| seq + 1) == Some(update.seq) {
-            apply_all(&mut self.state, &update.ops, now).map_err(rejected)?;
+            // A rejection ends the stream, so the partly applied state is never served.
+            apply_all(&mut self.state, &update.ops, now)?;
         } else {
             return Err(enclave_types::Error::BillingOutOfOrder);
         }
@@ -141,27 +142,18 @@ fn boot_key() -> (u64, u64) {
     (OsRng.next_u64(), OsRng.next_u64())
 }
 
-/// Applies `ops` in order at `now`, or none of them.
-fn apply_all(state: &mut State, ops: &[BillingOp], now: u64) -> Result<(), BillingStateError> {
-    let mut inverses = Vec::with_capacity(ops.len());
-    for op in ops {
-        match state.apply(*op, now) {
-            Ok(inverse) => inverses.extend(inverse),
-            Err(error) => {
-                for inverse in inverses.into_iter().rev() {
-                    // An inverse undoes an op just applied, so it cannot fail.
-                    let _ = state.apply(inverse, now);
-                }
-                return Err(error);
-            }
+/// Applies `ops` in order at `now`, stopping at the first the bound rejects.
+fn apply_all(state: &mut State, ops: &[BillingOp], now: u64) -> Result<(), enclave_types::Error> {
+    for &op in ops {
+        if !state.apply(op, now) {
+            tracing::error!(
+                max_registrations = state.max_registrations,
+                "billing update rejected: the registration bound is reached"
+            );
+            return Err(enclave_types::Error::BillingRejected);
         }
     }
     Ok(())
-}
-
-fn rejected(error: BillingStateError) -> enclave_types::Error {
-    tracing::error!(%error, "billing update rejected");
-    enclave_types::Error::BillingRejected
 }
 
 fn status(inner: &Inner, max_registrations: usize) -> BillingStatus {
@@ -198,21 +190,17 @@ impl State {
         }
     }
 
-    /// Applies `op` at `now` and returns the op that undoes it, or `None` if it changed nothing.
+    /// Applies `op` at `now`, or returns `false` when a new registration would pass the bound.
     ///
     /// A registration of a period that ended by `now` is dropped, as expiry would drop it.
-    fn apply(&mut self, op: BillingOp, now: u64) -> Result<Option<BillingOp>, BillingStateError> {
+    fn apply(&mut self, op: BillingOp, now: u64) -> bool {
         match op {
             BillingOp::SetBilledRp { rp_id, billed } => {
-                let was_billed = if billed {
-                    !self.billed_rps.insert(rp_id)
+                if billed {
+                    self.billed_rps.insert(rp_id);
                 } else {
-                    self.billed_rps.remove(&rp_id)
-                };
-                Ok((was_billed != billed).then_some(BillingOp::SetBilledRp {
-                    rp_id,
-                    billed: was_billed,
-                }))
+                    self.billed_rps.remove(&rp_id);
+                }
             }
             BillingOp::AddRegistration {
                 nullifier,
@@ -220,20 +208,16 @@ impl State {
             } => {
                 let digest = self.digest(nullifier, registration.rp_id);
                 if has_ended(registration.period_start, now) || self.holds(digest, registration) {
-                    return Ok(None);
+                    return true;
                 }
                 if self.registrations >= self.max_registrations {
-                    return Err(BillingStateError::Full(self.max_registrations));
+                    return false;
                 }
                 self.periods
                     .entry(registration.period_start)
                     .or_default()
                     .insert(digest);
                 self.registrations += 1;
-                Ok(Some(BillingOp::RemoveRegistration {
-                    nullifier,
-                    registration,
-                }))
             }
             // A removal naming another registration than the held one finds nothing here. The
             // Billing Contract registers each nullifier once, for one RP and period.
@@ -242,20 +226,16 @@ impl State {
                 registration,
             } => {
                 let digest = self.digest(nullifier, registration.rp_id);
-                let removed = self
+                if self
                     .periods
                     .get_mut(&registration.period_start)
-                    .is_some_and(|digests| digests.remove(&digest));
-                if !removed {
-                    return Ok(None);
+                    .is_some_and(|digests| digests.remove(&digest))
+                {
+                    self.registrations -= 1;
                 }
-                self.registrations -= 1;
-                Ok(Some(BillingOp::AddRegistration {
-                    nullifier,
-                    registration,
-                }))
             }
         }
+        true
     }
 
     fn digest(&self, nullifier: FieldElement, rp_id: RpId) -> u64 {
@@ -454,14 +434,13 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_update_changes_nothing() {
+    fn a_rejected_update_ends_its_stream() {
         let store = BillingStore::new(Some(BillingConfig {
             max_registrations: 2,
         }));
         store
             .apply(&update(0, vec![add(1, NOV_2026)], true), NOW)
             .unwrap();
-        // The second op exceeds the bound, so the first must not stay either.
         assert_eq!(
             store.apply(
                 &update(1, vec![add(2, NOV_2026), add(3, NOV_2026)], true),
@@ -469,13 +448,11 @@ mod tests {
             ),
             Err(enclave_types::Error::BillingRejected)
         );
-        assert!(!registered(&store, 2));
         assert_eq!(
             store.apply(&update(1, Vec::new(), true), NOW),
             Err(enclave_types::Error::BillingOutOfOrder)
         );
         assert!(!store.is_ready());
-        assert!(registered(&store, 1));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Follows the WIP-107 Billing Contract at the latest block and emits the billing state the Flamingo host supplies to the enclave (WIP-107 §4.8).
 
-`BillingFollower::next` returns `BillingUpdate`s: the `BillingOp`s to apply to a copy of `flamingo_verifier_billing_state::BillingState`, the block the state is current up to, and whether the follower has caught up. The follower:
+`BillingFollower::next` returns `BillingUpdate`s: the `flamingo_verifier_billing_state::BillingOp`s to apply to a copy of the billing state, the block the state is current up to, and whether the follower has caught up. The follower:
 
 - backfills `BilledRpUpdated` logs from the Contract's deployment and `Registered` logs from the start of the earliest active billing period, with `eth_getLogs` ranges that shrink when a provider rejects them;
 - polls on the chain's block schedule, checks each new block's parent hash, and answers a reorganization within its window with the ops that undo it; a deeper fork stops it with `FollowerError::DeepFork`, so the consumer rebuilds its copy by following the chain again;

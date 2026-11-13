@@ -14,7 +14,6 @@ use anyhow::Context as _;
 use flamingo_verifier_billing_follower::{
     BillingFollower, BillingUpdate, FollowerConfig, FollowerError, RpcUrl,
 };
-use flamingo_verifier_billing_state::BillingOp;
 use flamingo_verifier_enclave_types::{
     self as enclave_types, BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS,
 };
@@ -157,28 +156,32 @@ impl Pusher {
     /// When the enclave refuses the update, e.g. it restarted or rejected the state. The stream is
     /// then lost: only a new follower and pusher, from the deployment, can rebuild the state.
     pub async fn push(&mut self, update: &BillingUpdate) -> Result<BillingStatus, enclave::Error> {
-        let parts = chunk_count(&update.ops);
-        let mut status = self.send(update, 0, parts).await?;
-        for index in 1..parts {
-            status = self.send(update, index, parts).await?;
+        let mut parts = update.ops.chunks(MAX_BILLING_OPS).peekable();
+        // An update without ops still goes out, so an enclave that lost the stream answers
+        // `BillingOutOfOrder` within a block.
+        let mut ops = parts.next().unwrap_or_default();
+        loop {
+            let request = BillingUpdateRequest {
+                seq: self.next_seq,
+                ops: ops.to_vec(),
+                // An update split in parts is complete only after its last part.
+                backfill_done: update.backfill_done && parts.peek().is_none(),
+            };
+            let status = self.send(request, update.head).await?;
+            let Some(next) = parts.next() else {
+                metrics::gauge!(names::BILLING_PUSHED_BLOCK).set(gauge_value(update.head));
+                return Ok(status);
+            };
+            ops = next;
         }
-        metrics::gauge!(names::BILLING_PUSHED_BLOCK).set(gauge_value(update.head));
-        Ok(status)
     }
 
-    /// Sends part `index` of `parts` of `update` as the next update of the stream.
+    /// Sends `request` as the next update of the stream.
     async fn send(
         &mut self,
-        update: &BillingUpdate,
-        index: usize,
-        parts: usize,
+        request: BillingUpdateRequest,
+        head: u64,
     ) -> Result<BillingStatus, enclave::Error> {
-        let request = BillingUpdateRequest {
-            seq: self.next_seq,
-            ops: chunk(&update.ops, index).to_vec(),
-            // An update split in parts is complete only after its last part.
-            backfill_done: update.backfill_done && index + 1 == parts,
-        };
         let mut failures: u32 = 0;
         loop {
             match self.client.update_billing(request.clone()).await {
@@ -198,7 +201,7 @@ impl Pusher {
                             error = ?error,
                             dependency = "enclave",
                             failures,
-                            head = update.head,
+                            head,
                             "billing push failed; retrying"
                         );
                     }
@@ -219,20 +222,6 @@ fn record(status: BillingStatus) {
     metrics::gauge!(names::BILLING_ENCLAVE_MAX_REGISTRATIONS)
         .set(gauge_value(status.max_registrations));
     metrics::gauge!(names::BILLING_ENCLAVE_READY).set(if status.ready { 1.0 } else { 0.0 });
-}
-
-/// Updates needed for `ops`: one per [`MAX_BILLING_OPS`], and one even without ops, so an
-/// enclave that lost the stream answers `BillingOutOfOrder` within a block.
-const fn chunk_count(ops: &[BillingOp]) -> usize {
-    if ops.is_empty() {
-        1
-    } else {
-        ops.len().div_ceil(MAX_BILLING_OPS)
-    }
-}
-
-fn chunk(ops: &[BillingOp], index: usize) -> &[BillingOp] {
-    ops.chunks(MAX_BILLING_OPS).nth(index).unwrap_or_default()
 }
 
 const fn result_label(error: &enclave::Error) -> &'static str {
@@ -269,7 +258,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use flamingo_verifier_billing_state::Registration;
+    use flamingo_verifier_billing_state::{BillingOp, Registration};
     use flamingo_verifier_enclave_types::{KeyAttestation, MatchRequest, MatchResponse};
     use world_id_primitives::{FieldElement, rp::RpId};
 

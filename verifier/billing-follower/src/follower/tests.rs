@@ -1,7 +1,9 @@
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use alloy::primitives::{Address, U256};
-use flamingo_verifier_billing_state::BillingState;
 use world_id_primitives::rp::RpId;
 
 use super::*;
@@ -52,6 +54,49 @@ async fn follower(chain: &FakeChain, config: FollowerConfig) -> BillingFollower<
     follower
 }
 
+/// The billed RPs and registrations a consumer keeps.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BillingState {
+    billed_rps: HashSet<RpId>,
+    registrations: HashMap<FieldElement, Registration>,
+}
+
+impl BillingState {
+    /// Applies `op` and returns whether it changed the state.
+    fn apply(&mut self, op: BillingOp) -> bool {
+        match op {
+            BillingOp::SetBilledRp { rp_id, billed } if billed => self.billed_rps.insert(rp_id),
+            BillingOp::SetBilledRp { rp_id, .. } => self.billed_rps.remove(&rp_id),
+            BillingOp::AddRegistration {
+                nullifier,
+                registration,
+            } => self.registrations.insert(nullifier, registration).is_none(),
+            BillingOp::RemoveRegistration {
+                nullifier,
+                registration,
+            } => self.registrations.remove(&nullifier) == Some(registration),
+        }
+    }
+
+    fn is_billed(&self, rp_id: RpId) -> bool {
+        self.billed_rps.contains(&rp_id)
+    }
+
+    fn registration(&self, nullifier: FieldElement) -> Option<Registration> {
+        self.registrations.get(&nullifier).copied()
+    }
+
+    fn is_registered(&self, nullifier: FieldElement, rp_id: RpId, now: u64) -> bool {
+        self.registration(nullifier).is_some_and(|registration| {
+            registration.rp_id == rp_id && is_period_active(registration.period_start, now)
+        })
+    }
+
+    fn registration_count(&self) -> usize {
+        self.registrations.len()
+    }
+}
+
 /// A consumer's copy of the state, built only from updates.
 #[derive(Default)]
 struct Mirror {
@@ -63,10 +108,7 @@ struct Mirror {
 impl Mirror {
     fn apply(&mut self, update: BillingUpdate) {
         for op in update.ops {
-            assert!(
-                self.state.apply(op).unwrap().is_some(),
-                "every op changes the state: {op:?}"
-            );
+            assert!(self.state.apply(op), "every op changes the state: {op:?}");
         }
         self.head = update.head;
         self.backfill_done = update.backfill_done;
