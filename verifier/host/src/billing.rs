@@ -20,14 +20,10 @@ use flamingo_verifier_enclave_types::{
 use rand::Rng as _;
 use url::Url;
 
-use crate::enclave::{self, EnclaveClient};
-
-const PUSHES: &str = "flamingo.billing.pushes";
-const RESTARTS: &str = "flamingo.billing.restarts";
-const PUSHED_BLOCK: &str = "flamingo.billing.pushed_block";
-const ENCLAVE_REGISTRATIONS: &str = "flamingo.billing.enclave_registrations";
-const ENCLAVE_READY: &str = "flamingo.billing.enclave_ready";
-const ENCLAVE_MAX_REGISTRATIONS: &str = "flamingo.billing.enclave_max_registrations";
+use crate::{
+    enclave::{self, EnclaveClient},
+    metrics::{self as names, gauge_value},
+};
 
 /// Default bound on the registrations the host follows; the enclave image's should match.
 pub const DEFAULT_MAX_REGISTRATIONS: usize = 1 << 22;
@@ -91,7 +87,7 @@ pub async fn run(config: BillingConfig, enclave: Arc<dyn EnclaveClient>) -> anyh
             }
         };
         restarts += 1;
-        metrics::counter!(RESTARTS).increment(1);
+        metrics::counter!(names::BILLING_RESTARTS).increment(1);
         let delay = restart_delay(restarts);
         tracing::warn!(
             error = ?error,
@@ -157,7 +153,7 @@ impl Pusher {
         for index in 1..parts {
             status = self.send(update, index, parts).await?;
         }
-        metrics::gauge!(PUSHED_BLOCK).set(gauge_value(update.head));
+        metrics::gauge!(names::BILLING_PUSHED_BLOCK).set(gauge_value(update.head));
         Ok(status)
     }
 
@@ -178,7 +174,7 @@ impl Pusher {
         loop {
             match self.client.update_billing(request.clone()).await {
                 Ok(status) => {
-                    metrics::counter!(PUSHES, "result" => "ok").increment(1);
+                    metrics::counter!(names::BILLING_PUSHES, "result" => "ok").increment(1);
                     self.record(status);
                     self.next_seq += 1;
                     return Ok(status);
@@ -186,7 +182,8 @@ impl Pusher {
                 // A lost answer is retried as is; the enclave applies a repeated `seq` once.
                 Err(error @ (enclave::Error::Timeout | enclave::Error::Transport(_))) => {
                     failures += 1;
-                    metrics::counter!(PUSHES, "result" => result_label(&error)).increment(1);
+                    metrics::counter!(names::BILLING_PUSHES, "result" => result_label(&error))
+                        .increment(1);
                     if failures.is_power_of_two() {
                         tracing::warn!(
                             error = ?error,
@@ -199,7 +196,8 @@ impl Pusher {
                     tokio::time::sleep(retry_delay(failures)).await;
                 }
                 Err(error) => {
-                    metrics::counter!(PUSHES, "result" => result_label(&error)).increment(1);
+                    metrics::counter!(names::BILLING_PUSHES, "result" => result_label(&error))
+                        .increment(1);
                     self.next_seq = 0;
                     return Err(error);
                 }
@@ -210,9 +208,11 @@ impl Pusher {
 
 impl Pusher {
     fn record(&mut self, status: BillingStatus) {
-        metrics::gauge!(ENCLAVE_REGISTRATIONS).set(gauge_value(status.registrations));
-        metrics::gauge!(ENCLAVE_MAX_REGISTRATIONS).set(gauge_value(status.max_registrations));
-        metrics::gauge!(ENCLAVE_READY).set(if status.ready { 1.0 } else { 0.0 });
+        metrics::gauge!(names::BILLING_ENCLAVE_REGISTRATIONS)
+            .set(gauge_value(status.registrations));
+        metrics::gauge!(names::BILLING_ENCLAVE_MAX_REGISTRATIONS)
+            .set(gauge_value(status.max_registrations));
+        metrics::gauge!(names::BILLING_ENCLAVE_READY).set(if status.ready { 1.0 } else { 0.0 });
         let own = u64::try_from(self.max_registrations).unwrap_or(u64::MAX);
         if own > status.max_registrations && !self.warned_capacity {
             self.warned_capacity = true;
@@ -263,14 +263,6 @@ fn jittered(base: Duration, attempts: u32, max: Duration) -> Duration {
     let ceiling = base.saturating_mul(1 << attempts.min(10)).min(max);
     let half = ceiling / 2;
     half + half.mul_f64(rand::thread_rng().gen_range(0.0..=1.0))
-}
-
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "block numbers and counts stay below 2^53"
-)]
-const fn gauge_value(value: u64) -> f64 {
-    value as f64
 }
 
 #[cfg(test)]
