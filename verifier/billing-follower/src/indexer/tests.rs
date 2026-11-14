@@ -510,6 +510,57 @@ async fn cursor_expiry_and_period_rollover_require_explicit_receiver_reset() {
 }
 
 #[tokio::test]
+async fn replay_backlog_with_an_unchanged_cursor_requires_reset_without_another_read() {
+    for changes in [vec![], vec![progress(status(11))]] {
+        let fixture = Fixture::start(
+            vec![Reply::json(page(vec![], None))],
+            vec![Reply::json(batch(changes, 1, "resume", true))],
+            vec![],
+        )
+        .await;
+        fixture.state.lock().unwrap().bootstrap_drain = None;
+        let mut follower = fixture.follower();
+        assert!(!next(&mut follower).await.backfill_done);
+        assert!(!next(&mut follower).await.backfill_done);
+        reset(&mut follower, ResetReason::Protocol).await;
+        assert!(!follower.announced);
+        assert_eq!(follower.cursor.as_deref(), Some("resume"));
+        assert_eq!(
+            follower
+                .source
+                .as_ref()
+                .unwrap()
+                .covered_through
+                .as_ref()
+                .unwrap()
+                .number,
+            10
+        );
+        assert_eq!(fixture.calls().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn empty_replay_batches_can_advance_over_unmatched_history() {
+    let fixture = Fixture::start(
+        vec![Reply::json(page(vec![], None))],
+        vec![
+            Reply::json(batch(vec![], 1, "skipped", true)),
+            Reply::json(batch(vec![], 1, "drained", false)),
+        ],
+        vec![],
+    )
+    .await;
+    fixture.state.lock().unwrap().bootstrap_drain = None;
+    let mut follower = fixture.follower();
+    assert!(!next(&mut follower).await.backfill_done);
+    assert!(!next(&mut follower).await.backfill_done);
+    assert!(!next(&mut follower).await.backfill_done);
+    assert!(next(&mut follower).await.backfill_done);
+    assert_eq!(follower.cursor.as_deref(), Some("drained"));
+}
+
+#[tokio::test]
 async fn http_drain_then_sse_reconnects_from_the_last_delivered_cursor() {
     let update = |head, cursor, more| batch(vec![progress(status(head))], head - 10, cursor, more);
     let fixture = Fixture::start(

@@ -363,6 +363,9 @@ impl IndexerFollower {
         }
         let drained = !batch.has_more;
         validate_cursor(&batch.cursor)?;
+        if batch.has_more && batch.cursor == cursor {
+            return Err(StepError::Reset(ResetReason::Protocol));
+        }
         let mut sequence = self.last_sequence;
         // Validate the complete batch before changing the projection or exposing operations.
         for record in &batch.records {
