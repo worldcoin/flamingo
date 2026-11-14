@@ -24,6 +24,8 @@ flamingo-verifier-billing-state.workspace = true
 futures-util.workspace = true
 metrics.workspace = true
 rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
@@ -32,6 +34,7 @@ world-id-primitives.workspace = true
 world-id-registries.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 alloy = { workspace = true, features = ["contract", "node-bindings", "signer-local"] }
 eyre.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
