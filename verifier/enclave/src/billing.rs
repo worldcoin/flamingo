@@ -20,9 +20,15 @@ use flamingo_verifier_billing_state::{BillingOp, Registration};
 use flamingo_verifier_enclave_types::{
     self as enclave_types, BillingStatus, BillingUpdateRequest, MAX_BILLING_OPS,
 };
+use flamingo_verifier_sealed_types::FailureReason;
 use rand::{RngCore as _, rngs::OsRng};
 use siphasher::sip::SipHasher24;
-use world_id_primitives::{FieldElement, billing::billing_period, rp::RpId};
+use tokio::sync::{Notify, futures::Notified};
+use world_id_primitives::{
+    FieldElement,
+    billing::{active_periods, billing_period},
+    rp::RpId,
+};
 
 /// Bound on the registrations the enclave holds, from the EIF's environment, so it is measured.
 /// Billing is on with this bound if it is set, and off otherwise. Reaching the bound fails closed.
@@ -32,6 +38,18 @@ const MAX_REGISTRATIONS_VAR: &str = "FLAMINGO_BILLING_MAX_REGISTRATIONS";
 pub struct BillingStore {
     config: Option<BillingConfig>,
     inner: Mutex<Inner>,
+    updated: Notify,
+}
+
+/// What the billing state says about a request (WIP-107 §4.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillingCheck {
+    /// Sign this `billing_nullifier` into the Flamingo Token.
+    Sign(FieldElement),
+    /// The request can never pass.
+    Reject(FailureReason),
+    /// A later update may let the request pass; without one, it fails with this reason.
+    Pending(FailureReason),
 }
 
 struct Inner {
@@ -59,6 +77,7 @@ impl BillingStore {
                 caught_up: false,
                 next_expiry: 0,
             }),
+            updated: Notify::new(),
         }
     }
 
@@ -67,6 +86,37 @@ impl BillingStore {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.config.is_none() || self.lock().caught_up
+    }
+
+    /// Checks the `billing_nullifier` of a request for `aud` at the Verifier's time `now`, in Unix
+    /// seconds: an RP that is not billed gets `0` signed, whatever the request carries.
+    #[must_use]
+    pub fn check(&self, aud: RpId, billing_nullifier: FieldElement, now: u64) -> BillingCheck {
+        if self.config.is_none() {
+            return BillingCheck::Sign(FieldElement::ZERO);
+        }
+        let inner = self.lock();
+        // A stream that has not caught up may still miss the RP's billing or the registration.
+        if !inner.caught_up {
+            return BillingCheck::Pending(FailureReason::Internal);
+        }
+        if !inner.state.billed_rps.contains(&aud) {
+            return BillingCheck::Sign(FieldElement::ZERO);
+        }
+        if billing_nullifier == FieldElement::ZERO {
+            return BillingCheck::Reject(FailureReason::BillingNullifierRequired);
+        }
+        if inner.state.is_registered(billing_nullifier, aud, now) {
+            BillingCheck::Sign(billing_nullifier)
+        } else {
+            BillingCheck::Pending(FailureReason::BillingUnregistered)
+        }
+    }
+
+    /// Completes once an update is applied after this call, so a [`Self::check`] made after it
+    /// misses none.
+    pub fn updated(&self) -> Notified<'_> {
+        self.updated.notified()
     }
 
     /// Applies one update at the Verifier's time `now`, in Unix seconds.
@@ -94,6 +144,7 @@ impl BillingStore {
         }
         let status = result.map(|()| status(&inner, config.max_registrations));
         drop(inner);
+        self.updated.notify_waiters();
         status
     }
 
@@ -243,6 +294,21 @@ impl State {
         hasher.write(&nullifier.to_be_bytes());
         hasher.write_u64(rp_id.into_inner());
         hasher.finish()
+    }
+
+    /// Whether `nullifier` is registered for `rp_id` in a period active at `now` (WIP-107 §4.3).
+    fn is_registered(&self, nullifier: FieldElement, rp_id: RpId, now: u64) -> bool {
+        let Ok(active) = active_periods(now) else {
+            return false;
+        };
+        let digest = self.digest(nullifier, rp_id);
+        std::iter::once(active.current)
+            .chain(active.next)
+            .any(|period_start| {
+                self.periods
+                    .get(&period_start)
+                    .is_some_and(|digests| digests.contains(&digest))
+            })
     }
 
     fn holds(&self, digest: u64, registration: Registration) -> bool {
@@ -575,6 +641,54 @@ mod tests {
             .unwrap();
         assert_eq!(status.registrations, 1);
         assert!(registered(&store, 1));
+    }
+
+    #[test]
+    fn checks_registrations_of_the_billed_rp_in_active_periods() {
+        let store = BillingStore::new(Some(CONFIG));
+        let check = |nullifier: u64, now: u64| store.check(RpId::new(7), nullifier.into(), now);
+        assert_eq!(
+            check(1, NOW),
+            BillingCheck::Pending(FailureReason::Internal),
+            "a store that has not caught up decides nothing"
+        );
+        store
+            .apply(
+                &update(
+                    0,
+                    vec![bill(true), add(1, NOV_2026), add(2, DEC_2026)],
+                    true,
+                ),
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(check(1, NOW), BillingCheck::Sign(1u64.into()));
+        assert_eq!(
+            check(0, NOW),
+            BillingCheck::Reject(FailureReason::BillingNullifierRequired)
+        );
+        assert_eq!(
+            check(3, NOW),
+            BillingCheck::Pending(FailureReason::BillingUnregistered)
+        );
+        // December's registration counts only once its period is active.
+        assert_eq!(
+            check(2, NOW),
+            BillingCheck::Pending(FailureReason::BillingUnregistered)
+        );
+        assert_eq!(
+            check(2, DEC_2026 - PERIOD_OVERLAP),
+            BillingCheck::Sign(2u64.into())
+        );
+        assert_eq!(
+            store.check(RpId::new(8), 1u64.into(), NOW),
+            BillingCheck::Sign(FieldElement::ZERO),
+            "an RP that is not billed gets zero"
+        );
+        assert_eq!(
+            BillingStore::new(None).check(RpId::new(7), 1u64.into(), NOW),
+            BillingCheck::Sign(FieldElement::ZERO)
+        );
     }
 
     #[test]

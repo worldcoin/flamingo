@@ -6,10 +6,12 @@ use flamingo_verifier_sealed_types::{
     AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims,
     MAX_MATCH_BODY_BYTES, MatchResult, Request, expected_claims,
 };
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep_until, timeout_at};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
+use world_id_primitives::{FieldElement, rp::RpId};
 
 use crate::{
+    billing::BillingCheck,
     biometric_engine::BiometricError,
     blocking,
     pipeline::{self, Operation},
@@ -85,6 +87,8 @@ struct Prepared {
     claims: FlamingoClaims,
     threshold: f64,
     operation: Operation,
+    aud: RpId,
+    billing_nullifier: FieldElement,
 }
 
 /// Checks the request against the release and the Verifier's time, verifies its AAT and records
@@ -130,12 +134,24 @@ fn prepare(
         // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
         let claims = expected_claims(&request, &payload, release, now)?;
         let operation = pipeline::operation(payload)?;
+        let aud = u64::try_from(request.aud)
+            .map(RpId::new)
+            .map_err(|_| FailureReason::MalformedInputs)?;
+        if let BillingCheck::Reject(reason) =
+            state
+                .billing()
+                .check(aud, request.billing_nullifier, u64::from(now))
+        {
+            return Err(reason);
+        }
         // Reserve last; a Busy result releases it because inference never started.
         state.replay().reserve(request.aud, request.nonce)?;
         Ok(Prepared {
             claims,
             threshold,
             operation,
+            aud,
+            billing_nullifier: request.billing_nullifier,
         })
     })();
     (slots, checked)
@@ -202,7 +218,39 @@ async fn run(
         }
     }
 
-    sign(state, &prepared.claims, debug_report).await
+    let mut claims = prepared.claims;
+    claims.billing_nullifier =
+        match check_billing(&state, prepared.aud, prepared.billing_nullifier, deadline).await {
+            Ok(billing_nullifier) => billing_nullifier,
+            Err(reason) => {
+                return Ok(MatchResult::Failed {
+                    reason,
+                    debug_report,
+                });
+            }
+        };
+    sign(state, &claims, debug_report).await
+}
+
+/// The `billing_nullifier` to sign, waiting until `deadline` for an update that lets the request
+/// pass (WIP-107 §4.8).
+async fn check_billing(
+    state: &EnclaveState,
+    aud: RpId,
+    billing_nullifier: FieldElement,
+    deadline: Instant,
+) -> Result<FieldElement, FailureReason> {
+    loop {
+        let updated = state.billing().updated();
+        let reason = match state.billing().check(aud, billing_nullifier, state.now()) {
+            BillingCheck::Sign(billing_nullifier) => return Ok(billing_nullifier),
+            BillingCheck::Reject(reason) => return Err(reason),
+            BillingCheck::Pending(reason) => reason,
+        };
+        if timeout_at(deadline, updated).await.is_err() {
+            return Err(reason);
+        }
+    }
 }
 
 async fn sign(
@@ -243,6 +291,7 @@ mod tests {
         },
     };
     use eddsa_babyjubjub::EdDSAPrivateKey;
+    use flamingo_verifier_billing_state::{BillingOp, Registration};
     use flamingo_verifier_enclave_types::BillingUpdateRequest;
     use flamingo_verifier_sealed_types::{AatInputs, CHANNEL_DOMAIN, Entry, Payload};
     use pontifex::ChannelConsumer;
@@ -254,6 +303,7 @@ mod tests {
             AatClaims, AuthenticatorAssertionToken, AuthenticatorMeta, Platform, SecFlags,
             SecLevel, TaktClaims, TrustAnchorKeyToken, UserPresence,
         },
+        billing::period_start,
     };
 
     const AUD: u64 = 1_928_118;
@@ -562,6 +612,145 @@ mod tests {
         assert_eq!(claims.billing_nullifier, FieldElement::ZERO);
     }
 
+    /// A state for `engine` that bills RP [`AUD`], with `registered` registered for it in the
+    /// current period.
+    fn billing_state(engine: Engine, registered: &[u64]) -> Arc<EnclaveState> {
+        let state = loaded_billing_state(
+            engine,
+            BillingConfig {
+                max_registrations: 8,
+            },
+        );
+        let mut ops = vec![BillingOp::SetBilledRp {
+            rp_id: RpId::new(AUD),
+            billed: true,
+        }];
+        ops.extend(registered.iter().map(|&nullifier| add(nullifier)));
+        state
+            .billing()
+            .apply(
+                &BillingUpdateRequest {
+                    seq: 0,
+                    ops,
+                    backfill_done: true,
+                },
+                state.now(),
+            )
+            .unwrap();
+        state
+    }
+
+    fn add(nullifier: u64) -> BillingOp {
+        BillingOp::AddRegistration {
+            nullifier: nullifier.into(),
+            registration: Registration {
+                rp_id: RpId::new(AUD),
+                period_start: period_start(u64::from(NOW)).unwrap(),
+            },
+        }
+    }
+
+    fn billed_request(billing_nullifier: u64) -> Request {
+        Request::new(
+            AUD.into(),
+            1u64.into(),
+            EXPIRES_AT,
+            billing_nullifier.into(),
+            &deep_face(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn signs_the_registered_billing_nullifier_of_a_billed_rp() {
+        let state = billing_state(engine(0.95), &[11]);
+        let claims = verify(
+            &state,
+            exchange(Arc::clone(&state), &billed_request(11)).await,
+        );
+        assert_eq!(claims.billing_nullifier, FieldElement::from(11u64));
+    }
+
+    #[tokio::test]
+    async fn a_billed_rp_needs_a_billing_nullifier_before_inference() {
+        let passing = engine(0.95);
+        let calls = Arc::clone(&passing.calls);
+        let state = billing_state(passing, &[11]);
+        assert_eq!(
+            exchange(state, &billed_request(0)).await,
+            rejected(FailureReason::BillingNullifierRequired)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unregistered_billing_nullifier_fails_at_the_last_slot() {
+        let state = billing_state(engine(0.95), &[11]);
+        let result = exchange(state, &billed_request(12)).await;
+        let MatchResult::Failed { reason, .. } = result else {
+            panic!("expected a failure, got {result:?}")
+        };
+        assert_eq!(reason, FailureReason::BillingUnregistered);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waits_for_a_registration_until_the_last_slot() {
+        let state = billing_state(engine(0.95), &[]);
+        let registering = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let update = BillingUpdateRequest {
+                seq: 1,
+                ops: vec![add(11)],
+                backfill_done: true,
+            };
+            registering
+                .billing()
+                .apply(&update, registering.now())
+                .unwrap();
+        });
+        let claims = verify(
+            &state,
+            exchange(Arc::clone(&state), &billed_request(11)).await,
+        );
+        assert_eq!(claims.billing_nullifier, FieldElement::from(11u64));
+    }
+
+    #[tokio::test]
+    async fn an_rp_that_is_not_billed_gets_zero_signed() {
+        let state = billing_state(engine(0.95), &[11]);
+        let request = Request::new(
+            (AUD + 1).into(),
+            1u64.into(),
+            EXPIRES_AT,
+            11u64.into(),
+            &deep_face(),
+            None,
+        )
+        .unwrap();
+        let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
+        assert_eq!(claims.billing_nullifier, FieldElement::ZERO);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_aud_not_below_two_to_the_64() {
+        let state = loaded_state(UnusedBiometricEngine);
+        let request = Request::new(
+            FieldElement::from(u128::from(u64::MAX) + 1),
+            1u64.into(),
+            EXPIRES_AT,
+            FieldElement::ZERO,
+            &deep_face(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            exchange(state, &request).await,
+            rejected(FailureReason::MalformedInputs)
+        );
+    }
+
     #[tokio::test]
     async fn signs_the_verified_aat_values() {
         let state = loaded_state(engine(0.95));
@@ -685,9 +874,12 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_requests_until_billing_has_caught_up() {
-        let state = loaded_billing_state(BillingConfig {
-            max_registrations: 1,
-        });
+        let state = loaded_billing_state(
+            UnusedBiometricEngine,
+            BillingConfig {
+                max_registrations: 1,
+            },
+        );
         let request = MatchRequest {
             body: vec![0; 2048].into(),
         };

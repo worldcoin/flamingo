@@ -113,6 +113,11 @@ pub enum FailureReason {
     MatchingFailed(ComparisonRole),
     /// The Engine had not finished by the pipeline's last response slot.
     EngineTimeout,
+    /// The RP is billed and the request carries `billing_nullifier = 0` (WIP-107 §4.7).
+    BillingNullifierRequired,
+    /// The RP is billed and no registration of `billing_nullifier` for `aud` in an active period
+    /// arrived by the last response slot (WIP-107 §4.7).
+    BillingUnregistered,
     /// Backend infrastructure failed, distinct from biological rejection.
     Internal,
 }
