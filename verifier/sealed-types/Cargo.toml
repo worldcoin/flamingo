@@ -23,6 +23,8 @@ hex = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [features]
+# The unsigned channel-key document of an in-process dev Verifier. Never for production builds.
+dev = []
 # Release manifests for tests of dependent crates.
 testing = ["dep:base64", "dep:hex", "dep:serde_json"]
 

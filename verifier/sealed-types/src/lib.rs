@@ -8,6 +8,8 @@
     dead_code
 )]
 
+#[cfg(feature = "dev")]
+pub mod dev;
 mod errors;
 mod messages;
 mod response;

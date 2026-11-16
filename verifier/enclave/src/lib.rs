@@ -14,6 +14,8 @@ pub mod attestation;
 pub mod billing;
 /// Inference operations implemented by the sandboxed biometric worker.
 pub mod biometric_engine;
+#[cfg(feature = "dev")]
+pub mod dev;
 /// Boot-scoped key material.
 pub mod keys;
 /// Interim mapping of WIP-201 requests onto the engine operations.

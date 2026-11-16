@@ -7,11 +7,11 @@ use flamingo_verifier_enclave_types::{
 };
 use pontifex::Router;
 
-mod billing;
-mod encryption_key;
-mod health;
-mod matches;
-mod release;
+pub(crate) mod billing;
+pub(crate) mod encryption_key;
+pub(crate) mod health;
+pub(crate) mod matches;
+pub(crate) mod release;
 
 use crate::state::EnclaveState;
 

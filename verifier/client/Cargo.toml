@@ -31,7 +31,11 @@ world-id-flamingo.workspace = true
 world-id-primitives.workspace = true
 zeroize.workspace = true
 
+[features]
+# Accepts the unsigned attestations of an in-process `dev` Verifier. Never for production builds.
+dev = ["flamingo-verifier-sealed-types/dev"]
+
 [dev-dependencies]
-flamingo-verifier-sealed-types = { workspace = true, features = ["testing"] }
+flamingo-verifier-sealed-types = { workspace = true, features = ["dev", "testing"] }
 hex-literal.workspace = true
 tokio.workspace = true
