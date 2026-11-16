@@ -23,7 +23,6 @@ use flamingo_verifier_enclave_types::{
 use flamingo_verifier_sealed_types::FailureReason;
 use rand::{RngCore as _, rngs::OsRng};
 use siphasher::sip::SipHasher24;
-use tokio::sync::{Notify, futures::Notified};
 use world_id_primitives::{
     FieldElement,
     billing::{active_periods, billing_period},
@@ -38,7 +37,6 @@ const MAX_REGISTRATIONS_VAR: &str = "FLAMINGO_BILLING_MAX_REGISTRATIONS";
 pub struct BillingStore {
     config: Option<BillingConfig>,
     inner: Mutex<Inner>,
-    updated: Notify,
 }
 
 /// What the billing state says about a request (WIP-107 §4.7).
@@ -48,7 +46,8 @@ pub enum BillingCheck {
     Sign(FieldElement),
     /// The request can never pass.
     Reject(FailureReason),
-    /// A later update may let the request pass; without one, it fails with this reason.
+    /// A later update may let the request pass; without one by the last response slot, it fails
+    /// with this reason and may be resent (WIP-201 §4.4.4).
     Pending(FailureReason),
 }
 
@@ -77,7 +76,6 @@ impl BillingStore {
                 caught_up: false,
                 next_expiry: 0,
             }),
-            updated: Notify::new(),
         }
     }
 
@@ -113,12 +111,6 @@ impl BillingStore {
         }
     }
 
-    /// Completes once an update is applied after this call, so a [`Self::check`] made after it
-    /// misses none.
-    pub fn updated(&self) -> Notified<'_> {
-        self.updated.notified()
-    }
-
     /// Applies one update at the Verifier's time `now`, in Unix seconds.
     ///
     /// # Errors
@@ -144,7 +136,6 @@ impl BillingStore {
         }
         let status = result.map(|()| status(&inner, config.max_registrations));
         drop(inner);
-        self.updated.notify_waiters();
         status
     }
 

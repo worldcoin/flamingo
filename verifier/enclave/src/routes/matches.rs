@@ -6,7 +6,7 @@ use flamingo_verifier_sealed_types::{
     AttestedStatement, ComparisonRole, DebugReport, FailureReason, FlamingoClaims,
     MAX_MATCH_BODY_BYTES, MatchResult, Request, expected_claims,
 };
-use tokio::time::{Instant, sleep_until, timeout_at};
+use tokio::time::{Instant, sleep_until};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
 use world_id_primitives::{FieldElement, rp::RpId};
 
@@ -89,10 +89,14 @@ struct Prepared {
     operation: Operation,
     aud: RpId,
     billing_nullifier: FieldElement,
+    /// The billing state held no registration before inference, so the response leaves at the
+    /// last slot and the pair is recorded only once the outcome is known (WIP-201 §4.4.4).
+    pending: bool,
 }
 
-/// Checks the request against the release and the Verifier's time, verifies its AAT and records
-/// its (`aud`, `nonce`) (WIP-201 §4.4.3). A failure here never reaches the Engine.
+/// Checks the request against the release, the Verifier's time and the billing state, verifies
+/// its AAT and records its (`aud`, `nonce`), or only checks it for a request whose registration is
+/// still pending (WIP-201 §4.4.3). A failure here never reaches the Engine.
 ///
 /// Returns the slots the response is released at: the pipeline's, or, before the pipeline is
 /// known, the latest first slot of any pipeline, so an early rejection never leaves sooner than
@@ -137,21 +141,27 @@ fn prepare(
         let aud = u64::try_from(request.aud)
             .map(RpId::new)
             .map_err(|_| FailureReason::MalformedInputs)?;
-        if let BillingCheck::Reject(reason) =
-            state
-                .billing()
-                .check(aud, request.billing_nullifier, u64::from(now))
+        let pending = match state
+            .billing()
+            .check(aud, request.billing_nullifier, u64::from(now))
         {
-            return Err(reason);
+            BillingCheck::Reject(reason) => return Err(reason),
+            BillingCheck::Pending(_) => true,
+            BillingCheck::Sign(_) => false,
+        };
+        // Last; a Busy result releases the reservation because inference never started.
+        if pending {
+            state.replay().check(request.aud, request.nonce)?;
+        } else {
+            state.replay().reserve(request.aud, request.nonce)?;
         }
-        // Reserve last; a Busy result releases it because inference never started.
-        state.replay().reserve(request.aud, request.nonce)?;
         Ok(Prepared {
             claims,
             threshold,
             operation,
             aud,
             billing_nullifier: request.billing_nullifier,
+            pending,
         })
     })();
     (slots, checked)
@@ -162,94 +172,118 @@ async fn run(
     prepared: Prepared,
     deadline: Instant,
 ) -> Result<MatchResult, enclave_types::Error> {
-    let scores = match prepared.operation {
+    let Prepared {
+        mut claims,
+        threshold,
+        operation,
+        aud,
+        billing_nullifier,
+        pending,
+    } = prepared;
+    let analysis = analyze(&state, operation, threshold, deadline).await;
+    // Records the pair of a pending request, whose outcome is now known (WIP-201 §4.4.4).
+    let record = || {
+        if pending {
+            state.replay().reserve(claims.aud, claims.nonce)
+        } else {
+            Ok(())
+        }
+    };
+    match &analysis {
+        Err(BiometricError::Busy) => {
+            if !pending {
+                state.replay().release(claims.aud, claims.nonce);
+            }
+            return BiometricError::Busy.into_result();
+        }
+        Err(BiometricError::EngineTimeout) => state.reset_overrunning_engine(),
+        _ => {}
+    }
+    if pending {
+        // Whatever the Engine did, so resending the request reveals nothing of its run time.
+        sleep_until(deadline).await;
+    }
+    let debug_report = match analysis {
+        Ok(debug_report) => debug_report,
+        Err(error) => {
+            if let Err(reason) = record() {
+                return Ok(failed(reason, DebugReport::NotProduced));
+            }
+            return error.into_result();
+        }
+    };
+
+    let billing_nullifier = match state.billing().check(aud, billing_nullifier, state.now()) {
+        BillingCheck::Sign(billing_nullifier) => record().map(|()| billing_nullifier),
+        BillingCheck::Reject(reason) => record().and(Err(reason)),
+        // Left unrecorded up to the last attempt, so the Authenticator can resend it.
+        BillingCheck::Pending(reason) => {
+            if pending {
+                state.replay().reject_unregistered(claims.aud, claims.nonce);
+            }
+            Err(reason)
+        }
+    };
+    match billing_nullifier {
+        Ok(billing_nullifier) => {
+            claims.billing_nullifier = billing_nullifier;
+            sign(state, &claims, debug_report).await
+        }
+        Err(reason) => Ok(failed(reason, debug_report)),
+    }
+}
+
+/// Runs the Engine and checks every compared pair against the strictness level, returning the
+/// Engine's debug report on a pass.
+async fn analyze(
+    state: &EnclaveState,
+    operation: Operation,
+    threshold: f64,
+    deadline: Instant,
+) -> Result<DebugReport, BiometricError> {
+    let (scores, debug_report) = match operation {
         Operation::DeepFace {
             credential,
             live,
             challenge,
-        } => state
-            .engine()
-            .deepface(credential, live, challenge, deadline)
-            .await
-            .map(|scores| {
-                (
-                    vec![
-                        (scores.credential_live, ComparisonRole::OrbSelfie),
-                        (scores.credential_challenge, ComparisonRole::OrbChallenge),
-                        (scores.live_challenge, ComparisonRole::SelfieChallenge),
-                    ],
-                    scores.debug_report,
-                )
-            }),
-        Operation::GrayBadge { live, challenge } => state
-            .engine()
-            .graybadge(live, challenge, deadline)
-            .await
-            .map(|scores| {
-                (
-                    vec![(scores.live_challenge, ComparisonRole::SelfieChallenge)],
-                    scores.debug_report,
-                )
-            }),
-    };
-    let (scores, debug_report) = match scores {
-        Ok(scores) => scores,
-        Err(BiometricError::Busy) => {
-            state
-                .replay()
-                .release(prepared.claims.aud, prepared.claims.nonce);
-            return BiometricError::Busy.into_result();
+        } => {
+            let scores = state
+                .engine()
+                .deepface(credential, live, challenge, deadline)
+                .await?;
+            (
+                vec![
+                    (scores.credential_live, ComparisonRole::OrbSelfie),
+                    (scores.credential_challenge, ComparisonRole::OrbChallenge),
+                    (scores.live_challenge, ComparisonRole::SelfieChallenge),
+                ],
+                scores.debug_report,
+            )
         }
-        Err(BiometricError::EngineTimeout) => {
-            state.reset_overrunning_engine();
-            return BiometricError::EngineTimeout.into_result();
+        Operation::GrayBadge { live, challenge } => {
+            let scores = state.engine().graybadge(live, challenge, deadline).await?;
+            (
+                vec![(scores.live_challenge, ComparisonRole::SelfieChallenge)],
+                scores.debug_report,
+            )
         }
-        Err(error) => return error.into_result(),
     };
-
     // The token carries no score; every compared pair must clear the strictness level.
     for (score, role) in scores {
-        if let Err(reason) = pipeline::check_score(score, prepared.threshold, role) {
-            return BiometricError::AnalysisRejected {
+        if let Err(reason) = pipeline::check_score(score, threshold, role) {
+            return Err(BiometricError::AnalysisRejected {
                 reason,
                 debug_report,
-            }
-            .into_result();
+            });
         }
     }
-
-    let mut claims = prepared.claims;
-    claims.billing_nullifier =
-        match check_billing(&state, prepared.aud, prepared.billing_nullifier, deadline).await {
-            Ok(billing_nullifier) => billing_nullifier,
-            Err(reason) => {
-                return Ok(MatchResult::Failed {
-                    reason,
-                    debug_report,
-                });
-            }
-        };
-    sign(state, &claims, debug_report).await
+    Ok(debug_report)
 }
 
-/// The `billing_nullifier` to sign, waiting until `deadline` for an update that lets the request
-/// pass (WIP-107 §4.8).
-async fn check_billing(
-    state: &EnclaveState,
-    aud: RpId,
-    billing_nullifier: FieldElement,
-    deadline: Instant,
-) -> Result<FieldElement, FailureReason> {
-    loop {
-        let updated = state.billing().updated();
-        let reason = match state.billing().check(aud, billing_nullifier, state.now()) {
-            BillingCheck::Sign(billing_nullifier) => return Ok(billing_nullifier),
-            BillingCheck::Reject(reason) => return Err(reason),
-            BillingCheck::Pending(reason) => reason,
-        };
-        if timeout_at(deadline, updated).await.is_err() {
-            return Err(reason);
-        }
+const fn failed(reason: FailureReason, debug_report: DebugReport) -> MatchResult {
+    MatchResult::Failed {
+        reason,
+        debug_report,
     }
 }
 
@@ -285,8 +319,9 @@ mod tests {
         billing::BillingConfig,
         biometric_engine::{BiometricEngine, DeepFaceScores, GrayBadgeScores, LiveCapture},
         pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE_LIGHTGUARD},
+        replay::MAX_BILLING_ATTEMPTS,
         test_support::{
-            TEST_NOW, UnusedBiometricEngine, loaded_billing_state, loaded_state,
+            TEST_NOW, TEST_SLOTS, UnusedBiometricEngine, loaded_billing_state, loaded_state,
             loaded_state_with_slots,
         },
     };
@@ -662,14 +697,24 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
-    async fn signs_the_registered_billing_nullifier_of_a_billed_rp() {
+    /// When a pending request's response leaves: the last of [`TEST_SLOTS`].
+    fn last_slot() -> Duration {
+        Duration::from_millis(*TEST_SLOTS.last().unwrap())
+    }
+
+    fn reason(result: &MatchResult) -> FailureReason {
+        let MatchResult::Failed { reason, .. } = result else {
+            panic!("expected a failure, got {result:?}")
+        };
+        *reason
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signs_the_registered_billing_nullifier_of_a_billed_rp_at_its_slot() {
         let state = billing_state(engine(0.95), &[11]);
-        let claims = verify(
-            &state,
-            exchange(Arc::clone(&state), &billed_request(11)).await,
-        );
-        assert_eq!(claims.billing_nullifier, FieldElement::from(11u64));
+        let (result, elapsed) = timed(Arc::clone(&state), &billed_request(11)).await;
+        assert_eq!(verify(&state, result).billing_nullifier, 11u64.into());
+        assert!(elapsed < last_slot(), "{elapsed:?}");
     }
 
     #[tokio::test]
@@ -685,17 +730,42 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_unregistered_billing_nullifier_fails_at_the_last_slot() {
+    async fn an_unregistered_request_fails_at_the_last_slot_until_its_last_attempt() {
         let state = billing_state(engine(0.95), &[11]);
-        let result = exchange(state, &billed_request(12)).await;
-        let MatchResult::Failed { reason, .. } = result else {
-            panic!("expected a failure, got {result:?}")
-        };
-        assert_eq!(reason, FailureReason::BillingUnregistered);
+        let request = billed_request(12);
+        for _ in 0..MAX_BILLING_ATTEMPTS {
+            let (result, elapsed) = timed(Arc::clone(&state), &request).await;
+            assert_eq!(reason(&result), FailureReason::BillingUnregistered);
+            assert!(elapsed >= last_slot(), "{elapsed:?}");
+        }
+        assert_eq!(
+            exchange(state, &request).await,
+            rejected(FailureReason::Replayed)
+        );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn waits_for_a_registration_until_the_last_slot() {
+    async fn a_resent_request_signs_a_registration_that_arrived_since() {
+        let state = billing_state(engine(0.95), &[]);
+        let request = billed_request(11);
+        let result = exchange(Arc::clone(&state), &request).await;
+        assert_eq!(reason(&result), FailureReason::BillingUnregistered);
+        let update = BillingUpdateRequest {
+            seq: 1,
+            ops: vec![add(11)],
+            backfill_done: true,
+        };
+        state.billing().apply(&update, state.now()).unwrap();
+        let claims = verify(&state, exchange(Arc::clone(&state), &request).await);
+        assert_eq!(claims.billing_nullifier, 11u64.into());
+        assert_eq!(
+            exchange(state, &request).await,
+            rejected(FailureReason::Replayed)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signs_a_registration_that_arrives_by_the_last_slot() {
         let state = billing_state(engine(0.95), &[]);
         let registering = Arc::clone(&state);
         tokio::spawn(async move {
@@ -710,11 +780,25 @@ mod tests {
                 .apply(&update, registering.now())
                 .unwrap();
         });
-        let claims = verify(
-            &state,
-            exchange(Arc::clone(&state), &billed_request(11)).await,
+        let (result, elapsed) = timed(Arc::clone(&state), &billed_request(11)).await;
+        assert_eq!(verify(&state, result).billing_nullifier, 11u64.into());
+        assert!(elapsed >= last_slot(), "{elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_request_the_engine_rejects_leaves_at_the_last_slot_and_is_recorded() {
+        let state = billing_state(engine(0.1), &[]);
+        let request = billed_request(11);
+        let (result, elapsed) = timed(Arc::clone(&state), &request).await;
+        assert!(
+            matches!(reason(&result), FailureReason::MatchBelowThreshold(_)),
+            "{result:?}"
         );
-        assert_eq!(claims.billing_nullifier, FieldElement::from(11u64));
+        assert!(elapsed >= last_slot(), "{elapsed:?}");
+        assert_eq!(
+            exchange(state, &request).await,
+            rejected(FailureReason::Replayed)
+        );
     }
 
     #[tokio::test]
