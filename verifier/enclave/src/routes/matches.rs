@@ -15,6 +15,7 @@ use crate::{
     biometric_engine::BiometricError,
     blocking,
     pipeline::{self, Operation},
+    replay::PendingOutcome,
     state::EnclaveState,
 };
 
@@ -151,7 +152,7 @@ fn prepare(
         };
         // Last; a Busy result releases the reservation because inference never started.
         if pending {
-            state.replay().check(request.aud, request.nonce)?;
+            state.replay().begin_pending(request.aud, request.nonce)?;
         } else {
             state.replay().reserve(request.aud, request.nonce)?;
         }
@@ -181,17 +182,19 @@ async fn run(
         pending,
     } = prepared;
     let analysis = analyze(&state, operation, threshold, deadline).await;
-    // Records the pair of a pending request, whose outcome is now known (WIP-201 §4.4.4).
-    let record = || {
+    // Ends a pending request's hold on its pair, whose outcome is now known (WIP-201 §4.4.4).
+    let finish = |outcome| {
         if pending {
-            state.replay().reserve(claims.aud, claims.nonce)
-        } else {
-            Ok(())
+            state
+                .replay()
+                .finish_pending(claims.aud, claims.nonce, outcome);
         }
     };
     match &analysis {
         Err(BiometricError::Busy) => {
-            if !pending {
+            if pending {
+                finish(PendingOutcome::Unstarted);
+            } else {
                 state.replay().release(claims.aud, claims.nonce);
             }
             return BiometricError::Busy.into_result();
@@ -206,21 +209,23 @@ async fn run(
     let debug_report = match analysis {
         Ok(debug_report) => debug_report,
         Err(error) => {
-            if let Err(reason) = record() {
-                return Ok(failed(reason, DebugReport::NotProduced));
-            }
+            finish(PendingOutcome::Done);
             return error.into_result();
         }
     };
 
     let billing_nullifier = match state.billing().check(aud, billing_nullifier, state.now()) {
-        BillingCheck::Sign(billing_nullifier) => record().map(|()| billing_nullifier),
-        BillingCheck::Reject(reason) => record().and(Err(reason)),
+        BillingCheck::Sign(billing_nullifier) => {
+            finish(PendingOutcome::Done);
+            Ok(billing_nullifier)
+        }
+        BillingCheck::Reject(reason) => {
+            finish(PendingOutcome::Done);
+            Err(reason)
+        }
         // Left unrecorded up to the last attempt, so the Authenticator can resend it.
         BillingCheck::Pending(reason) => {
-            if pending {
-                state.replay().reject_unregistered(claims.aud, claims.nonce);
-            }
+            finish(PendingOutcome::Unregistered);
             Err(reason)
         }
     };
@@ -799,6 +804,25 @@ mod tests {
             exchange(state, &request).await,
             rejected(FailureReason::Replayed)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_copies_of_a_pending_request_run_once() {
+        let passing = engine(0.95);
+        let calls = Arc::clone(&passing.calls);
+        let state = billing_state(passing, &[]);
+        let request = billed_request(11);
+        let (a, b) = tokio::join!(
+            exchange(Arc::clone(&state), &request),
+            exchange(Arc::clone(&state), &request)
+        );
+        let mut reasons = [reason(&a), reason(&b)];
+        reasons.sort_by_key(|reason| format!("{reason:?}"));
+        assert_eq!(
+            reasons,
+            [FailureReason::BillingUnregistered, FailureReason::Replayed]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

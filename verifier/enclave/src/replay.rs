@@ -1,14 +1,15 @@
 //! WIP-201 §3.8 replay rejection: one request per (`aud`, `nonce`) under this boot's channel key.
 //!
 //! The set lives as long as the channel key and is never evicted, since evicting would let a
-//! request run twice. Reservations refused before inference may be released, and a request rejected
-//! as unregistered is counted instead of recorded, so it can be resent up to
+//! request run twice. Reservations refused before inference may be released. A pending request,
+//! whose registration had not arrived before inference, holds its pair in flight instead, and one
+//! rejected as unregistered is counted instead of recorded, so it can be resent up to
 //! [`MAX_BILLING_ATTEMPTS`] times (WIP-201 §4.4.4). It is bounded so an untrusted host cannot
 //! exhaust memory; once full, the enclave refuses every request and reports not ready until it
 //! reboots with a new channel key.
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::HashMap,
     sync::{
         Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -25,27 +26,33 @@ pub const MAX_PROCESSED_REQUESTS: usize = 262_144;
 /// §4.2).
 pub const MAX_BILLING_ATTEMPTS: u8 = 3;
 
-/// The (`aud`, `nonce`) pairs of this boot: processed, or rejected as unregistered so far.
+type Pairs = HashMap<(FieldElement, FieldElement), Pair>;
+
+/// The (`aud`, `nonce`) pairs of this boot.
 pub struct ReplayGuard {
-    pairs: Mutex<HashMap<(FieldElement, FieldElement), Pair>>,
+    pairs: Mutex<Pairs>,
     limit: usize,
     full: AtomicBool,
 }
 
+/// A pair's state, with the attempts rejected as unregistered so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pair {
     Processed,
     Unregistered(u8),
+    /// A pending request runs with this pair; no copy of it runs meanwhile.
+    InFlight(u8),
 }
 
-impl Pair {
-    const fn after_attempts(attempts: u8) -> Self {
-        if attempts >= MAX_BILLING_ATTEMPTS {
-            Self::Processed
-        } else {
-            Self::Unregistered(attempts)
-        }
-    }
+/// How a pending request that held its pair in flight ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingOutcome {
+    /// Any outcome but the two below: the pair is processed.
+    Done,
+    /// Rejected as unregistered: counted, and processed at the [`MAX_BILLING_ATTEMPTS`]-th.
+    Unregistered,
+    /// The Engine never started: the attempt does not count.
+    Unstarted,
 }
 
 impl Default for ReplayGuard {
@@ -63,44 +70,53 @@ impl ReplayGuard {
         }
     }
 
-    /// Records the pair, or rejects it if this boot already processed it.
+    /// Records the pair, or rejects it if this boot already processed it or runs it.
     ///
     /// # Errors
-    /// [`FailureReason::Replayed`] for a processed pair, [`FailureReason::Internal`] once full.
+    /// [`FailureReason::Replayed`] for a processed or in-flight pair, [`FailureReason::Internal`]
+    /// once full.
     pub fn reserve(&self, aud: FieldElement, nonce: FieldElement) -> Result<(), FailureReason> {
-        let mut pairs = self.lock();
-        self.admit(&pairs, aud, nonce)?;
-        pairs.insert((aud, nonce), Pair::Processed);
-        self.update_full(&pairs);
-        drop(pairs);
-        Ok(())
+        self.admit(aud, nonce, |_| Pair::Processed)
     }
 
-    /// Rejects the pair as [`Self::reserve`] would, without recording it.
+    /// Holds the pair of a pending request in flight until [`Self::finish_pending`], rejecting it
+    /// as [`Self::reserve`] would.
     ///
     /// # Errors
     /// As [`Self::reserve`].
-    pub fn check(&self, aud: FieldElement, nonce: FieldElement) -> Result<(), FailureReason> {
-        self.admit(&self.lock(), aud, nonce)
+    pub fn begin_pending(
+        &self,
+        aud: FieldElement,
+        nonce: FieldElement,
+    ) -> Result<(), FailureReason> {
+        self.admit(aud, nonce, |previous| match previous {
+            Some(Pair::Unregistered(attempts)) => Pair::InFlight(attempts),
+            _ => Pair::InFlight(0),
+        })
     }
 
-    /// Counts a rejection as unregistered, recording the pair at the [`MAX_BILLING_ATTEMPTS`]-th.
-    pub fn reject_unregistered(&self, aud: FieldElement, nonce: FieldElement) {
+    /// Ends the pending request [`Self::begin_pending`] admitted with this pair.
+    pub fn finish_pending(&self, aud: FieldElement, nonce: FieldElement, outcome: PendingOutcome) {
         let mut pairs = self.lock();
-        let at_limit = pairs.len() >= self.limit;
-        match pairs.entry((aud, nonce)) {
-            Entry::Occupied(mut entry) => {
-                if let Pair::Unregistered(attempts) = *entry.get() {
-                    entry.insert(Pair::after_attempts(attempts.saturating_add(1)));
-                }
+        let Some(pair) = pairs.get_mut(&(aud, nonce)) else {
+            return;
+        };
+        let Pair::InFlight(attempts) = *pair else {
+            return;
+        };
+        match outcome {
+            PendingOutcome::Done => *pair = Pair::Processed,
+            PendingOutcome::Unregistered if attempts.saturating_add(1) >= MAX_BILLING_ATTEMPTS => {
+                *pair = Pair::Processed;
             }
-            // A full set refuses every request, so the pair cannot run again.
-            Entry::Vacant(_) if at_limit => {}
-            Entry::Vacant(entry) => {
-                entry.insert(Pair::after_attempts(1));
+            PendingOutcome::Unregistered => *pair = Pair::Unregistered(attempts + 1),
+            PendingOutcome::Unstarted if attempts == 0 => {
+                pairs.remove(&(aud, nonce));
             }
+            PendingOutcome::Unstarted => *pair = Pair::Unregistered(attempts),
         }
-        self.update_full(&pairs);
+        self.full
+            .store(pairs.len() >= self.limit, Ordering::Relaxed);
         drop(pairs);
     }
 
@@ -118,23 +134,31 @@ impl ReplayGuard {
         self.full.load(Ordering::Relaxed)
     }
 
+    /// Sets the pair to `next` of its previous state in one critical section, unless it is
+    /// processed or in flight.
     fn admit(
         &self,
-        pairs: &HashMap<(FieldElement, FieldElement), Pair>,
         aud: FieldElement,
         nonce: FieldElement,
+        next: impl FnOnce(Option<Pair>) -> Pair,
     ) -> Result<(), FailureReason> {
-        match pairs.get(&(aud, nonce)) {
-            Some(Pair::Processed) => Err(FailureReason::Replayed),
+        let mut pairs = self.lock();
+        let previous = pairs.get(&(aud, nonce)).copied();
+        match previous {
+            Some(Pair::Processed | Pair::InFlight(_)) => return Err(FailureReason::Replayed),
             None if pairs.len() >= self.limit => {
-                self.update_full(pairs);
-                Err(FailureReason::Internal)
+                self.update_full(&pairs);
+                return Err(FailureReason::Internal);
             }
-            Some(Pair::Unregistered(_)) | None => Ok(()),
+            Some(Pair::Unregistered(_)) | None => {}
         }
+        pairs.insert((aud, nonce), next(previous));
+        self.update_full(&pairs);
+        drop(pairs);
+        Ok(())
     }
 
-    fn update_full(&self, pairs: &HashMap<(FieldElement, FieldElement), Pair>) {
+    fn update_full(&self, pairs: &Pairs) {
         if pairs.len() >= self.limit && !self.full.swap(true, Ordering::Relaxed) {
             tracing::error!(
                 limit = self.limit,
@@ -143,7 +167,7 @@ impl ReplayGuard {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<(FieldElement, FieldElement), Pair>> {
+    fn lock(&self) -> MutexGuard<'_, Pairs> {
         self.pairs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -178,7 +202,10 @@ mod tests {
 
         let (aud, nonce) = pair(3, 3);
         assert_eq!(guard.reserve(aud, nonce), Err(FailureReason::Internal));
-        assert_eq!(guard.check(aud, nonce), Err(FailureReason::Internal));
+        assert_eq!(
+            guard.begin_pending(aud, nonce),
+            Err(FailureReason::Internal)
+        );
         assert!(guard.is_full());
         // A full set still never forgets a processed pair.
         assert_eq!(
@@ -188,26 +215,51 @@ mod tests {
     }
 
     #[test]
-    fn records_a_pair_at_its_last_unregistered_attempt() {
+    fn records_a_pending_pair_at_its_last_unregistered_attempt() {
         let guard = ReplayGuard::with_limit(4);
         let (aud, nonce) = (FieldElement::from(1u64), FieldElement::from(2u64));
         for _ in 1..MAX_BILLING_ATTEMPTS {
-            guard.reject_unregistered(aud, nonce);
-            assert_eq!(guard.check(aud, nonce), Ok(()));
+            assert_eq!(guard.begin_pending(aud, nonce), Ok(()));
+            guard.finish_pending(aud, nonce, PendingOutcome::Unregistered);
         }
-        guard.reject_unregistered(aud, nonce);
-        assert_eq!(guard.check(aud, nonce), Err(FailureReason::Replayed));
+        assert_eq!(guard.begin_pending(aud, nonce), Ok(()));
+        guard.finish_pending(aud, nonce, PendingOutcome::Unregistered);
+        assert_eq!(
+            guard.begin_pending(aud, nonce),
+            Err(FailureReason::Replayed)
+        );
     }
 
     #[test]
-    fn an_unregistered_pair_can_still_be_reserved_once() {
+    fn admits_no_copy_of_an_in_flight_pair() {
         let guard = ReplayGuard::with_limit(4);
         let (aud, nonce) = (FieldElement::from(1u64), FieldElement::from(2u64));
-        guard.reject_unregistered(aud, nonce);
+        assert_eq!(guard.begin_pending(aud, nonce), Ok(()));
+        assert_eq!(
+            guard.begin_pending(aud, nonce),
+            Err(FailureReason::Replayed)
+        );
+        assert_eq!(guard.reserve(aud, nonce), Err(FailureReason::Replayed));
+        guard.finish_pending(aud, nonce, PendingOutcome::Done);
+        assert_eq!(
+            guard.begin_pending(aud, nonce),
+            Err(FailureReason::Replayed)
+        );
+    }
+
+    #[test]
+    fn an_unstarted_pending_request_keeps_its_attempts() {
+        let guard = ReplayGuard::with_limit(1);
+        let (aud, nonce) = (FieldElement::from(1u64), FieldElement::from(2u64));
+        guard.begin_pending(aud, nonce).unwrap();
+        guard.finish_pending(aud, nonce, PendingOutcome::Unstarted);
+        assert!(!guard.is_full());
+        guard.begin_pending(aud, nonce).unwrap();
+        guard.finish_pending(aud, nonce, PendingOutcome::Unregistered);
+        guard.begin_pending(aud, nonce).unwrap();
+        guard.finish_pending(aud, nonce, PendingOutcome::Unstarted);
+        // The unregistered attempt still counts, and a registered resend can still sign once.
         assert_eq!(guard.reserve(aud, nonce), Ok(()));
         assert_eq!(guard.reserve(aud, nonce), Err(FailureReason::Replayed));
-        // Counting a processed pair leaves it processed.
-        guard.reject_unregistered(aud, nonce);
-        assert_eq!(guard.check(aud, nonce), Err(FailureReason::Replayed));
     }
 }
