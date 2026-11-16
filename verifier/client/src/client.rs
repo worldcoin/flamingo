@@ -151,7 +151,11 @@ pub fn open_verified_match(
                 .and_then(|token| token.verify(&signing_key).copied())
                 .map_err(|_| Error::StatementInvalid)?;
             Ok(VerifiedMatchResult::Success {
-                verified: Box::new(VerifiedMatch { statement, claims }),
+                verified: Box::new(VerifiedMatch {
+                    statement,
+                    claims,
+                    verifier_key: signing_key,
+                }),
                 debug_report,
             })
         }
@@ -343,6 +347,9 @@ pub struct VerifiedMatch {
     pub statement: flamingo_verifier_sealed_types::AttestedStatement,
     /// The token's claims, equal to those the request implies.
     pub claims: FlamingoClaims,
+    /// The Verifier's signing key, which `statement.signing_key_attestation` attests and the token
+    /// verifies under. A WIP-202 proof needs it.
+    pub verifier_key: EdDSAPublicKey,
 }
 
 /// Verified success or an encrypted unsigned rejection, with bounded worker diagnostics.
@@ -386,6 +393,7 @@ mod tests {
                     signing_key_attestation: vec![],
                 },
                 claims: *claims,
+                verifier_key: eddsa_babyjubjub::EdDSAPrivateKey::from_bytes([7; 32]).public(),
             }),
             debug_report: DebugReport::NotProduced,
         }
