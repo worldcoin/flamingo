@@ -13,7 +13,9 @@ use std::{
 use alloy_primitives::Bytes;
 use async_trait::async_trait;
 use eyre::{Result, bail, eyre};
-use flamingo_verifier_client::{Config, FlamingoVerifierClient, VerifiedMatch, VerifiedMatchResult};
+use flamingo_verifier_client::{
+    Config, FlamingoVerifierClient, VerifiedMatch, VerifiedMatchResult,
+};
 use flamingo_verifier_enclave::{dev, pipeline::PIPELINE_DEEPFACE, state::EnclaveState};
 use flamingo_verifier_enclave_types::{
     BillingStatus, BillingUpdateRequest, KeyAttestation, MatchRequest, MatchResponse,
