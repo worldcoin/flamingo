@@ -116,7 +116,8 @@ pub enum FailureReason {
     /// The RP is billed and the request carries `billing_nullifier = 0` (WIP-107 §4.7).
     BillingNullifierRequired,
     /// The RP is billed and no registration of `billing_nullifier` for `aud` in an active period
-    /// arrived by the last response slot (WIP-107 §4.7).
+    /// arrived by the last response slot (WIP-107 §4.7); the request may be resent (WIP-201
+    /// §4.4.4).
     BillingUnregistered,
     /// Backend infrastructure failed, distinct from biological rejection.
     Internal,
