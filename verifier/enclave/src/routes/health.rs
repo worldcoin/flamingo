@@ -53,7 +53,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_billing_enclave_is_ready_once_its_state_has_caught_up() {
-        let state = loaded_billing_state(UnusedBiometricEngine, CONFIG);
+        let state = loaded_billing_state(CONFIG);
         assert_eq!(
             handler(Arc::clone(&state), HealthRequest).await,
             Err(enclave_types::Error::NotReady)

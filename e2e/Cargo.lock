@@ -3981,14 +3981,14 @@ checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
 name = "flamingo-verifier-api-types"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "flamingo-verifier-billing-follower"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "alloy",
  "flamingo-verifier-billing-state",
@@ -4005,7 +4005,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-billing-state"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "serde",
  "world-id-primitives",
@@ -4013,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-client"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "base64 0.22.1",
  "flamingo-verifier-api-types",
@@ -4037,7 +4037,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4066,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave-types"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "bytes",
  "flamingo-verifier-billing-state",
@@ -4077,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-host"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4115,7 +4115,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-sealed-types"
-version = "0.11.2"
+version = "0.11.1"
 dependencies = [
  "base64 0.22.1",
  "ciborium",

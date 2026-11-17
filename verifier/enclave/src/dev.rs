@@ -17,7 +17,6 @@ use world_id_flamingo::ReleaseManifest;
 
 use crate::{
     attestation::{Attestation, Attestor},
-    billing::BillingConfig,
     biometric_engine::{
         BiometricEngine, BiometricError, DeepFaceScores, GrayBadgeScores, LiveCapture,
     },
@@ -28,18 +27,14 @@ use crate::{
 /// The similarity the stub Engine reports for every pair: match strictness 2 passes, 3 fails.
 pub const DEV_SCORE: f64 = 0.92;
 
-/// A Verifier with the stub Engine and `manifest` loaded, billing with `billing`, or billing
-/// nothing if it is `None`.
+/// A Verifier with the stub Engine and `manifest` loaded, billing nothing.
 ///
 /// Both keys are attested by an unsigned CBOR [`DevAttestation`], the channel key's carrying the
 /// loaded `release_hash`.
 ///
 /// # Errors
 /// Returns [`enclave_types::Error::ReleaseRejected`] for a manifest the Verifier rejects.
-pub fn verifier(
-    manifest: &str,
-    billing: Option<BillingConfig>,
-) -> Result<Arc<EnclaveState>, enclave_types::Error> {
+pub fn verifier(manifest: &str) -> Result<Arc<EnclaveState>, enclave_types::Error> {
     let engine_hash = ReleaseManifest::from_jws(manifest)
         .map_err(|_| enclave_types::Error::ReleaseRejected)?
         .payload()
@@ -48,7 +43,7 @@ pub fn verifier(
         Arc::new(DevAttestor),
         Box::new(StubEngine),
         engine_hash,
-        billing,
+        None,
     )?;
     state.load_release(manifest)?;
     Ok(Arc::new(state))
@@ -189,7 +184,7 @@ mod tests {
     use crate::pipeline::{PIPELINE_DEEPFACE, PIPELINE_GRAYBADGE_LIGHTGUARD};
 
     fn state() -> Arc<EnclaveState> {
-        verifier(&testing::manifest(testing::TEST_ENGINE_HASH, 1), None).unwrap()
+        verifier(&testing::manifest(testing::TEST_ENGINE_HASH, 1)).unwrap()
     }
 
     fn entry(data: &[u8], meta: &[u8]) -> Entry {
@@ -315,6 +310,6 @@ mod tests {
 
     #[test]
     fn rejects_a_malformed_manifest() {
-        assert!(verifier("not.a.jws", None).is_err());
+        assert!(verifier("not.a.jws").is_err());
     }
 }
