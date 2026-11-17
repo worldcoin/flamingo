@@ -39,18 +39,6 @@ pub struct BillingStore {
     inner: Mutex<Inner>,
 }
 
-/// What the billing state says about a request (WIP-107 §4.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BillingCheck {
-    /// Sign this `billing_nullifier` into the Flamingo Token.
-    Sign(FieldElement),
-    /// The request can never pass.
-    Reject(FailureReason),
-    /// A later update may let the request pass; without one by the last response slot, it fails
-    /// with this reason and may be resent (WIP-201 §4.4.4).
-    Pending(FailureReason),
-}
-
 struct Inner {
     state: State,
     /// The last applied `seq`, or `None` before the first stream and after a rejection.
@@ -87,27 +75,36 @@ impl BillingStore {
     }
 
     /// Checks the `billing_nullifier` of a request for `aud` at the Verifier's time `now`, in Unix
-    /// seconds: an RP that is not billed gets `0` signed, whatever the request carries.
-    #[must_use]
-    pub fn check(&self, aud: RpId, billing_nullifier: FieldElement, now: u64) -> BillingCheck {
+    /// seconds, returning the `billing_nullifier` to sign: `0` for an RP that is not billed,
+    /// whatever the request carries.
+    ///
+    /// # Errors
+    /// [`FailureReason::BillingNullifierRequired`] or [`FailureReason::BillingUnregistered`] for a
+    /// billed RP, [`FailureReason::Internal`] before the state has caught up.
+    pub fn check(
+        &self,
+        aud: RpId,
+        billing_nullifier: FieldElement,
+        now: u64,
+    ) -> Result<FieldElement, FailureReason> {
         if self.config.is_none() {
-            return BillingCheck::Sign(FieldElement::ZERO);
+            return Ok(FieldElement::ZERO);
         }
         let inner = self.lock();
         // A stream that has not caught up may still miss the RP's billing or the registration.
         if !inner.caught_up {
-            return BillingCheck::Pending(FailureReason::Internal);
+            return Err(FailureReason::Internal);
         }
         if !inner.state.billed_rps.contains(&aud) {
-            return BillingCheck::Sign(FieldElement::ZERO);
+            return Ok(FieldElement::ZERO);
         }
         if billing_nullifier == FieldElement::ZERO {
-            return BillingCheck::Reject(FailureReason::BillingNullifierRequired);
+            return Err(FailureReason::BillingNullifierRequired);
         }
         if inner.state.is_registered(billing_nullifier, aud, now) {
-            BillingCheck::Sign(billing_nullifier)
+            Ok(billing_nullifier)
         } else {
-            BillingCheck::Pending(FailureReason::BillingUnregistered)
+            Err(FailureReason::BillingUnregistered)
         }
     }
 
@@ -640,7 +637,7 @@ mod tests {
         let check = |nullifier: u64, now: u64| store.check(RpId::new(7), nullifier.into(), now);
         assert_eq!(
             check(1, NOW),
-            BillingCheck::Pending(FailureReason::Internal),
+            Err(FailureReason::Internal),
             "a store that has not caught up decides nothing"
         );
         store
@@ -653,32 +650,20 @@ mod tests {
                 NOW,
             )
             .unwrap();
-        assert_eq!(check(1, NOW), BillingCheck::Sign(1u64.into()));
-        assert_eq!(
-            check(0, NOW),
-            BillingCheck::Reject(FailureReason::BillingNullifierRequired)
-        );
-        assert_eq!(
-            check(3, NOW),
-            BillingCheck::Pending(FailureReason::BillingUnregistered)
-        );
+        assert_eq!(check(1, NOW), Ok(1u64.into()));
+        assert_eq!(check(0, NOW), Err(FailureReason::BillingNullifierRequired));
+        assert_eq!(check(3, NOW), Err(FailureReason::BillingUnregistered));
         // December's registration counts only once its period is active.
-        assert_eq!(
-            check(2, NOW),
-            BillingCheck::Pending(FailureReason::BillingUnregistered)
-        );
-        assert_eq!(
-            check(2, DEC_2026 - PERIOD_OVERLAP),
-            BillingCheck::Sign(2u64.into())
-        );
+        assert_eq!(check(2, NOW), Err(FailureReason::BillingUnregistered));
+        assert_eq!(check(2, DEC_2026 - PERIOD_OVERLAP), Ok(2u64.into()));
         assert_eq!(
             store.check(RpId::new(8), 1u64.into(), NOW),
-            BillingCheck::Sign(FieldElement::ZERO),
+            Ok(FieldElement::ZERO),
             "an RP that is not billed gets zero"
         );
         assert_eq!(
             BillingStore::new(None).check(RpId::new(7), 1u64.into(), NOW),
-            BillingCheck::Sign(FieldElement::ZERO)
+            Ok(FieldElement::ZERO)
         );
     }
 
