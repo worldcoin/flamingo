@@ -8,7 +8,7 @@ use flamingo_verifier_sealed_types::{
 };
 use tokio::time::{Instant, sleep_until};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
-use world_id_primitives::{FieldElement, rp::RpId};
+use world_id_primitives::rp::RpId;
 
 use crate::{
     biometric_engine::BiometricError,
@@ -86,14 +86,12 @@ struct Prepared {
     claims: FlamingoClaims,
     threshold: f64,
     operation: Operation,
-    aud: RpId,
-    billing_nullifier: FieldElement,
 }
 
 /// Checks the request against the release, rejects an expired or replayed one and records its
-/// (`aud`, `nonce`), then verifies its AAT and rejects a billed RP's `billing_nullifier = 0`
-/// (WIP-201 §4.4.3). A failure here never reaches the Engine; one after admission uses up the pair,
-/// as retries use a fresh `nonce` (WIP-201 §4.6).
+/// (`aud`, `nonce`), then verifies its AAT and checks billing (WIP-201 §4.4.3). A failure here
+/// never reaches the Engine and releases the pair, so no rejected request holds capacity in the
+/// replay set.
 ///
 /// Returns the slots the response is released at: the pipeline's, or, before the pipeline is
 /// known, the latest first slot of any pipeline, so an early rejection never leaves sooner than
@@ -129,30 +127,33 @@ fn prepare(
             return Err(FailureReason::UnsupportedMatchStrictness);
         }
         let threshold = pipeline::threshold(payload.match_strictness)?;
-        // Expiry and replay at one time read under the replay lock; a Busy result releases the pair.
-        state.replay().admit(&request, || state.now())?;
-        let now = u32::try_from(state.now()).map_err(|_| FailureReason::Internal)?;
-        // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
-        let claims = expected_claims(&request, &payload, release, now)?;
-        let operation = pipeline::operation(payload)?;
         let aud = u64::try_from(request.aud)
             .map(RpId::new)
             .map_err(|_| FailureReason::MalformedInputs)?;
-        // The only billing failure that can never pass; others wait for the Engine (WIP-107 §4.7).
-        if let Err(reason @ FailureReason::BillingNullifierRequired) =
-            state
-                .billing()
-                .check(aud, request.billing_nullifier, u64::from(now))
-        {
-            return Err(reason);
+        // Expiry and replay at one time read under the replay lock.
+        let now = state.replay().admit(&request, || state.now())?;
+        let admitted = (|| {
+            let now = u32::try_from(now).map_err(|_| FailureReason::Internal)?;
+            // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
+            let mut claims = expected_claims(&request, &payload, release, now)?;
+            let operation = pipeline::operation(payload)?;
+            // Once, before the Engine, so the billing state cannot change a run's outcome
+            // (WIP-201 §4.4.3).
+            claims.billing_nullifier =
+                state
+                    .billing()
+                    .check(aud, request.billing_nullifier, u64::from(now))?;
+            Ok(Prepared {
+                claims,
+                threshold,
+                operation,
+            })
+        })();
+        // The Engine never ran, so a later copy may run it once (WIP-201 §4.4.4).
+        if admitted.is_err() {
+            state.replay().release(request.aud, request.nonce);
         }
-        Ok(Prepared {
-            claims,
-            threshold,
-            operation,
-            aud,
-            billing_nullifier: request.billing_nullifier,
-        })
+        admitted
     })();
     (slots, checked)
 }
@@ -218,24 +219,7 @@ async fn run(
         }
     }
 
-    // After the Engine, so a registration sent right before the request has its run time to
-    // arrive; a rejected request is retried with a fresh `nonce` (WIP-201 §4.6).
-    match state
-        .billing()
-        .check(prepared.aud, prepared.billing_nullifier, state.now())
-    {
-        Ok(billing_nullifier) => {
-            let claims = FlamingoClaims {
-                billing_nullifier,
-                ..prepared.claims
-            };
-            sign(state, &claims, debug_report).await
-        }
-        Err(reason) => Ok(MatchResult::Failed {
-            reason,
-            debug_report,
-        }),
-    }
+    sign(state, &prepared.claims, debug_report).await
 }
 
 async fn sign(
@@ -666,22 +650,16 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    fn reason(result: &MatchResult) -> FailureReason {
-        let MatchResult::Failed { reason, .. } = result else {
-            panic!("expected a failure, got {result:?}")
-        };
-        *reason
-    }
-
     #[tokio::test]
-    async fn an_unregistered_request_fails_after_inference_and_a_retry_signs() {
+    async fn an_unregistered_request_fails_before_inference_and_a_retry_signs() {
         let passing = engine(0.95);
         let calls = Arc::clone(&passing.calls);
         let state = billing_state(passing, &[]);
-        let request = billed_request(1, 11);
-        let result = exchange(Arc::clone(&state), &request).await;
-        assert_eq!(reason(&result), FailureReason::BillingUnregistered);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            exchange(Arc::clone(&state), &billed_request(1, 11)).await,
+            rejected(FailureReason::BillingUnregistered)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         state
             .billing()
             .apply(
@@ -693,38 +671,42 @@ mod tests {
                 state.now(),
             )
             .unwrap();
-        assert_eq!(
-            exchange(Arc::clone(&state), &request).await,
-            rejected(FailureReason::Replayed)
-        );
         // The Authenticator retries with a fresh nonce (WIP-201 §4.6).
         let claims = verify(
             &state,
             exchange(Arc::clone(&state), &billed_request(2, 11)).await,
         );
         assert_eq!(claims.billing_nullifier, 11u64.into());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn signs_a_registration_that_arrives_while_the_engine_runs() {
+    async fn billing_changes_during_the_engine_run_do_not_change_its_outcome() {
         let mut slow = engine(0.95);
         slow.delay = Duration::from_millis(100);
-        let state = billing_state(slow, &[]);
-        let registering = Arc::clone(&state);
+        let state = billing_state(slow, &[11]);
+        let unbilling = Arc::clone(&state);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             let update = BillingUpdateRequest {
                 seq: 1,
-                ops: vec![add(11)],
+                ops: vec![BillingOp::SetBilledRp {
+                    rp_id: RpId::new(AUD),
+                    billed: false,
+                }],
                 backfill_done: true,
             };
-            registering
-                .billing()
-                .apply(&update, registering.now())
-                .unwrap();
+            unbilling.billing().apply(&update, unbilling.now()).unwrap();
         });
         let result = exchange(Arc::clone(&state), &billed_request(1, 11)).await;
         assert_eq!(verify(&state, result).billing_nullifier, 11u64.into());
+        assert_eq!(
+            state
+                .billing()
+                .check(RpId::new(AUD), 11u64.into(), state.now()),
+            Ok(FieldElement::ZERO),
+            "the update applied during the run"
+        );
     }
 
     #[tokio::test]
@@ -789,10 +771,13 @@ mod tests {
         let mut other = deep_face();
         other.match_strictness = 3;
         request.payload = other.encode().unwrap();
-        assert_eq!(
-            exchange(state, &request).await,
-            rejected(FailureReason::AatRejected)
-        );
+        for _ in 0..2 {
+            assert_eq!(
+                exchange(Arc::clone(&state), &request).await,
+                rejected(FailureReason::AatRejected),
+                "a rejected request releases its pair"
+            );
+        }
     }
 
     #[tokio::test]
