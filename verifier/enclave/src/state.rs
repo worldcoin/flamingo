@@ -1,8 +1,11 @@
 //! Boot-scoped state owned by the enclave.
 
-use std::sync::{
-    Arc, Mutex, OnceLock, PoisonError,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use eddsa_babyjubjub::EdDSAPublicKey;
@@ -19,6 +22,9 @@ use crate::{
     keys::SigningKey,
     replay::ReplayGuard,
 };
+
+/// How often expired replay entries are swept (WIP-201 §4.4.4 item 5).
+const REPLAY_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Immutable state generated once during enclave boot.
 pub struct EnclaveState {
@@ -231,6 +237,20 @@ impl EnclaveState {
             self.attested_encryption_key.start_refresh(),
             self.attested_signing_key.start_refresh(),
         )
+    }
+
+    /// Starts the background sweep of expired replay entries.
+    ///
+    /// Supervise the handle in `main`: if it completes, exit the process.
+    pub fn start_replay_sweep(self: &Arc<Self>) -> JoinHandle<()> {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REPLAY_SWEEP_INTERVAL);
+            loop {
+                interval.tick().await;
+                state.replay().sweep(state.now());
+            }
+        })
     }
 
     /// The attestation document for the encryption public key (last successful cache entry).
