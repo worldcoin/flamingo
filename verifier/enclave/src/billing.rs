@@ -290,6 +290,7 @@ impl State {
             return false;
         };
         let digest = self.digest(nullifier, rp_id);
+        // Check if the digest is in the current or next set (during overlap)
         std::iter::once(active.current)
             .chain(active.next)
             .any(|period_start| {
