@@ -52,7 +52,8 @@ impl ReplayGuard {
         }
     }
 
-    /// Rejects an expired or replayed request and records its pair until `expires_at`.
+    /// Rejects an expired or replayed request and records its pair until `expires_at`, returning
+    /// the Verifier time it checked the expiry at.
     ///
     /// `now` reads the Verifier's time; it runs under the lock the sweep takes, so no pair this
     /// accepts can have been swept already.
@@ -60,10 +61,15 @@ impl ReplayGuard {
     /// # Errors
     /// [`FailureReason::Expired`] for an expired request, [`FailureReason::Replayed`] for a held
     /// pair, [`FailureReason::Internal`] while full.
-    pub fn admit(&self, request: &Request, now: impl FnOnce() -> u64) -> Result<(), FailureReason> {
+    pub fn admit(
+        &self,
+        request: &Request,
+        now: impl FnOnce() -> u64,
+    ) -> Result<u64, FailureReason> {
         let pair = (request.aud, request.nonce);
         let mut pairs = self.lock();
-        request.check_expiry(now())?;
+        let now = now();
+        request.check_expiry(now)?;
         if pairs.expiries.contains_key(&pair) {
             return Err(FailureReason::Replayed);
         }
@@ -79,7 +85,7 @@ impl ReplayGuard {
             .push(pair);
         self.update_full(&pairs);
         drop(pairs);
-        Ok(())
+        Ok(now)
     }
 
     /// Releases only the pair admitted for a request whose Engine call never started.
@@ -174,17 +180,17 @@ mod tests {
         assert!(guard.is_full());
         guard.release(request.aud, request.nonce);
         assert!(!guard.is_full());
-        assert_eq!(guard.admit(&request, || NOW), Ok(()));
+        assert_eq!(guard.admit(&request, || NOW), Ok(NOW));
     }
 
     #[test]
     fn rejects_a_held_pair_and_fails_closed_while_full() {
         let guard = ReplayGuard::with_limit(2);
         let first = request(1, 1, NOW + 60);
-        assert_eq!(guard.admit(&first, || NOW), Ok(()));
+        assert_eq!(guard.admit(&first, || NOW), Ok(NOW));
         assert!(!guard.is_full());
         assert_eq!(guard.admit(&first, || NOW), Err(FailureReason::Replayed));
-        assert_eq!(guard.admit(&request(2, 1, NOW + 60), || NOW), Ok(()));
+        assert_eq!(guard.admit(&request(2, 1, NOW + 60), || NOW), Ok(NOW));
         assert!(guard.is_full());
         assert_eq!(
             guard.admit(&request(3, 3, NOW + 60), || NOW),
@@ -235,6 +241,9 @@ mod tests {
             guard.admit(&late, || NOW + 11),
             Err(FailureReason::Replayed)
         );
-        assert_eq!(guard.admit(&request(1, 1, NOW + 30), || NOW + 11), Ok(()));
+        assert_eq!(
+            guard.admit(&request(1, 1, NOW + 30), || NOW + 11),
+            Ok(NOW + 11)
+        );
     }
 }
