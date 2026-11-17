@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.11.1...flamingo-verifier-client-v0.11.2) - 2026-11-16
+
+### Added
+
+- *(client)* return the Verifier's signing key with a verified match ([#186](https://github.com/worldcoin/flamingo/pull/186))
+- run the Verifier in-process behind a dev feature ([#178](https://github.com/worldcoin/flamingo/pull/178))
+
 ## [0.11.1](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.11.0...flamingo-verifier-client-v0.11.1) - 2026-11-16
 
 ### Other

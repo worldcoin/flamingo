@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-api-types"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-billing-follower"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "alloy",
  "eyre",
@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-billing-state"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2576,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-client"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "base64 0.22.1",
  "flamingo-verifier-api-types",
@@ -2601,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-e2e"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "anyhow",
  "flamingo-verifier-client",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-enclave-types"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "bytes",
  "flamingo-verifier-billing-state",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-host"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "alloy",
  "anyhow",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "flamingo-verifier-sealed-types"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "base64 0.22.1",
  "ciborium",

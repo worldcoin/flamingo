@@ -13,7 +13,9 @@ use std::{
 use alloy_primitives::Bytes;
 use async_trait::async_trait;
 use eyre::{Result, bail, eyre};
-use flamingo_verifier_client::{Config, FlamingoVerifierClient, VerifiedMatchResult};
+use flamingo_verifier_client::{
+    Config, FlamingoVerifierClient, VerifiedMatch, VerifiedMatchResult,
+};
 use flamingo_verifier_enclave::{dev, pipeline::PIPELINE_DEEPFACE, state::EnclaveState};
 use flamingo_verifier_enclave_types::{
     BillingStatus, BillingUpdateRequest, KeyAttestation, MatchRequest, MatchResponse,
@@ -139,12 +141,14 @@ fn flamingo_result(result: VerifiedMatchResult) -> Result<FlamingoResult> {
     let VerifiedMatchResult::Success { verified, .. } = result else {
         bail!("expected a token, got {result:?}");
     };
-    let statement = verified.statement;
+    let VerifiedMatch {
+        statement,
+        verifier_key,
+        ..
+    } = *verified;
     Ok(FlamingoResult {
         token: FlamingoToken::from_cwt(&statement.token)?,
-        verifier_key: DevKeyAttestation
-            .attested_key(&statement.signing_key_attestation)
-            .map_err(|error| eyre!(error))?,
+        verifier_key,
         signing_key_attestation: Bytes::from(statement.signing_key_attestation),
     })
 }
