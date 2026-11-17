@@ -16,7 +16,7 @@ pub async fn handler(
 ) -> Result<(), enclave_types::Error> {
     state.check_worker_health();
     if state.release().is_none()
-        || state.replay().is_full(state.now())
+        || state.replay().is_full()
         || state.engine_overran()
         || !state.billing().is_ready()
     {

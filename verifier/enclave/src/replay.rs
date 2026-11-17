@@ -1,9 +1,11 @@
-//! WIP-201 §4.4.4 replay rejection: one request per (`aud`, `nonce`) under this boot's channel key.
+//! WIP-201 §4.4.4 expiry and replay rejection: one request per (`aud`, `nonce`) under this boot's
+//! channel key.
 //!
-//! A pair is kept until its request's `expires_at` has passed by the Verifier's time, which never
-//! moves backward, so expiry rejects the request once its pair is dropped. Reservations refused
-//! before inference may be released. The set is bounded so an untrusted host cannot exhaust
-//! memory; while full, the enclave refuses new pairs and reports not ready until entries expire.
+//! [`ReplayGuard::admit`] checks a request's expiry and records its pair under one lock, at a
+//! Verifier time it reads under that lock. [`ReplayGuard::sweep`] drops pairs whose `expires_at`
+//! has passed, under the same lock. The Verifier's time never moves backward, so a dropped pair's
+//! request is rejected as expired from then on. The set is bounded so an untrusted host cannot
+//! exhaust memory; while full, the enclave refuses every request and reports not ready.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -13,10 +15,10 @@ use std::{
     },
 };
 
-use flamingo_verifier_sealed_types::FailureReason;
+use flamingo_verifier_sealed_types::{FailureReason, Request};
 use world_id_primitives::FieldElement;
 
-/// Unexpired requests one boot holds, a few tens of MiB of state.
+/// Unexpired requests one boot holds.
 pub const MAX_PROCESSED_REQUESTS: usize = 262_144;
 
 type Pair = (FieldElement, FieldElement);
@@ -28,7 +30,7 @@ pub struct ReplayGuard {
     full: AtomicBool,
 }
 
-/// Each pair's `expires_at`, and the pairs by `expires_at` for eviction.
+/// Each pair's `expires_at`, and the pairs by `expires_at` for the sweep.
 #[derive(Default)]
 struct Pairs {
     expiries: HashMap<Pair, u64>,
@@ -50,40 +52,37 @@ impl ReplayGuard {
         }
     }
 
-    /// Records the pair until `expires_at`, or rejects it if this boot holds it, after dropping the
-    /// pairs expired at the Verifier's time `now`.
+    /// Rejects an expired or replayed request and records its pair until `expires_at`.
+    ///
+    /// `now` reads the Verifier's time; it runs under the lock the sweep takes, so no pair this
+    /// accepts can have been swept already.
     ///
     /// # Errors
-    /// [`FailureReason::Replayed`] for a held pair, [`FailureReason::Internal`] while full.
-    pub fn reserve(
-        &self,
-        aud: FieldElement,
-        nonce: FieldElement,
-        expires_at: u64,
-        now: u64,
-    ) -> Result<(), FailureReason> {
+    /// [`FailureReason::Expired`] for an expired request, [`FailureReason::Replayed`] for a held
+    /// pair, [`FailureReason::Internal`] while full.
+    pub fn admit(&self, request: &Request, now: impl FnOnce() -> u64) -> Result<(), FailureReason> {
+        let pair = (request.aud, request.nonce);
         let mut pairs = self.lock();
-        pairs.evict(now);
-        if pairs.expiries.contains_key(&(aud, nonce)) {
+        request.check_expiry(now())?;
+        if pairs.expiries.contains_key(&pair) {
             return Err(FailureReason::Replayed);
         }
         if pairs.expiries.len() >= self.limit {
             self.update_full(&pairs);
             return Err(FailureReason::Internal);
         }
-        pairs.expiries.insert((aud, nonce), expires_at);
+        pairs.expiries.insert(pair, request.expires_at);
         pairs
             .by_expiry
-            .entry(expires_at)
+            .entry(request.expires_at)
             .or_default()
-            .push((aud, nonce));
+            .push(pair);
         self.update_full(&pairs);
         drop(pairs);
         Ok(())
     }
 
-    /// Releases only the reservation owned by the request that acquired this pair,
-    /// and only when the Engine refused to start inference.
+    /// Releases only the pair admitted for a request whose Engine call never started.
     pub(crate) fn release(&self, aud: FieldElement, nonce: FieldElement) {
         let mut pairs = self.lock();
         if let Some(expires_at) = pairs.expiries.remove(&(aud, nonce))
@@ -98,12 +97,22 @@ impl ReplayGuard {
         drop(pairs);
     }
 
-    /// Whether the set has no capacity at the Verifier's time `now`, after dropping expired pairs.
-    pub fn is_full(&self, now: u64) -> bool {
+    /// Drops every pair whose `expires_at` is before the Verifier's time `now`.
+    pub fn sweep(&self, now: u64) {
         let mut pairs = self.lock();
-        pairs.evict(now);
+        let live = pairs.by_expiry.split_off(&now);
+        for pair in std::mem::replace(&mut pairs.by_expiry, live)
+            .into_values()
+            .flatten()
+        {
+            pairs.expiries.remove(&pair);
+        }
         self.update_full(&pairs);
         drop(pairs);
+    }
+
+    /// Whether the set has no capacity until the next sweep.
+    pub fn is_full(&self) -> bool {
         self.full.load(Ordering::Relaxed)
     }
 
@@ -124,103 +133,108 @@ impl ReplayGuard {
     }
 }
 
-impl Pairs {
-    /// Drops every pair whose `expires_at` is before `now`; expiry rejects its request from then on.
-    fn evict(&mut self, now: u64) {
-        let live = self.by_expiry.split_off(&now);
-        for pair in std::mem::replace(&mut self.by_expiry, live)
-            .into_values()
-            .flatten()
-        {
-            self.expiries.remove(&pair);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use flamingo_verifier_sealed_types::{Entry, Payload};
+
     use super::*;
 
     const NOW: u64 = 1_000;
 
-    fn pair(aud: u64, nonce: u64) -> Pair {
-        (aud.into(), nonce.into())
+    fn request(aud: u64, nonce: u64, expires_at: u64) -> Request {
+        let payload = Payload {
+            pipeline_id: 1,
+            match_strictness: 2,
+            hints: Vec::new(),
+            entries: [b"orb".as_slice(), b"live", b"challenge"]
+                .map(|data| Entry {
+                    data: data.to_vec(),
+                    meta: Vec::new(),
+                })
+                .into(),
+            pipeline_inputs: vec![1],
+            compare: vec![0, 1, 2],
+        };
+        Request::new(
+            aud.into(),
+            nonce.into(),
+            expires_at,
+            FieldElement::ZERO,
+            &payload,
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
     fn releasing_an_unstarted_request_restores_capacity() {
         let guard = ReplayGuard::with_limit(1);
-        let (aud, nonce) = pair(1, 2);
-        guard.reserve(aud, nonce, NOW + 60, NOW).unwrap();
-        assert!(guard.is_full(NOW));
-        guard.release(aud, nonce);
-        assert!(!guard.is_full(NOW));
-        assert_eq!(guard.reserve(aud, nonce, NOW + 60, NOW), Ok(()));
+        let request = request(1, 2, NOW + 60);
+        guard.admit(&request, || NOW).unwrap();
+        assert!(guard.is_full());
+        guard.release(request.aud, request.nonce);
+        assert!(!guard.is_full());
+        assert_eq!(guard.admit(&request, || NOW), Ok(()));
     }
 
     #[test]
     fn rejects_a_held_pair_and_fails_closed_while_full() {
         let guard = ReplayGuard::with_limit(2);
-        let (aud, nonce) = pair(1, 1);
-        assert_eq!(guard.reserve(aud, nonce, NOW + 60, NOW), Ok(()));
-        assert!(!guard.is_full(NOW));
+        let first = request(1, 1, NOW + 60);
+        assert_eq!(guard.admit(&first, || NOW), Ok(()));
+        assert!(!guard.is_full());
+        assert_eq!(guard.admit(&first, || NOW), Err(FailureReason::Replayed));
+        assert_eq!(guard.admit(&request(2, 1, NOW + 60), || NOW), Ok(()));
+        assert!(guard.is_full());
         assert_eq!(
-            guard.reserve(aud, nonce, NOW + 60, NOW),
-            Err(FailureReason::Replayed)
-        );
-        let (other_aud, _) = pair(2, 1);
-        assert_eq!(guard.reserve(other_aud, nonce, NOW + 60, NOW), Ok(()));
-        assert!(guard.is_full(NOW));
-
-        let (aud, nonce) = pair(3, 3);
-        assert_eq!(
-            guard.reserve(aud, nonce, NOW + 60, NOW),
+            guard.admit(&request(3, 3, NOW + 60), || NOW),
             Err(FailureReason::Internal)
         );
-        assert!(guard.is_full(NOW));
         // A full set still never forgets an unexpired pair.
-        assert_eq!(
-            guard.reserve(1u64.into(), 1u64.into(), NOW + 60, NOW),
-            Err(FailureReason::Replayed)
-        );
+        assert_eq!(guard.admit(&first, || NOW), Err(FailureReason::Replayed));
     }
 
     #[test]
-    fn keeps_a_pair_through_its_expiry_and_drops_it_after() {
+    fn rejects_an_expired_request_before_looking_it_up() {
         let guard = ReplayGuard::with_limit(1);
-        let (aud, nonce) = pair(1, 1);
-        guard.reserve(aud, nonce, NOW, NOW - 60).unwrap();
-        // The request is still accepted at `expires_at`, so its pair must still be held.
         assert_eq!(
-            guard.reserve(aud, nonce, NOW, NOW),
-            Err(FailureReason::Replayed)
+            guard.admit(&request(1, 1, NOW), || NOW + 1),
+            Err(FailureReason::Expired)
         );
-        assert!(guard.is_full(NOW));
-        assert!(!guard.is_full(NOW + 1));
-        assert_eq!(guard.reserve(aud, nonce, NOW + 61, NOW + 1), Ok(()));
+        assert!(!guard.is_full(), "an expired request records nothing");
     }
 
     #[test]
-    fn evicts_only_the_expired_pairs() {
-        let guard = ReplayGuard::with_limit(3);
-        guard
-            .reserve(1u64.into(), 1u64.into(), NOW + 10, NOW)
-            .unwrap();
-        guard
-            .reserve(1u64.into(), 2u64.into(), NOW + 20, NOW)
-            .unwrap();
-        guard
-            .reserve(1u64.into(), 3u64.into(), NOW + 10, NOW)
-            .unwrap();
-        assert!(guard.is_full(NOW + 10));
-        assert!(!guard.is_full(NOW + 11));
+    fn a_swept_pair_stays_rejected_as_expired() {
+        let guard = ReplayGuard::with_limit(1);
+        let request = request(1, 1, NOW);
+        guard.admit(&request, || NOW - 60).unwrap();
+        // Still accepted at `expires_at`, so the sweep keeps its pair.
+        guard.sweep(NOW);
+        assert_eq!(guard.admit(&request, || NOW), Err(FailureReason::Replayed));
+        guard.sweep(NOW + 1);
+        assert!(!guard.is_full());
+        // The copy reads the time under the lock, after the sweep, so it cannot slip back in.
         assert_eq!(
-            guard.reserve(1u64.into(), 2u64.into(), NOW + 20, NOW + 11),
+            guard.admit(&request, || NOW + 1),
+            Err(FailureReason::Expired)
+        );
+    }
+
+    #[test]
+    fn sweeps_only_the_expired_pairs() {
+        let guard = ReplayGuard::with_limit(3);
+        let late = request(1, 2, NOW + 20);
+        guard.admit(&request(1, 1, NOW + 10), || NOW).unwrap();
+        guard.admit(&late, || NOW).unwrap();
+        guard.admit(&request(1, 3, NOW + 10), || NOW).unwrap();
+        assert!(guard.is_full());
+        guard.sweep(NOW + 11);
+        assert!(!guard.is_full());
+        assert_eq!(
+            guard.admit(&late, || NOW + 11),
             Err(FailureReason::Replayed)
         );
-        assert_eq!(
-            guard.reserve(1u64.into(), 1u64.into(), NOW + 30, NOW + 11),
-            Ok(())
-        );
+        assert_eq!(guard.admit(&request(1, 1, NOW + 30), || NOW + 11), Ok(()));
     }
 }

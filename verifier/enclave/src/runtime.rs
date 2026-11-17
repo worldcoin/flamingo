@@ -107,6 +107,7 @@ async fn serve(
         .map_err(|error| anyhow!("failed to generate and attest the boot keys: {error:?}"))?;
     let (encryption_refresh, signing_refresh) = state.start_attestation_refresh();
     let state = Arc::new(state);
+    let replay_sweep = state.start_replay_sweep();
 
     let document = SecureModule::global()
         .attest(None::<Vec<u8>>, None::<Vec<u8>>, None::<Vec<u8>>)
@@ -135,6 +136,9 @@ async fn serve(
             Err(anyhow!(
                 "signing key attestation refresh stopped: {result:?}"
             ))
+        }
+        result = replay_sweep => {
+            Err(anyhow!("replay sweep stopped: {result:?}"))
         }
     }
 }
