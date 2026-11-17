@@ -8,7 +8,7 @@ use flamingo_verifier_sealed_types::{
 };
 use tokio::time::{Instant, sleep_until};
 use world_id_flamingo::{ReleaseManifest, ResponseSlots};
-use world_id_primitives::rp::RpId;
+use world_id_primitives::{FieldElement, rp::RpId};
 
 use crate::{
     biometric_engine::BiometricError,
@@ -86,11 +86,13 @@ struct Prepared {
     claims: FlamingoClaims,
     threshold: f64,
     operation: Operation,
+    aud: RpId,
+    billing_nullifier: FieldElement,
 }
 
-/// Checks the request against the release, the Verifier's time and the billing state, verifies
-/// its AAT and records its (`aud`, `nonce`) (WIP-201 §4.4.3). A failure here never reaches the
-/// Engine; an Authenticator retries with a new request and a fresh `nonce` (WIP-201 §4.6).
+/// Checks the request against the release and the Verifier's time, verifies its AAT, rejects a
+/// billed RP's `billing_nullifier = 0` and records its (`aud`, `nonce`) (WIP-201 §4.4.3). A failure
+/// here never reaches the Engine.
 ///
 /// Returns the slots the response is released at: the pipeline's, or, before the pipeline is
 /// known, the latest first slot of any pipeline, so an early rejection never leaves sooner than
@@ -130,21 +132,27 @@ fn prepare(
         request.check_expiry(now)?;
         let now = u32::try_from(now).map_err(|_| FailureReason::Internal)?;
         // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
-        let mut claims = expected_claims(&request, &payload, release, now)?;
+        let claims = expected_claims(&request, &payload, release, now)?;
         let operation = pipeline::operation(payload)?;
         let aud = u64::try_from(request.aud)
             .map(RpId::new)
             .map_err(|_| FailureReason::MalformedInputs)?;
-        claims.billing_nullifier =
+        // The only billing failure that can never pass; others wait for the Engine (WIP-107 §4.7).
+        if let Err(reason @ FailureReason::BillingNullifierRequired) =
             state
                 .billing()
-                .check(aud, request.billing_nullifier, u64::from(now))?;
+                .check(aud, request.billing_nullifier, u64::from(now))
+        {
+            return Err(reason);
+        }
         // Reserve last; a Busy result releases it because inference never started.
         state.replay().reserve(request.aud, request.nonce)?;
         Ok(Prepared {
             claims,
             threshold,
             operation,
+            aud,
+            billing_nullifier: request.billing_nullifier,
         })
     })();
     (slots, checked)
@@ -211,7 +219,24 @@ async fn run(
         }
     }
 
-    sign(state, &prepared.claims, debug_report).await
+    // After the Engine, so a registration sent right before the request has its run time to
+    // arrive; a rejected request is retried with a fresh `nonce` (WIP-201 §4.6).
+    match state
+        .billing()
+        .check(prepared.aud, prepared.billing_nullifier, state.now())
+    {
+        Ok(billing_nullifier) => {
+            let claims = FlamingoClaims {
+                billing_nullifier,
+                ..prepared.claims
+            };
+            sign(state, &claims, debug_report).await
+        }
+        Err(reason) => Ok(MatchResult::Failed {
+            reason,
+            debug_report,
+        }),
+    }
 }
 
 async fn sign(
@@ -642,29 +667,65 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    fn reason(result: &MatchResult) -> FailureReason {
+        let MatchResult::Failed { reason, .. } = result else {
+            panic!("expected a failure, got {result:?}")
+        };
+        *reason
+    }
+
     #[tokio::test]
-    async fn an_unregistered_request_fails_before_inference_and_a_retry_signs() {
+    async fn an_unregistered_request_fails_after_inference_and_a_retry_signs() {
         let passing = engine(0.95);
         let calls = Arc::clone(&passing.calls);
         let state = billing_state(passing, &[]);
+        let request = billed_request(1, 11);
+        let result = exchange(Arc::clone(&state), &request).await;
+        assert_eq!(reason(&result), FailureReason::BillingUnregistered);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        state
+            .billing()
+            .apply(
+                &BillingUpdateRequest {
+                    seq: 1,
+                    ops: vec![add(11)],
+                    backfill_done: true,
+                },
+                state.now(),
+            )
+            .unwrap();
         assert_eq!(
-            exchange(Arc::clone(&state), &billed_request(1, 11)).await,
-            rejected(FailureReason::BillingUnregistered)
+            exchange(Arc::clone(&state), &request).await,
+            rejected(FailureReason::Replayed)
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let update = BillingUpdateRequest {
-            seq: 1,
-            ops: vec![add(11)],
-            backfill_done: true,
-        };
-        state.billing().apply(&update, state.now()).unwrap();
         // The Authenticator retries with a fresh nonce (WIP-201 §4.6).
         let claims = verify(
             &state,
             exchange(Arc::clone(&state), &billed_request(2, 11)).await,
         );
         assert_eq!(claims.billing_nullifier, 11u64.into());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signs_a_registration_that_arrives_while_the_engine_runs() {
+        let mut slow = engine(0.95);
+        slow.delay = Duration::from_millis(100);
+        let state = billing_state(slow, &[]);
+        let registering = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let update = BillingUpdateRequest {
+                seq: 1,
+                ops: vec![add(11)],
+                backfill_done: true,
+            };
+            registering
+                .billing()
+                .apply(&update, registering.now())
+                .unwrap();
+        });
+        let result = exchange(Arc::clone(&state), &billed_request(1, 11)).await;
+        assert_eq!(verify(&state, result).billing_nullifier, 11u64.into());
     }
 
     #[tokio::test]
