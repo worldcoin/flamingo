@@ -100,7 +100,8 @@ impl FlamingoAttestationVerifier for DevKeyAttestation {
 ///
 /// Fresh per call, because the Verifier rejects a replayed request nonce.
 async fn serve_verifier() -> Result<String> {
-    let state = dev::verifier(&manifest()).map_err(|error| eyre!("dev verifier: {error:?}"))?;
+    let state =
+        dev::verifier(&manifest(), None).map_err(|error| eyre!("dev verifier: {error:?}"))?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let url = format!("http://{}", listener.local_addr()?);
     let app = routes::handler().with_state(AppState::new(
