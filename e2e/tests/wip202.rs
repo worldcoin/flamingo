@@ -146,6 +146,12 @@ async fn serve_verifier(billing: Option<&FixtureBilling>) -> Result<String> {
     Ok(url)
 }
 
+/// What a Flamingo request returned, and the salt its `nonce` was derived with.
+struct Attempt {
+    result: VerifiedMatchResult,
+    nonce_salt: FieldElement,
+}
+
 /// Sends the Authenticator's Flamingo request for `proof_request` to a fresh dev Verifier, billing
 /// with `billing` if set.
 async fn flamingo_call(
@@ -154,11 +160,11 @@ async fn flamingo_call(
     images: EmbeddingSimilarityImages,
     billing: Option<&FixtureBilling>,
     billing_nullifier: FieldElement,
-) -> Result<VerifiedMatchResult> {
+) -> Result<Attempt> {
     let url = serve_verifier(billing).await?;
     let client = FlamingoVerifierClient::new(Config::dangerously_accept_dev_attestation(&url)?)?;
     let session = client.connect().await?;
-    let request = flamingo_request(
+    let attempt = flamingo_request(
         proof_request,
         session.assignment().release(),
         match_strictness,
@@ -166,7 +172,10 @@ async fn flamingo_call(
         billing_nullifier,
         now_secs(),
     )?;
-    Ok(session.request_match(&request).await?)
+    Ok(Attempt {
+        result: session.request_match(&attempt.request).await?,
+        nonce_salt: attempt.nonce_salt,
+    })
 }
 
 /// Asserts that `result` failed with `expected`.
@@ -178,7 +187,7 @@ fn assert_failed(result: &VerifiedMatchResult, expected: FailureReason) {
 }
 
 /// What the Authenticator keeps of a successful match.
-fn flamingo_result(result: VerifiedMatchResult) -> Result<FlamingoResult> {
+fn flamingo_result(Attempt { result, nonce_salt }: Attempt) -> Result<FlamingoResult> {
     let VerifiedMatchResult::Success { verified, .. } = result else {
         bail!("expected a token, got {result:?}");
     };
@@ -191,6 +200,7 @@ fn flamingo_result(result: VerifiedMatchResult) -> Result<FlamingoResult> {
         token: FlamingoToken::from_cwt(&statement.token)?,
         verifier_key,
         signing_key_attestation: Bytes::from(statement.signing_key_attestation),
+        nonce_salt,
     })
 }
 
@@ -228,7 +238,7 @@ async fn wip202_proof_from_a_flamingo_token() -> Result<()> {
     };
 
     // Strictness 3 needs more than the stub Engine's score, so no token is issued.
-    let below = call(3, None, FieldElement::ZERO).await?;
+    let below = call(3, None, FieldElement::ZERO).await?.result;
     assert_failed(
         &below,
         FailureReason::MatchBelowThreshold(ComparisonRole::OrbSelfie),
@@ -240,7 +250,17 @@ async fn wip202_proof_from_a_flamingo_token() -> Result<()> {
         unbilled.token.claims().billing_nullifier,
         FieldElement::ZERO
     );
+    // The Verifier sees only the nonce derived from the RP's nonce and the attempt's salt.
+    assert_ne!(unbilled.token.claims().nonce, fixture.proof_request.nonce);
     let response = fixture.prove(&unbilled, None).await?;
+
+    // The proof binds the token's nonce to the RP's through the salt, so another salt fails.
+    let mut wrong_salt = unbilled.clone();
+    wrong_salt.nonce_salt = FieldElement::from(1u64);
+    assert!(
+        fixture.prove(&wrong_salt, None).await.is_err(),
+        "a proof with another salt"
+    );
 
     // `flamingo_request` picks the release's first single live frame pipeline.
     let release = ReleaseManifest::from_jws(&manifest())?;
@@ -275,9 +295,11 @@ async fn wip202_proof_from_a_flamingo_token() -> Result<()> {
 
     // A Verifier following the Billing Contract rejects the billed RP's request without a
     // registration (WIP-107 §4.7).
-    let required = call(2, Some(billing), FieldElement::ZERO).await?;
+    let required = call(2, Some(billing), FieldElement::ZERO).await?.result;
     assert_failed(&required, FailureReason::BillingNullifierRequired);
-    let unregistered = call(2, Some(billing), FieldElement::from(1u64)).await?;
+    let unregistered = call(2, Some(billing), FieldElement::from(1u64))
+        .await?
+        .result;
     assert_failed(&unregistered, FailureReason::BillingUnregistered);
 
     // Once registered, it signs the registration's nullifier, and the proof binds it.
