@@ -18,7 +18,7 @@ The enclave validates request bounds, expiry, pipeline, match strictness and opt
 
 The enclave's time is the `timestamp` of its latest Nitro attestation, advanced on its monotonic clock (WIP-201 §4.4.2). It attests its channel key again with the loaded `release_hash` as `user_data` when the provisioner loads the release.
 
-The enclave runs each (`aud`, `nonce`) once per boot. It keeps up to 262,144 of them in memory; once full, it refuses requests and reports not ready until it reboots with a new channel key.
+The enclave runs each (`aud`, `nonce`) once per boot. It keeps each pair until its request's `expires_at` has passed by its own time, which never moves backward, and holds up to 262,144 unexpired pairs; while full, it refuses new requests and reports not ready until entries expire.
 
 The current engine still returns similarity scores, so the enclave's [interim adapter](../verifier/enclave/src/pipeline.rs) maps pipelines to engine operations and strictness levels to thresholds. Every compared pair must clear the level's threshold.
 

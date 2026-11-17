@@ -146,7 +146,12 @@ fn prepare(
             return Err(reason);
         }
         // Reserve last; a Busy result releases it because inference never started.
-        state.replay().reserve(request.aud, request.nonce)?;
+        state.replay().reserve(
+            request.aud,
+            request.nonce,
+            request.expires_at,
+            u64::from(now),
+        )?;
         Ok(Prepared {
             claims,
             threshold,
