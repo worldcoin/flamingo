@@ -87,8 +87,9 @@ struct Prepared {
     operation: Operation,
 }
 
-/// Checks the request against the release and the Verifier's time, verifies its AAT and records
-/// its (`aud`, `nonce`) (WIP-201 §4.4.3). A failure here never reaches the Engine.
+/// Checks the request against the release, rejects an expired or replayed one and records its
+/// (`aud`, `nonce`), then verifies its AAT (WIP-201 §4.4.3). A failure here never reaches the
+/// Engine and releases the pair, so no rejected request holds capacity in the replay set.
 ///
 /// Returns the slots the response is released at: the pipeline's, or, before the pipeline is
 /// known, the latest first slot of any pipeline, so an early rejection never leaves sooner than
@@ -124,19 +125,24 @@ fn prepare(
             return Err(FailureReason::UnsupportedMatchStrictness);
         }
         let threshold = pipeline::threshold(payload.match_strictness)?;
-        let now = state.now();
-        request.check_expiry(now)?;
-        let now = u32::try_from(now).map_err(|_| FailureReason::Internal)?;
-        // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
-        let claims = expected_claims(&request, &payload, release, now)?;
-        let operation = pipeline::operation(payload)?;
-        // Reserve last; a Busy result releases it because inference never started.
-        state.replay().reserve(request.aud, request.nonce)?;
-        Ok(Prepared {
-            claims,
-            threshold,
-            operation,
-        })
+        // Expiry and replay at one time read under the replay lock.
+        let now = state.replay().admit(&request, || state.now())?;
+        let admitted = (|| {
+            let now = u32::try_from(now).map_err(|_| FailureReason::Internal)?;
+            // Verifies the AAT, so every WIP-106 check holds before the Engine sees the request.
+            let claims = expected_claims(&request, &payload, release, now)?;
+            let operation = pipeline::operation(payload)?;
+            Ok(Prepared {
+                claims,
+                threshold,
+                operation,
+            })
+        })();
+        // The Engine never ran, so a later copy may run it once (WIP-201 §4.4.4).
+        if admitted.is_err() {
+            state.replay().release(request.aud, request.nonce);
+        }
+        admitted
     })();
     (slots, checked)
 }
@@ -590,10 +596,13 @@ mod tests {
         let mut other = deep_face();
         other.match_strictness = 3;
         request.payload = other.encode().unwrap();
-        assert_eq!(
-            exchange(state, &request).await,
-            rejected(FailureReason::AatRejected)
-        );
+        for _ in 0..2 {
+            assert_eq!(
+                exchange(Arc::clone(&state), &request).await,
+                rejected(FailureReason::AatRejected),
+                "a rejected request releases its pair"
+            );
+        }
     }
 
     #[tokio::test]
