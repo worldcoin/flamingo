@@ -1,5 +1,6 @@
 //! WIP-202 end to end: an in-process Verifier issues a Flamingo Token, the Authenticator turns it
-//! into a Proof of Embedding Similarity, and an RP verifies it.
+//! into a Proof of Embedding Similarity, and an RP verifies it. Unbilled, and for an RP the WIP-107
+//! Billing Contract bills, with the host following the contract on anvil.
 
 #![deny(clippy::all, clippy::pedantic, clippy::nursery, dead_code)]
 #![recursion_limit = "256"]
@@ -7,25 +8,28 @@
 use std::{
     net::Ipv4Addr,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_primitives::Bytes;
 use async_trait::async_trait;
 use eyre::{Result, bail, eyre};
+use flamingo_verifier_billing_follower::RpcUrl;
 use flamingo_verifier_client::{
     Config, FlamingoVerifierClient, VerifiedMatch, VerifiedMatchResult,
 };
-use flamingo_verifier_enclave::{dev, pipeline::PIPELINE_DEEPFACE, state::EnclaveState};
+use flamingo_verifier_enclave::{
+    billing::BillingConfig, dev, pipeline::PIPELINE_DEEPFACE, state::EnclaveState,
+};
 use flamingo_verifier_enclave_types::{
     BillingStatus, BillingUpdateRequest, KeyAttestation, MatchRequest, MatchResponse,
 };
 use flamingo_verifier_host::{
-    AppState, HostConfig,
+    AppState, HostConfig, billing,
     enclave::{self, EnclaveClient},
     routes,
 };
-use flamingo_verifier_sealed_types::{FailureReason, dev::DevAttestation, testing};
+use flamingo_verifier_sealed_types::{ComparisonRole, FailureReason, dev::DevAttestation, testing};
 use tokio::net::TcpListener;
 use world_id_core::{
     EdDSAPublicKey, EmbeddingSimilarityImages, FieldElement, FlamingoResult,
@@ -37,7 +41,9 @@ use world_id_core::{
     requests::{ProofRequest, ProofType},
 };
 use world_id_flamingo::{FlamingoToken, ReleaseManifest, engine_config_hash};
-use world_id_test_utils::embedding_similarity::{EmbeddingSimilarityFixture, image_hash};
+use world_id_test_utils::embedding_similarity::{
+    EmbeddingSimilarityFixture, FixtureBilling, image_hash,
+};
 
 /// Response slots of the dev release, in milliseconds: the stub Engine answers at once.
 const SLOTS: &[u64] = &[1, 500];
@@ -96,18 +102,42 @@ impl FlamingoAttestationVerifier for DevKeyAttestation {
     }
 }
 
-/// Serves a fresh dev Verifier on a local port and returns its URL.
+/// Serves a fresh dev Verifier on a local port and returns its URL. With `billing`, the host
+/// follows that Billing Contract into the Verifier, which serves once it has caught up.
 ///
 /// Fresh per call, because the Verifier rejects a replayed request nonce.
-async fn serve_verifier() -> Result<String> {
-    let state =
-        dev::verifier(&manifest(), None).map_err(|error| eyre!("dev verifier: {error:?}"))?;
+async fn serve_verifier(billing: Option<&FixtureBilling>) -> Result<String> {
+    let state = dev::verifier(
+        &manifest(),
+        billing.map(|_| BillingConfig {
+            max_registrations: 16,
+        }),
+    )
+    .map_err(|error| eyre!("dev verifier: {error:?}"))?;
+    let enclave: Arc<dyn EnclaveClient> = Arc::new(DevEnclave(Arc::clone(&state)));
+    if let Some(fixture_billing) = billing {
+        let config = billing::BillingConfig {
+            rpc_url: RpcUrl(fixture_billing.rpc_url.parse()?),
+            chain_id: fixture_billing.chain_id,
+            contract: fixture_billing.contract,
+            deploy_block: fixture_billing.deploy_block,
+        };
+        let follower_enclave = Arc::clone(&enclave);
+        tokio::spawn(async move {
+            let error = billing::run(config, follower_enclave).await;
+            panic!("the billing follower stopped: {error:?}");
+        });
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !state.billing().is_ready() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| eyre!("the Verifier's billing state did not catch up within 60 s"))?;
+    }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let url = format!("http://{}", listener.local_addr()?);
-    let app = routes::handler().with_state(AppState::new(
-        HostConfig::default(),
-        Arc::new(DevEnclave(state)),
-    ));
+    let app = routes::handler().with_state(AppState::new(HostConfig::default(), enclave));
     tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -116,28 +146,48 @@ async fn serve_verifier() -> Result<String> {
     Ok(url)
 }
 
-/// Sends the Authenticator's Flamingo request for `proof_request` to a fresh dev Verifier.
+/// What a Flamingo request returned, and the salt its `nonce` was derived with.
+struct Attempt {
+    result: VerifiedMatchResult,
+    nonce_salt: FieldElement,
+}
+
+/// Sends the Authenticator's Flamingo request for `proof_request` to a fresh dev Verifier, billing
+/// with `billing` if set.
 async fn flamingo_call(
     proof_request: &ProofRequest,
     match_strictness: u8,
     images: EmbeddingSimilarityImages,
-) -> Result<VerifiedMatchResult> {
-    let url = serve_verifier().await?;
+    billing: Option<&FixtureBilling>,
+    billing_nullifier: FieldElement,
+) -> Result<Attempt> {
+    let url = serve_verifier(billing).await?;
     let client = FlamingoVerifierClient::new(Config::dangerously_accept_dev_attestation(&url)?)?;
     let session = client.connect().await?;
-    let request = flamingo_request(
+    let attempt = flamingo_request(
         proof_request,
         session.assignment().release(),
         match_strictness,
         images,
-        FieldElement::ZERO,
+        billing_nullifier,
         now_secs(),
     )?;
-    Ok(session.request_match(&request).await?)
+    Ok(Attempt {
+        result: session.request_match(&attempt.request).await?,
+        nonce_salt: attempt.nonce_salt,
+    })
+}
+
+/// Asserts that `result` failed with `expected`.
+fn assert_failed(result: &VerifiedMatchResult, expected: FailureReason) {
+    assert!(
+        matches!(result, VerifiedMatchResult::Failed { reason, .. } if *reason == expected),
+        "expected {expected:?}, got {result:?}"
+    );
 }
 
 /// What the Authenticator keeps of a successful match.
-fn flamingo_result(result: VerifiedMatchResult) -> Result<FlamingoResult> {
+fn flamingo_result(Attempt { result, nonce_salt }: Attempt) -> Result<FlamingoResult> {
     let VerifiedMatchResult::Success { verified, .. } = result else {
         bail!("expected a token, got {result:?}");
     };
@@ -150,6 +200,7 @@ fn flamingo_result(result: VerifiedMatchResult) -> Result<FlamingoResult> {
         token: FlamingoToken::from_cwt(&statement.token)?,
         verifier_key,
         signing_key_attestation: Bytes::from(statement.signing_key_attestation),
+        nonce_salt,
     })
 }
 
@@ -163,31 +214,53 @@ fn now_secs() -> u64 {
 // One test, since each fixture spawns anvil, containers and OPRF nodes.
 #[tokio::test(flavor = "multi_thread")]
 async fn wip202_proof_from_a_flamingo_token() -> Result<()> {
-    let fixture = Box::pin(EmbeddingSimilarityFixture::spawn(Arc::new(
+    let fixture = Box::pin(EmbeddingSimilarityFixture::spawn_billed(Arc::new(
         EmbeddedZkArtifacts.cached(),
     )))
     .await?;
+    let billing = fixture
+        .billing
+        .as_ref()
+        .ok_or_else(|| eyre!("the fixture bills the RP"))?;
     let images = EmbeddingSimilarityImages {
         credential_image: fixture.credential_image.clone(),
         live_capture: b"live capture".to_vec(),
         challenge: fixture.challenge.clone(),
     };
+    let call = |match_strictness, billing, billing_nullifier| {
+        flamingo_call(
+            &fixture.proof_request,
+            match_strictness,
+            images.clone(),
+            billing,
+            billing_nullifier,
+        )
+    };
 
     // Strictness 3 needs more than the stub Engine's score, so no token is issued.
-    let below = flamingo_call(&fixture.proof_request, 3, images.clone()).await?;
-    assert!(
-        matches!(
-            below,
-            VerifiedMatchResult::Failed {
-                reason: FailureReason::MatchBelowThreshold(_),
-                ..
-            }
-        ),
-        "{below:?}"
+    let below = call(3, None, FieldElement::ZERO).await?.result;
+    assert_failed(
+        &below,
+        FailureReason::MatchBelowThreshold(ComparisonRole::OrbSelfie),
     );
 
-    let result = flamingo_result(flamingo_call(&fixture.proof_request, 2, images).await?)?;
-    let response = fixture.prove(&result).await?;
+    // A Verifier that bills nothing signs `billing_nullifier = 0`.
+    let unbilled = flamingo_result(call(2, None, FieldElement::ZERO).await?)?;
+    assert_eq!(
+        unbilled.token.claims().billing_nullifier,
+        FieldElement::ZERO
+    );
+    // The Verifier sees only the nonce derived from the RP's nonce and the attempt's salt.
+    assert_ne!(unbilled.token.claims().nonce, fixture.proof_request.nonce);
+    let response = fixture.prove(&unbilled, None).await?;
+
+    // The proof binds the token's nonce to the RP's through the salt, so another salt fails.
+    let mut wrong_salt = unbilled.clone();
+    wrong_salt.nonce_salt = FieldElement::from(1u64);
+    assert!(
+        fixture.prove(&wrong_salt, None).await.is_err(),
+        "a proof with another salt"
+    );
 
     // `flamingo_request` picks the release's first single live frame pipeline.
     let release = ReleaseManifest::from_jws(&manifest())?;
@@ -219,5 +292,26 @@ async fn wip202_proof_from_a_flamingo_token() -> Result<()> {
         matches!(error, VerifyError::EngineNotAccepted(hash) if hash == dev_engine),
         "{error:?}"
     );
+
+    // A Verifier following the Billing Contract rejects the billed RP's request without a
+    // registration (WIP-107 §4.7).
+    let required = call(2, Some(billing), FieldElement::ZERO).await?.result;
+    assert_failed(&required, FailureReason::BillingNullifierRequired);
+    let unregistered = call(2, Some(billing), FieldElement::from(1u64))
+        .await?
+        .result;
+    assert_failed(&unregistered, FailureReason::BillingUnregistered);
+
+    // Once registered, it signs the registration's nullifier, and the proof binds it.
+    let witness = fixture.register_billing().await?;
+    let billed = flamingo_result(call(2, Some(billing), witness.billing_nullifier).await?)?;
+    assert_eq!(
+        billed.token.claims().billing_nullifier,
+        witness.billing_nullifier
+    );
+    let response = fixture.prove(&billed, Some(&witness)).await?;
+    fixture
+        .verify(&fixture.proof_request, &response, &policy)
+        .await?;
     Ok(())
 }
