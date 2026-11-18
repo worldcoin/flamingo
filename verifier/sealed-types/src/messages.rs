@@ -12,7 +12,7 @@ use crate::{DebugReport, FailureReason};
 /// The claims a Flamingo Token for `request` with the decoded `payload` must carry when `release`
 /// ran it at the Verifier's time `now`, in Unix seconds (WIP-201 §4.5). Verifies the AAT at `now`.
 ///
-/// `billing_nullifier` is `0`: this Verifier bills no RP yet (WIP-107 §4.7).
+/// `billing_nullifier` is `0`; the Verifier sets it after its billing check (WIP-107 §4.7).
 ///
 /// # Errors
 /// [`FailureReason::UnsupportedPipeline`] if `release` does not define the payload's pipeline or

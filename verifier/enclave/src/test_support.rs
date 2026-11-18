@@ -191,11 +191,15 @@ pub fn loaded_state_with_slots(
     Arc::new(state)
 }
 
-/// A loaded state that bills with `config`, with an Engine that must not be called.
-pub fn loaded_billing_state(config: crate::billing::BillingConfig) -> Arc<EnclaveState> {
+/// A state for `engine` with the [`manifest`] of [`TEST_ENGINE_HASH`] loaded, billing with
+/// `config`.
+pub fn loaded_billing_state(
+    engine: impl BiometricEngine + 'static,
+    config: crate::billing::BillingConfig,
+) -> Arc<EnclaveState> {
     let state = EnclaveState::generate(
         Arc::new(EchoAttestor),
-        Box::new(UnusedBiometricEngine),
+        Box::new(engine),
         TEST_ENGINE_HASH,
         Some(config),
     )
