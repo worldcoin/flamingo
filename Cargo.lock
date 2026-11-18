@@ -6791,9 +6791,9 @@ dependencies = [
 
 [[package]]
 name = "world-id-flamingo"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b3c2a25a77e8966d4bcaa986ee9b22566b601987b6d5faa30d85b78a9603e98"
+checksum = "e01cb4f169b8f9a06aedb22acb2989c02844bc95a63df40a82c2f01231f9c352"
 dependencies = [
  "base64 0.22.1",
  "coset",
@@ -6810,9 +6810,9 @@ dependencies = [
 
 [[package]]
 name = "world-id-primitives"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aedb89e9967a5e19594c9993dd5622abd446babbf392267881acf8ffeb6c9c3f"
+checksum = "4cbd504e182f07c03c4cb8489f099be1de1fada124e8385ec1665f9ba8bae5ac"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -6841,9 +6841,9 @@ dependencies = [
 
 [[package]]
 name = "world-id-registries"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf70d79d23e989bf30f9c2d015d04447393e1108b35669e99f9f6f5c51579739"
+checksum = "77a08ee3b35dda80afa209c252cbe1b958b31f9ad878645b899e5fb22fd0d475"
 dependencies = [
  "alloy",
  "anyhow",
