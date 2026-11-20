@@ -66,7 +66,7 @@ The sealed plaintext is the [WIP-201](https://github.com/worldcoin/world-id-prot
 | `3` | Credential image, live frame, challenge | Both LightGuard frames | DeepFace |
 | `4` | Live frame, challenge | Both LightGuard frames | GrayBadge |
 
-A release fixes each pipeline's input count, so single-frame and LightGuard captures use separate pipelines, and the loaded manifest must declare these counts. A LightGuard capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the second pipeline input, which is not compared. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.85`, `0.9` and `0.95` for every compared pair.
+A release fixes each pipeline's input count, so single-frame and LightGuard captures use separate pipelines, and the loaded manifest must declare these counts. A LightGuard capture marks the compared frame's `meta` as `illuminated` or `unilluminated` and adds the other frame as the second pipeline input, which is not compared. All other `meta` is empty. `match_strictness` levels `1`, `2` and `3` require similarities of `0.7295`, `0.9` and `0.95` for every compared pair.
 
 The enclave releases every opened request's response at the first of its pipeline's `response_slots` at which the Engine has finished, counted from arrival; a request rejected before its pipeline is known waits for the latest first slot of any pipeline. An Engine still running at the last slot fails the request with `engine_timeout`; the enclave then reports not ready and exits to reset the worker.
 

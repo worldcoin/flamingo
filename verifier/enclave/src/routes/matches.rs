@@ -126,17 +126,7 @@ fn prepare(
         if !release.has_match_strictness(payload.match_strictness) {
             return Err(FailureReason::UnsupportedMatchStrictness);
         }
-        let manifest = release.payload();
-        let threshold = if manifest.iss == "https://flamingo-attested-stage.worldcoin.dev"
-            && manifest.version == 1
-            && payload.pipeline_id == pipeline::PIPELINE_DEEPFACE
-            && payload.match_strictness == 2
-        {
-            // Mobile Vanilla's 0.459 raw cosine cutoff on the verifier's normalized scale.
-            0.7295
-        } else {
-            pipeline::threshold(payload.match_strictness)?
-        };
+        let threshold = pipeline::threshold(payload.match_strictness)?;
         let aud = u64::try_from(request.aud)
             .map(RpId::new)
             .map_err(|_| FailureReason::MalformedInputs)?;

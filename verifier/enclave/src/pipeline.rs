@@ -18,7 +18,7 @@ pub const PIPELINE_DEEPFACE_LIGHTGUARD: u16 = 3;
 pub const PIPELINE_GRAYBADGE_LIGHTGUARD: u16 = 4;
 
 /// `match_strictness` levels and the minimum normalized similarity of every compared pair.
-const MATCH_THRESHOLDS: [(u8, f64); 3] = [(1, 0.85), (2, 0.9), (3, 0.95)];
+const MATCH_THRESHOLDS: [(u8, f64); 3] = [(1, 0.7295), (2, 0.9), (3, 0.95)];
 
 /// Entry `meta` of the compared live frame and its partner in a `LightGuard` capture.
 const ILLUMINATED: &[u8] = b"illuminated";
