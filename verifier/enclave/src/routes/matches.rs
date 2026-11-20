@@ -807,11 +807,12 @@ mod tests {
     async fn mobile_level_requires_release_opt_in_and_binds_the_level_to_the_token() {
         use crate::test_support::{loaded_state_with_manifest, with_payload};
 
+        let nonce = || rand::random::<std::num::NonZeroU64>().get();
         let mut mobile = deep_face();
         mobile.match_strictness = 0;
         let current = loaded_state(UnusedBiometricEngine);
         assert_eq!(
-            exchange(Arc::clone(&current), &request(&mobile, 1)).await,
+            exchange(Arc::clone(&current), &request(&mobile, nonce())).await,
             rejected(FailureReason::UnsupportedMatchStrictness)
         );
 
@@ -819,7 +820,7 @@ mod tests {
         payload.match_strictness_levels.insert(0, 0);
         let manifest = with_payload(&serde_json::to_value(payload).unwrap());
         let state = loaded_state_with_manifest(engine(0.5), &manifest);
-        let result = exchange(Arc::clone(&state), &request(&mobile, 2)).await;
+        let result = exchange(Arc::clone(&state), &request(&mobile, nonce())).await;
         let claims = verify(&state, result);
         assert_eq!(
             claims.engine_config_hash,
@@ -830,7 +831,7 @@ mod tests {
             )
         );
         assert!(matches!(
-            exchange(state, &request(&deep_face(), 3)).await,
+            exchange(state, &request(&deep_face(), nonce())).await,
             MatchResult::Failed {
                 reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
                 ..
