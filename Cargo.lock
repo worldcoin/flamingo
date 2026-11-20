@@ -2552,11 +2552,14 @@ name = "flamingo-verifier-billing-follower"
 version = "0.11.3"
 dependencies = [
  "alloy",
+ "axum",
  "eyre",
  "flamingo-verifier-billing-state",
  "futures-util",
  "metrics",
  "rand 0.8.8",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

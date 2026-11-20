@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod follower;
+pub mod indexer;
 mod metrics;
 mod rpc;
 mod schedule;
