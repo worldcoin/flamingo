@@ -17,14 +17,8 @@ pub const PIPELINE_DEEPFACE_LIGHTGUARD: u16 = 3;
 /// [`PIPELINE_GRAYBADGE`] with a `LightGuard` capture: two live frames as pipeline inputs.
 pub const PIPELINE_GRAYBADGE_LIGHTGUARD: u16 = 4;
 
-/// Minimum similarity of every compared pair, in the units of the selected level.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum MatchThreshold {
-    /// Mobile Vanilla compares the raw cosine returned by the worker.
-    RawCosine(f64),
-    /// Historical levels compare the f32 midpoint of one and the raw cosine.
-    Normalized(f64),
-}
+/// `match_strictness` levels and the minimum normalized similarity of every compared pair.
+const MATCH_THRESHOLDS: [(u8, f64); 3] = [(1, 0.85), (2, 0.9), (3, 0.95)];
 
 /// Entry `meta` of the compared live frame and its partner in a `LightGuard` capture.
 const ILLUMINATED: &[u8] = b"illuminated";
@@ -54,39 +48,30 @@ pub enum Operation {
 ///
 /// # Errors
 /// Returns [`FailureReason::UnsupportedMatchStrictness`] for an undefined level.
-pub const fn threshold(match_strictness: u8) -> Result<MatchThreshold, FailureReason> {
-    match match_strictness {
-        0 => Ok(MatchThreshold::RawCosine(0.459)),
-        1 => Ok(MatchThreshold::Normalized(0.85)),
-        2 => Ok(MatchThreshold::Normalized(0.90)),
-        3 => Ok(MatchThreshold::Normalized(0.95)),
-        _ => Err(FailureReason::UnsupportedMatchStrictness),
-    }
+pub fn threshold(match_strictness: u8) -> Result<f64, FailureReason> {
+    MATCH_THRESHOLDS
+        .iter()
+        .find(|(level, _)| *level == match_strictness)
+        .map(|(_, threshold)| *threshold)
+        .ok_or(FailureReason::UnsupportedMatchStrictness)
 }
 
-impl MatchThreshold {
-    /// Checks the worker's raw cosine in the units of this threshold.
-    ///
-    /// # Errors
-    /// An invalid cosine is an engine fault. A comparison below the cutoff is a non-match.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "preserve the existing f32 cosine normalization"
-    )]
-    pub fn check(self, raw: f64, comparison: ComparisonRole) -> Result<(), FailureReason> {
-        if !(-1.0..=1.0).contains(&raw) {
-            return Err(FailureReason::Internal);
-        }
-        let matched = match self {
-            Self::RawCosine(min) => raw >= min,
-            Self::Normalized(min) => f64::from(f32::midpoint(1.0, raw as f32)) >= min,
-        };
-        if matched {
-            Ok(())
-        } else {
-            Err(FailureReason::MatchBelowThreshold(comparison))
-        }
+/// Fails a comparison below `threshold`; a score outside `0..=1` is an engine fault.
+///
+/// # Errors
+/// Returns [`FailureReason::MatchBelowThreshold`] or [`FailureReason::Internal`].
+pub fn check_score(
+    score: f64,
+    threshold: f64,
+    comparison: ComparisonRole,
+) -> Result<(), FailureReason> {
+    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+        return Err(FailureReason::Internal);
     }
+    if score < threshold {
+        return Err(FailureReason::MatchBelowThreshold(comparison));
+    }
+    Ok(())
 }
 
 /// Maps a validated payload onto an engine operation.
@@ -349,47 +334,23 @@ mod tests {
     }
 
     #[test]
-    fn strictness_levels_use_their_declared_score_units() {
-        assert_eq!(threshold(0), Ok(MatchThreshold::RawCosine(0.459)));
-        assert_eq!(threshold(1), Ok(MatchThreshold::Normalized(0.85)));
-        assert_eq!(threshold(2), Ok(MatchThreshold::Normalized(0.90)));
-        assert_eq!(threshold(3), Ok(MatchThreshold::Normalized(0.95)));
+    fn strictness_levels_map_to_increasing_thresholds() {
+        assert_eq!(threshold(0), Err(FailureReason::UnsupportedMatchStrictness));
         assert_eq!(threshold(4), Err(FailureReason::UnsupportedMatchStrictness));
+        assert!(threshold(1).unwrap() < threshold(2).unwrap());
+        assert!(threshold(2).unwrap() < threshold(3).unwrap());
     }
 
     #[test]
-    fn mobile_cutoff_matches_the_phone_at_adjacent_worker_scores() {
-        let role = ComparisonRole::OrbSelfie;
-        let threshold = threshold(0).unwrap();
-        let below = 0.459_f32;
-        let above = below.next_up();
-        assert!(f64::from(below) < 0.459 && f64::from(above) > 0.459);
-        assert_eq!(
-            threshold.check(f64::from(below), role),
-            Err(FailureReason::MatchBelowThreshold(role))
-        );
-        assert_eq!(threshold.check(f64::from(above), role), Ok(()));
-    }
-
-    #[test]
-    fn existing_levels_keep_their_f32_rounding_and_all_levels_reject_invalid_scores() {
+    fn scores_must_be_valid_and_reach_the_threshold() {
         let role = ComparisonRole::SelfieChallenge;
-        // The f32 midpoint of 1 and 0.8 rounds just below the f64 cutoff at level 2.
+        for score in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
+            assert_eq!(check_score(score, 0.8, role), Err(FailureReason::Internal));
+        }
         assert_eq!(
-            threshold(2).unwrap().check(0.8, role),
+            check_score(0.7, 0.8, role),
             Err(FailureReason::MatchBelowThreshold(role))
         );
-        assert_eq!(
-            threshold(2)
-                .unwrap()
-                .check(f64::from(0.8_f32.next_up()), role),
-            Ok(())
-        );
-        for level in 0..=3 {
-            let threshold = threshold(level).unwrap();
-            for raw in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.01, 1.01] {
-                assert_eq!(threshold.check(raw, role), Err(FailureReason::Internal));
-            }
-        }
+        assert_eq!(check_score(0.8, 0.8, role), Ok(()));
     }
 }

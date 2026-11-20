@@ -25,8 +25,8 @@ use crate::{
     state::EnclaveState,
 };
 
-/// Raw cosine for every stub pair (0.92 normalized): strictness 2 passes, 3 fails.
-pub const DEV_SCORE: f64 = 0.84;
+/// The similarity the stub Engine reports for every pair: match strictness 2 passes, 3 fails.
+pub const DEV_SCORE: f64 = 0.92;
 
 /// A Verifier with the stub Engine and `manifest` loaded, billing with `billing`, or billing
 /// nothing if it is `None`.

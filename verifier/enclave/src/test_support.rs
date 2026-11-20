@@ -178,14 +178,6 @@ pub fn loaded_state_with_slots(
     engine: impl BiometricEngine + 'static,
     slots: &[u64],
 ) -> Arc<EnclaveState> {
-    loaded_state_with_manifest(engine, &manifest_with_slots(TEST_ENGINE_HASH, 1, slots))
-}
-
-/// Loads the supplied test manifest into a fresh state.
-pub fn loaded_state_with_manifest(
-    engine: impl BiometricEngine + 'static,
-    manifest: &str,
-) -> Arc<EnclaveState> {
     let state = EnclaveState::generate(
         Arc::new(EchoAttestor),
         Box::new(engine),
@@ -194,7 +186,7 @@ pub fn loaded_state_with_manifest(
     )
     .expect("boot state should generate");
     state
-        .load_release(manifest)
+        .load_release(&manifest_with_slots(TEST_ENGINE_HASH, 1, slots))
         .expect("the test manifest should load");
     Arc::new(state)
 }
