@@ -84,7 +84,7 @@ pub async fn handler(
 /// A request that passed every check before inference.
 struct Prepared {
     claims: FlamingoClaims,
-    threshold: f64,
+    threshold: pipeline::MatchThreshold,
     operation: Operation,
 }
 
@@ -210,7 +210,7 @@ async fn run(
 
     // The token carries no score; every compared pair must clear the strictness level.
     for (score, role) in scores {
-        if let Err(reason) = pipeline::check_score(score, prepared.threshold, role) {
+        if let Err(reason) = prepared.threshold.check(score, role) {
             return BiometricError::AnalysisRejected {
                 reason,
                 debug_report,
@@ -782,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_comparison_must_clear_the_strictness_level() {
-        let state = loaded_state(engine(0.89));
+        let state = loaded_state(engine(0.78));
         assert_eq!(
             exchange(Arc::clone(&state), &request(&deep_face(), 1)).await,
             MatchResult::Failed {
@@ -791,11 +791,46 @@ mod tests {
             }
         );
 
-        let state = loaded_state(engine(0.92));
+        let state = loaded_state(engine(0.84));
         let mut strict = deep_face();
         strict.match_strictness = 3;
         assert!(matches!(
             exchange(state, &request(&strict, 1)).await,
+            MatchResult::Failed {
+                reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn mobile_level_requires_release_opt_in_and_binds_the_level_to_the_token() {
+        use crate::test_support::{loaded_state_with_manifest, with_payload};
+
+        let mut mobile = deep_face();
+        mobile.match_strictness = 0;
+        let current = loaded_state(UnusedBiometricEngine);
+        assert_eq!(
+            exchange(Arc::clone(&current), &request(&mobile, 1)).await,
+            rejected(FailureReason::UnsupportedMatchStrictness)
+        );
+
+        let mut payload = current.release().unwrap().payload().clone();
+        payload.match_strictness_levels.insert(0, 0);
+        let manifest = with_payload(&serde_json::to_value(payload).unwrap());
+        let state = loaded_state_with_manifest(engine(0.5), &manifest);
+        let result = exchange(Arc::clone(&state), &request(&mobile, 2)).await;
+        let claims = verify(&state, result);
+        assert_eq!(
+            claims.engine_config_hash,
+            engine_config_hash(
+                &state.release().unwrap().release_hash(),
+                PIPELINE_DEEPFACE,
+                0
+            )
+        );
+        assert!(matches!(
+            exchange(state, &request(&deep_face(), 3)).await,
             MatchResult::Failed {
                 reason: FailureReason::MatchBelowThreshold(ComparisonRole::SelfieChallenge),
                 ..

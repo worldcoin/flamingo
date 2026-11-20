@@ -48,7 +48,7 @@ pub enum LiveCapture {
     },
 }
 
-/// Normalized inference scores; policy and signed claims belong to the operation.
+/// Raw cosine similarities in `[-1, 1]`; policy and signed claims belong to the operation.
 #[derive(Clone, Debug)]
 pub struct DeepFaceScores {
     /// Credential versus live image.
@@ -61,7 +61,7 @@ pub struct DeepFaceScores {
     pub debug_report: DebugReport,
 }
 
-/// Normalized credential-free inference score.
+/// Raw cosine similarity in `[-1, 1]` for a credential-free comparison.
 #[derive(Debug)]
 pub struct GrayBadgeScores {
     /// Live versus challenge image.
@@ -189,23 +189,12 @@ impl<W: Send + 'static> Executor<W> {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "preserve the existing f32 cosine normalization"
-)]
-fn normalized(score: f64) -> f64 {
-    f64::from(f32::midpoint(1.0, score as f32))
-}
-
 #[cfg(target_os = "linux")]
 pub use sandboxed::SandboxBiometricEngine;
 
 #[cfg(target_os = "linux")]
 mod sandboxed {
-    use super::{
-        BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores, normalized,
-    };
+    use super::{BiometricEngine, BiometricError, DeepFaceScores, Executor, GrayBadgeScores};
     use super::{Instant, LiveCapture};
     use async_trait::async_trait;
     use biometric_engines_protocol::{
@@ -302,21 +291,15 @@ mod sandboxed {
                 unreachable!("client validates response operation")
             };
             Ok(DeepFaceScores {
-                credential_live: normalized(
-                    scores
-                        .similarity_credential_live
-                        .expect("client validates required scores"),
-                ),
-                credential_challenge: normalized(
-                    scores
-                        .similarity_credential_challenge
-                        .expect("client validates required scores"),
-                ),
-                live_challenge: normalized(
-                    scores
-                        .similarity_live_challenge
-                        .expect("client validates required scores"),
-                ),
+                credential_live: scores
+                    .similarity_credential_live
+                    .expect("client validates required scores"),
+                credential_challenge: scores
+                    .similarity_credential_challenge
+                    .expect("client validates required scores"),
+                live_challenge: scores
+                    .similarity_live_challenge
+                    .expect("client validates required scores"),
                 debug_report: scores.debug_report.into(),
             })
         }
@@ -340,11 +323,9 @@ mod sandboxed {
                 unreachable!("client validates response operation")
             };
             Ok(GrayBadgeScores {
-                live_challenge: normalized(
-                    scores
-                        .similarity_live_challenge
-                        .expect("client validates required score"),
-                ),
+                live_challenge: scores
+                    .similarity_live_challenge
+                    .expect("client validates required score"),
                 debug_report: scores.debug_report.into(),
             })
         }
@@ -428,18 +409,6 @@ mod tests {
                 debug_report: DebugReport::NotProduced
             })
         );
-    }
-
-    #[test]
-    fn preserves_existing_score_normalization() {
-        for (raw, expected) in [
-            (-1.0, 0.0),
-            (0.0, 0.5),
-            (1.0, 1.0),
-            (0.8, f64::from(0.9f32)),
-        ] {
-            assert_eq!(normalized(raw).to_bits(), expected.to_bits());
-        }
     }
 
     #[tokio::test]
