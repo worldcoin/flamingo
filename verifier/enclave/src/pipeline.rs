@@ -54,7 +54,7 @@ pub enum Operation {
 ///
 /// # Errors
 /// Returns [`FailureReason::UnsupportedMatchStrictness`] for an undefined level.
-pub fn threshold(match_strictness: u8) -> Result<MatchThreshold, FailureReason> {
+pub const fn threshold(match_strictness: u8) -> Result<MatchThreshold, FailureReason> {
     match match_strictness {
         0 => Ok(MatchThreshold::RawCosine(0.459)),
         1 => Ok(MatchThreshold::Normalized(0.85)),
