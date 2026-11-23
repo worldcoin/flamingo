@@ -31,7 +31,7 @@ world-id-core = { git = "https://github.com/worldcoin/world-id-protocol", rev = 
     "embed-embedding-similarity-prover",
     "embed-embedding-similarity-verifier",
 ] }
-world-id-flamingo = "0.24.0"
+world-id-flamingo = "0.25.0"
 world-id-test-utils = { git = "https://github.com/worldcoin/world-id-protocol", rev = "41e7cfe5930cd78220d6ce39a2674a395e641482", features = ["embedding-similarity"] }
 
 # One copy of the World ID types: the main workspace's crates.io versions, from the pinned rev.

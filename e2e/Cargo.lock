@@ -3999,7 +3999,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "world-id-primitives 0.25.0",
+ "world-id-primitives",
  "world-id-registries",
 ]
 
@@ -4008,7 +4008,7 @@ name = "flamingo-verifier-billing-state"
 version = "0.11.3"
 dependencies = [
  "serde",
- "world-id-primitives 0.25.0",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -4030,8 +4030,8 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "url",
  "webpki-roots 1.0.10",
- "world-id-flamingo 0.25.0",
- "world-id-primitives 0.25.0",
+ "world-id-flamingo",
+ "world-id-primitives",
  "zeroize",
 ]
 
@@ -4060,8 +4060,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "world-id-flamingo 0.25.0",
- "world-id-primitives 0.25.0",
+ "world-id-flamingo",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -4099,8 +4099,8 @@ dependencies = [
  "tracing",
  "tungstenite 0.29.0",
  "url",
- "world-id-flamingo 0.25.0",
- "world-id-primitives 0.25.0",
+ "world-id-flamingo",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -4125,8 +4125,8 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "world-id-flamingo 0.25.0",
- "world-id-primitives 0.25.0",
+ "world-id-flamingo",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -4145,7 +4145,7 @@ dependencies = [
  "flamingo-verifier-sealed-types",
  "tokio",
  "world-id-core",
- "world-id-flamingo 0.24.0",
+ "world-id-flamingo",
  "world-id-test-utils",
 ]
 
@@ -11688,8 +11688,8 @@ dependencies = [
  "tokio",
  "webpki-root-certs 1.0.10",
  "webpki-roots 1.0.10",
- "world-id-flamingo 0.25.0",
- "world-id-primitives 0.25.0",
+ "world-id-flamingo",
+ "world-id-primitives",
  "world-id-proof",
  "world-id-registries",
  "zeroize",
@@ -11702,29 +11702,10 @@ source = "git+https://github.com/worldcoin/world-id-protocol?rev=41e7cfe5930cd78
 dependencies = [
  "taceo-eddsa-babyjubjub",
  "world-id-authenticator",
- "world-id-primitives 0.25.0",
+ "world-id-primitives",
  "world-id-proof",
  "world-id-registries",
  "world-id-rp",
-]
-
-[[package]]
-name = "world-id-flamingo"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01cb4f169b8f9a06aedb22acb2989c02844bc95a63df40a82c2f01231f9c352"
-dependencies = [
- "base64 0.22.1",
- "coset",
- "hex",
- "jose-jwk",
- "p256 0.13.2",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "taceo-eddsa-babyjubjub",
- "thiserror 2.0.18",
- "world-id-primitives 0.24.0",
 ]
 
 [[package]]
@@ -11742,7 +11723,7 @@ dependencies = [
  "sha2 0.11.0",
  "taceo-eddsa-babyjubjub",
  "thiserror 2.0.18",
- "world-id-primitives 0.25.0",
+ "world-id-primitives",
 ]
 
 [[package]]
@@ -11773,7 +11754,7 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "uuid",
- "world-id-primitives 0.25.0",
+ "world-id-primitives",
  "world-id-registries",
  "world-id-services-common",
 ]
@@ -11811,39 +11792,8 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "world-id-primitives 0.25.0",
+ "world-id-primitives",
  "world-id-registries",
-]
-
-[[package]]
-name = "world-id-primitives"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cbd504e182f07c03c4cb8489f099be1de1fada124e8385ec1665f9ba8bae5ac"
-dependencies = [
- "alloy-primitives",
- "alloy-sol-types",
- "ark-ff 0.6.0",
- "arrayvec",
- "ciborium",
- "coset",
- "embed-doc-image",
- "eyre",
- "getrandom 0.4.1",
- "hex",
- "p256 0.13.2",
- "percent-encoding",
- "rand 0.8.6",
- "ruint",
- "serde",
- "serde_json",
- "sha3 0.10.8",
- "strum 0.27.2",
- "taceo-ark-babyjubjub",
- "taceo-eddsa-babyjubjub",
- "taceo-poseidon2",
- "thiserror 2.0.18",
- "url",
 ]
 
 [[package]]
@@ -11921,8 +11871,8 @@ dependencies = [
  "tar",
  "thiserror 2.0.18",
  "tracing",
- "world-id-flamingo 0.25.0",
- "world-id-primitives 0.25.0",
+ "world-id-flamingo",
+ "world-id-primitives",
  "zeroize",
  "zstd",
 ]
@@ -11944,8 +11894,8 @@ dependencies = [
  "pontifex",
  "taceo-eddsa-babyjubjub",
  "thiserror 2.0.18",
- "world-id-flamingo 0.25.0",
- "world-id-primitives 0.25.0",
+ "world-id-flamingo",
+ "world-id-primitives",
  "world-id-proof",
 ]
 
@@ -12007,7 +11957,7 @@ dependencies = [
  "world-id-core",
  "world-id-gateway",
  "world-id-oprf-node",
- "world-id-primitives 0.25.0",
+ "world-id-primitives",
 ]
 
 [[package]]
