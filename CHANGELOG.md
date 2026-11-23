@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.11.3...flamingo-verifier-client-v0.11.4) - 2026-11-23
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.11.3](https://github.com/worldcoin/flamingo/compare/flamingo-verifier-client-v0.11.2...flamingo-verifier-client-v0.11.3) - 2026-11-18
 
 ### Added
