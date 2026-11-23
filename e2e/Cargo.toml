@@ -24,22 +24,22 @@ flamingo-verifier-enclave-types = { path = "../verifier/enclave-types" }
 flamingo-verifier-host = { path = "../verifier/host" }
 flamingo-verifier-sealed-types = { path = "../verifier/sealed-types", features = ["dev", "testing"] }
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread"] }
-world-id-core = { git = "https://github.com/worldcoin/world-id-protocol", rev = "79f92113a0ac84e5bf1329ba24669acab0e9a4ba", default-features = false, features = [
+world-id-core = { git = "https://github.com/worldcoin/world-id-protocol", rev = "41e7cfe5930cd78220d6ce39a2674a395e641482", default-features = false, features = [
     "authenticator",
     "rp",
     "embed-zkeys",
     "embed-embedding-similarity-prover",
     "embed-embedding-similarity-verifier",
 ] }
-world-id-flamingo = "0.24.0"
-world-id-test-utils = { git = "https://github.com/worldcoin/world-id-protocol", rev = "79f92113a0ac84e5bf1329ba24669acab0e9a4ba", features = ["embedding-similarity"] }
+world-id-flamingo = "0.25.0"
+world-id-test-utils = { git = "https://github.com/worldcoin/world-id-protocol", rev = "41e7cfe5930cd78220d6ce39a2674a395e641482", features = ["embedding-similarity"] }
 
 # One copy of the World ID types: the main workspace's crates.io versions, from the pinned rev.
 # `check-versions.sh` keeps the main workspace's versions equal to the rev's.
 [patch.crates-io]
-world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", rev = "79f92113a0ac84e5bf1329ba24669acab0e9a4ba" }
-world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "79f92113a0ac84e5bf1329ba24669acab0e9a4ba" }
-world-id-registries = { git = "https://github.com/worldcoin/world-id-protocol", rev = "79f92113a0ac84e5bf1329ba24669acab0e9a4ba" }
+world-id-flamingo = { git = "https://github.com/worldcoin/world-id-protocol", rev = "41e7cfe5930cd78220d6ce39a2674a395e641482" }
+world-id-primitives = { git = "https://github.com/worldcoin/world-id-protocol", rev = "41e7cfe5930cd78220d6ce39a2674a395e641482" }
+world-id-registries = { git = "https://github.com/worldcoin/world-id-protocol", rev = "41e7cfe5930cd78220d6ce39a2674a395e641482" }
 
 # Arkworks key loading and proving are prohibitively slow unoptimized.
 [profile.dev.package."*"]
