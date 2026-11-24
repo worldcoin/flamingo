@@ -67,5 +67,7 @@ gh workflow run release-server.yml --repo worldcoin/flamingo --ref main \
   -f version=1.0.0-rc.1
 ```
 
+With `-f billing=true` the release carries the enclave image that enforces WIP-107 billing, and `release.json` says `"billing": true`. Its PCRs differ from the default image's. Deploy it only where the host's `BILLING_*` options are set, since the enclave is not ready until the host has synced the Billing Contract ([Billing state](architecture.md#billing-state)).
+
 Client crate versions are independent. The provisioner stays in the deploy repo;
 `release.json` contains the image digests, EIF checksum, and PCRs.
