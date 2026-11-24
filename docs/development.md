@@ -23,7 +23,7 @@ scripts/build-enclaves.sh --workload verifier
 jq . target/eif/verifier-pcr.json
 ```
 
-The script builds a reproducible OCI image and writes `target/eif/verifier-enclave.eif` and `target/eif/verifier-pcr.json`. Both images use the same root filesystem. Expect about 90 minutes for a cold build.
+The script builds a reproducible OCI image and writes `target/eif/verifier-enclave.eif` and `target/eif/verifier-pcr.json`. Both images use the same root filesystem. Expect about 90 minutes for a cold build. `--billing` builds the image that enforces WIP-107 billing (`.#verifier-billing-oci` and `.#verifier-billing-eif`) into the same file names.
 
 To build and inspect only the OCI image after fetching the models:
 

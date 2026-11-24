@@ -14,13 +14,23 @@ let
     hash = "sha256-dV5lC3Mnd7eYy57CQ+5AK+9IJveJzwGh5FO7ckIHwAU=";
   };
 
+  # WIP-107 registrations a billing enclave holds: about 72 MiB of state, twice that while a new
+  # billing stream catches up. The bound is in the EIF's environment, so it is measured.
+  billingMaxRegistrations = 4194304;
+
   buildEnclaveImage =
     {
       workload,
       pname,
+      billing ? false,
     }:
     let
       version = enclaveBins.${pname}.version;
+      env = [
+        "RUST_LOG=warn"
+        "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+      ]
+      ++ pkgs.lib.optional billing "FLAMINGO_BILLING_MAX_REGISTRATIONS=${toString billingMaxRegistrations}";
       imageName = "flamingo-verifier-${workload}-enclave";
 
       root = pkgs.buildEnv {
@@ -47,10 +57,7 @@ let
         contents = [ root ];
         config = {
           Entrypoint = [ "/bin/${pname}" ];
-          Env = [
-            "RUST_LOG=warn"
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-          ];
+          Env = env;
         };
       };
 
@@ -79,10 +86,7 @@ let
         copyToRoot = root;
         copyToRootWithClosure = true;
         entrypoint = "/bin/${pname}";
-        env = ''
-          RUST_LOG=warn
-          SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
-        '';
+        env = pkgs.lib.concatMapStrings (var: "${var}\n") env;
       };
     in
     {
@@ -94,8 +98,17 @@ let
     workload = "verifier";
     pname = "verifier-enclave";
   };
+  # Bills under WIP-107, so it is only ready once its host follows a Billing Contract.
+  # TODO: Make this the only verifier image once every environment has a Billing Contract.
+  verifierBilling = buildEnclaveImage {
+    workload = "verifier";
+    pname = "verifier-enclave";
+    billing = true;
+  };
 in
 {
   verifier-oci = verifier.oci;
   verifier-eif = verifier.eif;
+  verifier-billing-oci = verifierBilling.oci;
+  verifier-billing-eif = verifierBilling.eif;
 }

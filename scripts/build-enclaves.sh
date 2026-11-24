@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Needs x86_64-linux. Nitro hardware is only needed to run.
 #
-# Usage: scripts/build-enclaves.sh [--workload <name>] [output-dir]
+# Usage: scripts/build-enclaves.sh [--workload <name>] [--billing] [output-dir]
 #        (workload defaults to verifier, output-dir to target/eif)
 #
 # Outputs in <output-dir>:
@@ -20,19 +20,23 @@ set -euo pipefail
 
 # A new workload is an entry here plus a `<name>-eif` output in flake.nix.
 WORKLOADS=("verifier")
+# Workloads with a `<name>-billing-eif` output, which enforces WIP-107 billing.
+BILLING_WORKLOADS=("verifier")
 
 usage() {
   printf '%s\n' \
-    "Usage: scripts/build-enclaves.sh [--workload <name>] [output-dir]" \
+    "Usage: scripts/build-enclaves.sh [--workload <name>] [--billing] [output-dir]" \
     "" \
     "Build a workload's enclave EIF and emit its PCR measurements." \
     "" \
     "Options:" \
     "  --workload <name>  Which enclave to build: ${WORKLOADS[*]} (default verifier)." \
+    "  --billing          Build the image that enforces WIP-107 billing: ${BILLING_WORKLOADS[*]}." \
     "  -h, --help         Show this help."
 }
 
 workload="verifier"
+billing=false
 out_dir="target/eif"
 output_dir_provided=false
 while (( $# > 0 )); do
@@ -44,6 +48,9 @@ while (( $# > 0 )); do
       fi
       workload="$2"
       shift
+      ;;
+    --billing)
+      billing=true
       ;;
     -h|--help)
       usage
@@ -70,6 +77,16 @@ if [[ ! " ${WORKLOADS[*]} " == *" $workload "* ]]; then
   exit 2
 fi
 
+if [[ "$billing" == "true" && ! " ${BILLING_WORKLOADS[*]} " == *" $workload "* ]]; then
+  echo "[ERROR] $workload has no billing image (expected one of: ${BILLING_WORKLOADS[*]})" >&2
+  exit 2
+fi
+# Both variants write the same file names, so releases and deployments handle them alike.
+output="$workload"
+if [[ "$billing" == "true" ]]; then
+  output="$workload-billing"
+fi
+
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -84,16 +101,16 @@ out_dir="$(cd "$out_dir" && pwd)"
 # --no-update-lock-file on the flake calls below: an input added to flake.nix without a
 # matching `nix flake update` would otherwise be resolved to whatever upstream serves right
 # now, and the lock silently rewritten. The PCRs must follow the committed lock or nothing.
-echo "Building reproducible $workload OCI image..."
-if ! oci_store=$(nix build ".#${workload}-oci" --no-update-lock-file --no-link --print-out-paths); then
+echo "Building reproducible $output OCI image..."
+if ! oci_store=$(nix build ".#${output}-oci" --no-update-lock-file --no-link --print-out-paths); then
   echo >&2
   echo "[ERROR] OCI image build failed; the error above says why. A 'platform" >&2
   echo "        mismatch' for x86_64-linux means this host needs a remote builder." >&2
   exit 1
 fi
 
-echo "Building $workload EIF..."
-if ! eif_store=$(nix build ".#${workload}-eif" --no-update-lock-file --no-link --print-out-paths); then
+echo "Building $output EIF..."
+if ! eif_store=$(nix build ".#${output}-eif" --no-update-lock-file --no-link --print-out-paths); then
   echo >&2
   echo "[ERROR] EIF build failed; the error above says why." >&2
   exit 1
